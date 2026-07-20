@@ -17,17 +17,19 @@ pub const TASK_EVENT_CHANNEL: &str = "agent-control://task-event";
 /// into the events table (live UI) and the audit table (permanent trace),
 /// emitting a Tauri event per line so the Runner page updates in real time.
 ///
-/// Schema note: the `type` discriminator on each JSONL line and the
-/// `thread.started` / `turn.started` / `turn.failed` / `error` event
-/// shapes below were confirmed against a live `codex exec --json` run
-/// (codex-cli 0.144.4). This machine's Codex is configured against VF's
-/// internal model gateway and requires VF_API_KEY, which is not available
-/// in an unattended shell, so a *successful* turn with tool-call item
-/// events could not be observed end-to-end while building this adapter.
-/// The parser below is intentionally defensive: any `type` it does not
-/// recognize is still surfaced (never silently dropped) as a generic
-/// event, so it degrades gracefully rather than breaking if production
-/// turns emit event shapes beyond what was observed here.
+/// Schema note: verified end-to-end on 2026-07-20 against a live
+/// authenticated `codex exec --json` turn through the VF proxy
+/// (codex-cli 0.144.4). Observed shapes:
+///   thread.started {thread_id}
+///   turn.started
+///   item.started / item.completed {item: {id, type, command,
+///       aggregated_output, exit_code, status}}          (command_execution)
+///   item.completed {item: {type: "agent_message", text}}
+///   turn.completed {usage: {input_tokens, cached_input_tokens,
+///       output_tokens, reasoning_output_tokens}}
+///   turn.failed {error: {message}} / error {message}
+/// The parser stays defensive: any unrecognized `type` is still surfaced
+/// (never silently dropped) as a generic event.
 pub async fn spawn_and_stream(app: AppHandle, db: Db, task_id: String) {
     if let Err(err) = run(&app, &db, &task_id).await {
         let message = err.to_string();
@@ -134,6 +136,13 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // The VF model proxy in ~/.codex/config.toml reads VF_API_KEY from the
+    // environment. GUI launches don't inherit shell env, so inject it from
+    // the Keychain for the child process only.
+    if let Some(vf_key) = super::resolve_vf_api_key() {
+        command.env("VF_API_KEY", vf_key);
+    }
+
     let mut child = command.spawn().map_err(|err| {
         crate::error::AppError::Io(std::io::Error::other(format!(
             "failed to start '{binary} exec': {err}"
@@ -204,9 +213,15 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                         );
                     }
                     "turn.completed" => {
+                        // Token usage arrives nested in usage{} on the
+                        // turn.completed event (verified live schema).
+                        let tokens = extract_turn_usage(&value);
+                        if let Some(tokens) = tokens {
+                            let _ = orchestrator::accrue_cost(db, task_id, tokens);
+                        }
                         record(
                             app, db, task_id, "step_completed", "model_call", "Turn completed",
-                            value, None, None,
+                            value, tokens, None,
                         );
                     }
                     "turn.failed" | "error" => {
@@ -222,6 +237,51 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                             value,
                             None,
                             None,
+                        );
+                    }
+                    t if t.starts_with("item.") => {
+                        // item.* events carry the payload nested under
+                        // `item` (verified live schema). Agent messages and
+                        // command executions get first-class treatment.
+                        let item_type = value
+                            .get("item")
+                            .and_then(|i| i.get("type"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+
+                        let (event_kind, audit_kind, summary_text) = match item_type {
+                            "agent_message" => {
+                                let text = value
+                                    .get("item")
+                                    .and_then(|i| i.get("text"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("(empty agent message)");
+                                ("agent_message", "output", truncate(text, 300))
+                            }
+                            "command_execution" => {
+                                let cmd = value
+                                    .get("item")
+                                    .and_then(|i| i.get("command"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("(command)");
+                                let exit = value
+                                    .get("item")
+                                    .and_then(|i| i.get("exit_code"))
+                                    .and_then(Value::as_i64);
+                                let label = match (t, exit) {
+                                    ("item.completed", Some(code)) => {
+                                        format!("$ {} (exit {})", truncate(cmd, 200), code)
+                                    }
+                                    _ => format!("$ {}", truncate(cmd, 200)),
+                                };
+                                ("tool_call", "tool_call", label)
+                            }
+                            other => ("tool_call", "tool_call", format!("[{t}] {other}")),
+                        };
+
+                        record(
+                            app, db, task_id, event_kind, audit_kind, &summary_text, value,
+                            None, None,
                         );
                     }
                     t if is_tool_shaped(t) => {
@@ -376,6 +436,26 @@ fn extract_token_count(value: &Value) -> Option<i64> {
         }
     }
     None
+}
+
+/// turn.completed usage: {input_tokens, cached_input_tokens, output_tokens,
+/// reasoning_output_tokens} — total spend is input + output (reasoning is
+/// already included in output per the Codex accounting).
+fn extract_turn_usage(value: &Value) -> Option<i64> {
+    let usage = value.get("usage")?;
+    let input = usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let output = usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let total = input + output;
+    if total > 0 { Some(total) } else { None }
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        let cut: String = text.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{cut}...")
+    }
 }
 
 fn summarize(value: &Value, event_type: &str) -> String {
