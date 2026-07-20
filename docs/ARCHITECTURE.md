@@ -1,7 +1,7 @@
-# Agentic OS — Local-First Architecture v1.1
+# Agentic OS — Local-First Architecture v1.2
 
-Status: draft for review · Date: 2026-07-20 (v1.0: 2026-07-15) · Supersedes: "Fabio Agentic OS — Reference Architecture v0.1" (evaluated below)
-Companion document: `docs/UI-SPEC.md` (developer-ready UI specification)
+Status: draft for review · Date: 2026-07-20 (v1.0: 2026-07-15 · v1.1 same day · v1.2 adds memory forgetting + retrieval ranking) · Supersedes: "Fabio Agentic OS — Reference Architecture v0.1" (evaluated below)
+Companion documents: `docs/UI-SPEC.md` (UI specification) · `docs/MEMORY-SPEC.md` (second brain / memory implementation spec)
 The app was renamed from "Agent Control" to "Agentic OS" on 2026-07-20; the repository directory and internal identifiers (bundle id, crate name) are unchanged.
 
 ## 1. Purpose and hard constraints
@@ -201,6 +201,12 @@ Tasks and workflows are tagged with a category; Usage aggregates time and cost p
 
 No LLM writes directly to persistent memory. Pipeline (from v0.1, kept): extract candidate facts → classify type + sensitivity → dedup → source/confidence check → retention + consent policy → **user approval for `personal`/`family`/`finance` and for any cross-domain fact** → persist → provenance links. Writes land as git-diffable vault changes: the Memory UI shows diffs, not silent mutations. Rationale: ClawHavoc-style memory poisoning becomes a reviewable diff, not a silent compromise.
 
+**Forgetting and ranking (v1.2, full spec in `docs/MEMORY-SPEC.md`).** Three mechanisms adopted from 2026 agent-memory field practice ("retrieval quality rots within months" without them):
+
+1. **TTL on raw episodes** — meeting transcripts and run-trace episodes expire (default 90/30 days) and move to `vault/_archive/` via git; facts extracted from them survive independently.
+2. **Staleness on semantic memory** — every fact carries `stale_after_days`, `last_confirmed`, and `confirmations`; unconfirmed facts flip to `stale` (flagged, never deleted). A stale fact retrieved into a side-effectful task is tagged UNVERIFIED and the Reviewer step must confirm or strip it before the action runs. Decisions never age out — they are superseded (`valid_until` + replacement, both kept).
+3. **Age-and-trust-sensitive retrieval** — ranking = 0.60·relevance (BM25) + 0.25·recency (per-type half-life decay) + 0.15·trust (confidence × confirmations), −0.30 stale penalty; storage-level domain filter before any scoring; 4 000-token context budget with per-run trace citations of every injected memory.
+
 ## 8. Policy and approval matrix (v1 defaults)
 
 | Action | Risk | Behavior |
@@ -281,7 +287,7 @@ agentic-os/
 
 **Phase 1 — Core OS (weeks 1–3).** Task model + orchestrator state machine in SQLite; Codex harness adapter (`codex exec --json`) with live event streaming in Runner; run history; append-only audit; policy engine v0 (static matrix) + Approval Inbox; token/cost capture per run. *Read-only tool grants only.* Acceptance: a prompt or a Catalog routine runs through Runner, streams events, parks on an approval, resumes, and leaves a complete trace.
 
-**Phase 2 — Memory and context (weeks 4–6).** Markdown vault + FTS index; memory write pipeline with diff approvals; context builder v1; decision log; procedural memory wired = Catalog manages skills/AGENTS.md the harnesses consume; Memory UI; **"Distill to skill" action on completed runs** (v1.1). Acceptance: a run cites vault sources in its trace; a memory write appears as an approvable diff; a completed run can be distilled into a skill that appears in Catalog with provenance.
+**Phase 2 — Memory and context (weeks 4–6).** Full second-brain implementation per `docs/MEMORY-SPEC.md`, milestones M1–M4: vault + index (M1), write pipeline with gate/dedup/approvals (M2), TTL/staleness/ranking (M3), context builder + "Distill to skill" (M4). Acceptance: the M-level criteria in MEMORY-SPEC §11 — including: a run cites in its trace exactly which memories were injected; a memory write appears as an approvable diff; a fake secret is gate-rejected; a stale fact ranks below a fresh one and gets tagged UNVERIFIED in side-effectful tasks; a completed run distills into a Catalog skill with provenance.
 
 **Phase 3 — Workflows and scheduler (weeks 7–9).** Workflow definitions (TOML) + scheduler (in-app + launchd wake, catch-up on start) + native notifications; **Today brief as the single delivery surface for all routines + Activity digest of auto-approved actions** (v1.1); **domain ontology files + time-mix reporting in Usage** (v1.1). First three workflows, all on local data (no IT approvals needed): **(a) Daily Brief** from local sources (git repos status, open tasks, vault decisions, research feeds); **(b) Meeting → Memory** (intelligent-transcription-system output → summary, decisions, action items → vault + follow-up draft); **(c) Newsletter QA** (campaign HTML vs brand style-guide → violations report). Acceptance: all three run scheduled or on-demand with history and costs; their output lands in Today, not in separate channels.
 
