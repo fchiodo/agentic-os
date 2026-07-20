@@ -87,6 +87,37 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
         .map_err(Into::into)
     })?;
 
+    // Context builder (MEMORY-SPEC §7): inject domain-scoped memories as
+    // data ahead of the goal, and record exactly what the agent was shown.
+    let prompt = match crate::memory::context::build_memory_context(
+        db,
+        &summary.goal,
+        summary.domain.as_str(),
+    ) {
+        Ok(context) if !context.prompt_block.is_empty() => {
+            record(
+                app,
+                db,
+                task_id,
+                "context",
+                "context",
+                &format!("Injected {} memories into context", context.injected_paths.len()),
+                json!({
+                    "injected": context.injected_paths,
+                    "unverified": context.unverified_paths,
+                }),
+                None,
+                None,
+            );
+            format!("{}{}", summary.goal, context.prompt_block)
+        }
+        Ok(_) => summary.goal.clone(),
+        Err(err) => {
+            log::warn!("memory context build failed for task {task_id}: {err}");
+            summary.goal.clone()
+        }
+    };
+
     let binary = super::resolve_binary("codex");
     let mut command = Command::new(&binary);
     command
@@ -97,7 +128,7 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
         .arg(&sandbox_mode)
         .arg("-C")
         .arg(&cwd)
-        .arg(&summary.goal)
+        .arg(&prompt)
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -288,6 +319,35 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
         None,
         None,
     );
+
+    // Run capture (MEMORY-SPEC §4 source 1): a successfully completed run
+    // becomes an episodic memory. Failures never block task completion.
+    if final_status == TaskStatus::Completed {
+        match crate::memory::pipeline::process_run_capture(
+            db,
+            task_id,
+            summary.domain.as_str(),
+            &summary.title,
+            &summary.goal,
+            "completed",
+        ) {
+            Ok(Some(proposal)) => {
+                record(
+                    app,
+                    db,
+                    task_id,
+                    "memory_captured",
+                    "output",
+                    "Run captured to memory",
+                    json!({ "proposalId": proposal.id, "vaultPath": proposal.vault_path, "status": proposal.status }),
+                    None,
+                    None,
+                );
+            }
+            Ok(None) => {}
+            Err(err) => log::warn!("run capture failed for task {task_id}: {err}"),
+        }
+    }
 
     Ok(())
 }

@@ -32,10 +32,14 @@ pub fn control_status(db: State<'_, Db>) -> Result<ControlStatus, String> {
     let spent_today_usd = orchestrator::spent_today_usd(&db).map_err(|e| e.to_string())?;
     let audit_chain_ok = audit::verify_chain(&db).map_err(|e| e.to_string())?.ok;
 
+    let pending_memory_proposals =
+        memory::proposals::list(&db, Some("pending"))
+            .map(|p| p.len() as i64)
+            .unwrap_or(0);
+
     Ok(ControlStatus {
         pending_approvals,
-        // Memory proposals land in Phase 2; always 0 until then.
-        pending_memory_proposals: 0,
+        pending_memory_proposals,
         running_tasks,
         spent_today_usd,
         audit_chain_ok,
@@ -258,4 +262,129 @@ pub fn audit_trace(db: State<'_, Db>, run_id: String) -> Result<Vec<TraceEntry>,
 #[tauri::command]
 pub fn audit_verify_chain(db: State<'_, Db>) -> Result<AuditChainStatus, String> {
     audit::verify_chain(&db).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Memory commands (Phase 2 — Second Brain)
+// ---------------------------------------------------------------------------
+
+use crate::memory;
+use crate::memory::{
+    MaintenanceResult, ManualSaveRequest, MemoryReadResult, MemorySearchOpts, MemoryWriteProposal,
+    ProposalDecideRequest, ReindexResult, ScoredMemory, VaultNode,
+};
+
+#[tauri::command]
+pub fn memory_tree(domain: Option<String>) -> Result<Vec<VaultNode>, String> {
+    memory::vault::ensure_vault().map_err(|e| e.to_string())?;
+    memory::vault::tree(domain.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_read(db: State<'_, Db>, path: String) -> Result<MemoryReadResult, String> {
+    memory::vault::ensure_vault().map_err(|e| e.to_string())?;
+    let (content, _full_path) =
+        memory::vault::read_file(&path).map_err(|e| e.to_string())?;
+    let git_last_commit = memory::vault::git_last_commit(&path);
+
+    let (fm, body) = match memory::frontmatter::parse(&content) {
+        Some((fm, body)) => (Some(fm), body),
+        None => (None, content),
+    };
+
+    // Real status from the index (stale/expired flags live there, driven
+    // by the maintenance sweep); active for unindexed files.
+    let status = fm
+        .as_ref()
+        .and_then(|f| memory::index::get_by_id(&db, &f.id).ok().flatten())
+        .map(|row| row.status)
+        .unwrap_or_else(|| "active".to_string());
+
+    Ok(MemoryReadResult {
+        frontmatter: fm,
+        markdown: body,
+        status,
+        git_last_commit,
+    })
+}
+
+#[tauri::command]
+pub fn memory_search(
+    db: State<'_, Db>,
+    query: String,
+    domain: Option<String>,
+    opts: Option<MemorySearchOpts>,
+) -> Result<Vec<ScoredMemory>, String> {
+    let search_opts = opts.unwrap_or(MemorySearchOpts {
+        include_stale: true,
+        limit: Some(8),
+    });
+    memory::retrieval::search(&db, &query, domain.as_deref(), &search_opts)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_save_manual(
+    db: State<'_, Db>,
+    request: ManualSaveRequest,
+) -> Result<MemoryWriteProposal, String> {
+    memory::pipeline::process_manual_save(&db, &request, "manual").map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_proposals_list(
+    db: State<'_, Db>,
+    status: Option<String>,
+) -> Result<Vec<MemoryWriteProposal>, String> {
+    memory::proposals::list(&db, status.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_proposals_decide(
+    db: State<'_, Db>,
+    request: ProposalDecideRequest,
+) -> Result<MemoryWriteProposal, String> {
+    memory::proposals::decide(&db, &request.id, &request.decision).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_confirm(db: State<'_, Db>, id: String) -> Result<(), String> {
+    memory::index::confirm(&db, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_reindex(db: State<'_, Db>) -> Result<ReindexResult, String> {
+    memory::vault::ensure_vault().map_err(|e| e.to_string())?;
+    memory::index::reindex(&db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_maintenance_run(db: State<'_, Db>) -> Result<MaintenanceResult, String> {
+    memory::vault::ensure_vault().map_err(|e| e.to_string())?;
+    memory::maintenance::run_sweep(&db).map_err(|e| e.to_string())
+}
+
+/// Distill a completed run into a candidate skill (MEMORY-SPEC §4 source 4).
+/// Always returns a pending proposal — approval happens in the Memory page.
+#[tauri::command]
+pub fn skills_distill(db: State<'_, Db>, task_id: String) -> Result<MemoryWriteProposal, String> {
+    let detail = orchestrator::get_detail(&db, &task_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("task {task_id} not found"))?;
+
+    if detail.summary.status != TaskStatus::Completed {
+        return Err("only completed tasks can be distilled into skills".to_string());
+    }
+
+    let step_titles: Vec<String> = detail.steps.iter().map(|s| s.title.clone()).collect();
+
+    memory::pipeline::process_skill_distill(
+        &db,
+        &task_id,
+        detail.summary.domain.as_str(),
+        &detail.summary.title,
+        &detail.summary.goal,
+        &step_titles,
+    )
+    .map_err(|e| e.to_string())
 }

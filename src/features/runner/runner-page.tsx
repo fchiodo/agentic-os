@@ -3,6 +3,7 @@ import { MetricCard } from '@/components/ui/metric-card'
 import { SectionEmptyState } from '@/components/ui/section-empty-state'
 import { TaskCard } from '@/components/ui/task-card'
 import { useApprovals, useDecideApproval } from '@/features/approvals/hooks'
+import { useSkillsDistill } from '@/features/memory/hooks'
 import {
   useCancelTask,
   useSubmitTask,
@@ -61,10 +62,12 @@ function isToday(iso: string): boolean {
 function TaskCardContainer({
   onCancel,
   onDecide,
+  onDistill,
   taskId,
 }: {
   onCancel: (id: string) => void
   onDecide: (id: string, decision: 'approve' | 'deny', note?: string) => void
+  onDistill: (id: string) => void
   taskId: string
 }) {
   const { data: task } = useTaskDetail(taskId)
@@ -86,6 +89,7 @@ function TaskCardContainer({
         approval ? (decision, note) => onDecide(approval.id, decision, note) : undefined
       }
       onCancel={() => onCancel(taskId)}
+      onDistill={() => onDistill(taskId)}
       task={task}
     />
   )
@@ -96,6 +100,7 @@ export function RunnerPage() {
   const submitMutation = useSubmitTask()
   const cancelMutation = useCancelTask()
   const decideMutation = useDecideApproval()
+  const distillMutation = useSkillsDistill()
   const [goal, setGoal] = useState('')
   const [domain, setDomain] = useState<Domain>('work')
 
@@ -155,6 +160,7 @@ export function RunnerPage() {
                 key={task.id}
                 onCancel={(id) => cancelMutation.mutate(id)}
                 onDecide={(id, decision, note) => decideMutation.mutate({ id, decision, note })}
+                onDistill={(id) => distillMutation.mutate(id)}
                 taskId={task.id}
               />
             ))

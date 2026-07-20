@@ -124,3 +124,5 @@ impl Db {
         })
     }
 }
+// Memory tables are added by memory::index::ensure_tables() on first access.
+// They live in the same DB but are managed by the memsvc module.

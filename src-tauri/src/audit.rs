@@ -166,3 +166,11 @@ pub fn read_trace(db: &Db, run_id: &str) -> AppResult<Vec<TraceEntry>> {
         Ok(entries)
     })
 }
+
+/// Compute SHA-256 hex digest of content. Used by the memory index for
+/// drift detection (MEMORY-SPEC §3).
+pub fn compute_content_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(content.as_bytes());
+    format!("{:x}", hash)
+}

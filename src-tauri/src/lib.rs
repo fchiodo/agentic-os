@@ -6,6 +6,7 @@ mod db;
 mod discovery;
 mod error;
 mod harness;
+mod memory;
 mod models;
 mod orchestrator;
 mod policy;
@@ -33,7 +34,29 @@ pub fn run() {
             let db_path = app_data_dir.join("agent-control.db");
             let db = Db::open(&db_path)
                 .unwrap_or_else(|err| panic!("failed to open app database at {db_path:?}: {err}"));
-            app.manage(db);
+            app.manage(db.clone());
+
+            // Memory maintenance scheduler (MEMORY-SPEC §6): sweep on app
+            // start, then every 24h while the app runs. Failures are logged,
+            // never fatal — the manual memory_maintenance_run command stays
+            // available as fallback.
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match memory::maintenance::run_sweep(&db) {
+                        Ok(result) => {
+                            if result.expired > 0 || result.marked_stale > 0 {
+                                log::info!(
+                                    "memory maintenance: {} expired, {} marked stale",
+                                    result.expired,
+                                    result.marked_stale
+                                );
+                            }
+                        }
+                        Err(err) => log::error!("memory maintenance sweep failed: {err}"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+                }
+            });
 
             Ok(())
         })
@@ -51,6 +74,16 @@ pub fn run() {
             commands::audit_runs,
             commands::audit_trace,
             commands::audit_verify_chain,
+            commands::memory_tree,
+            commands::memory_read,
+            commands::memory_search,
+            commands::memory_save_manual,
+            commands::memory_proposals_list,
+            commands::memory_proposals_decide,
+            commands::memory_confirm,
+            commands::memory_reindex,
+            commands::memory_maintenance_run,
+            commands::skills_distill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
