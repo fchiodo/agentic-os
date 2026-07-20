@@ -1,4 +1,4 @@
-# Agent Control — UI Specification v1.0 (developer handoff)
+# Agentic OS — UI Specification v1.0 (developer handoff)
 
 Companion to `docs/ARCHITECTURE.md` v1.1. Scope: everything the frontend needs to build Phases 1–3. Stack is unchanged: React 19 + TypeScript + Vite, TanStack Query, Zustand, react-router (hash router), Tauri 2 IPC. No new UI framework; extend the existing design vocabulary in `src/index.css`.
 

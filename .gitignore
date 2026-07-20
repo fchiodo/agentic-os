@@ -34,3 +34,6 @@ output
 *.njsproj
 *.sln
 *.sw?
+
+# Claude config
+.claude/

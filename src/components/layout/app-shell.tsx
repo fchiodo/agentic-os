@@ -4,19 +4,23 @@ import {
   BrainCircuit,
   Blocks,
   FolderOpen,
+  History,
   RefreshCw,
   ServerCog,
+  ShieldCheck,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { MetricCard } from '@/components/ui/metric-card'
+import { NavBadge } from '@/components/ui/nav-badge'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { refreshDashboardSnapshot } from '@/features/dashboard/api'
 import {
   dashboardSnapshotQueryKey,
   useDashboardSnapshot,
 } from '@/features/dashboard/use-dashboard-snapshot'
+import { useControlStatus } from '@/features/control/use-control-status'
 import { formatCompactNumber, formatRelativeTime } from '@/lib/format'
 
 const navigation = [
@@ -29,13 +33,20 @@ const navigation = [
   {
     icon: Blocks,
     label: 'Runner',
-    summary: 'Prompt and routine staging',
+    summary: 'Live tasks and history',
     to: '/runner',
+  },
+  {
+    badgeKey: 'pendingApprovals' as const,
+    icon: ShieldCheck,
+    label: 'Approvals',
+    summary: 'Actions waiting on you',
+    to: '/approvals',
   },
   {
     icon: Activity,
     label: 'Usage',
-    summary: 'Tokens, workspaces, threads',
+    summary: 'Tokens, workspaces, cost',
     to: '/usage',
   },
   {
@@ -43,6 +54,12 @@ const navigation = [
     label: 'Memory',
     summary: 'Persistent context and notes',
     to: '/memory',
+  },
+  {
+    icon: History,
+    label: 'Audit',
+    summary: 'Run traces and hash chain',
+    to: '/audit',
   },
 ] as const
 
@@ -69,7 +86,7 @@ export function AppShell() {
   const location = useLocation()
   const queryClient = useQueryClient()
   const { data, error, isFetching, isLoading } = useDashboardSnapshot()
-  const showsDataSources = location.pathname === '/catalog'
+  const { data: controlStatus } = useControlStatus()
   const [isManualRefreshActive, setIsManualRefreshActive] = useState(false)
   const [refreshToast, setRefreshToast] = useState<RefreshToast | null>(null)
   const refreshMutation = useMutation({
@@ -193,13 +210,15 @@ export function AppShell() {
           </div>
           <div>
             <p className="eyebrow">Local Control Plane</p>
-            <h1>Agent Control</h1>
+            <h1>Agentic OS</h1>
           </div>
         </div>
 
         <nav className="sidebar-nav" aria-label="Primary navigation">
           {navigation.map((item) => {
             const Icon = item.icon
+            const badgeCount =
+              'badgeKey' in item && controlStatus ? controlStatus[item.badgeKey] : 0
 
             return (
               <NavLink
@@ -214,6 +233,7 @@ export function AppShell() {
                   <span className="nav-label">{item.label}</span>
                   <span className="nav-summary">{item.summary}</span>
                 </span>
+                <NavBadge count={badgeCount} />
               </NavLink>
             )
           })}
@@ -312,35 +332,10 @@ export function AppShell() {
           </section>
         ) : null}
 
-        <div className={showsDataSources ? 'main-grid' : 'main-grid main-grid--single'}>
+        <div className="main-grid main-grid--single">
           <main className="page-content">
             <Outlet />
           </main>
-
-          {showsDataSources ? (
-            <aside className="inspector">
-              <section className="surface">
-                <div className="panel-heading">
-                  <h2>Data sources</h2>
-                </div>
-
-                <ul className="source-list">
-                  {data?.sources.map((source) => (
-                    <li key={source.id} className="source-row">
-                      <div>
-                        <p className="row-title">{source.label}</p>
-                        <p className="row-subtle">{source.path}</p>
-                      </div>
-                      <StatusBadge
-                        label={source.status}
-                        tone={source.status === 'available' ? 'success' : 'warning'}
-                      />
-                    </li>
-                  )) ?? <li className="row-subtle">Waiting for source inventory.</li>}
-                </ul>
-              </section>
-            </aside>
-          ) : null}
         </div>
       </div>
 

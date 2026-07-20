@@ -21,7 +21,33 @@ const MAX_MANIFEST_DEPTH: usize = 4;
 const MAX_SUMMARY_BYTES: u64 = 512 * 1024;
 const ALLOWLIST_CONFIG_RELATIVE: &str = ".agent-control/scan-roots.json";
 const CANONICAL_DIRS: [&str; 6] = ["agents", "prompts", "routines", "skills", "tools", "workflows"];
-const EXCLUDED_DISCOVERY_DIRS: [&str; 1] = ["Library/CloudStorage"];
+// Directory names that are never themselves a catalog entry (build output,
+// dependency trees, VCS internals) even when they sit directly inside a
+// canonical dir like `agents/`. Mirrors the WalkDir exclusion in
+// `should_visit`, which does not apply here because this scan uses a flat
+// `fs::read_dir` rather than a recursive walk.
+const NOISE_CHILD_DIR_NAMES: [&str; 9] = [
+    ".git", ".idea", ".next", ".turbo", "coverage", "dist", "node_modules", "target", "venv",
+];
+// Project-plumbing filenames that are never themselves an agent, skill,
+// routine, prompt, or workflow, even though their extension (.json/.yaml/
+// .toml) otherwise matches `is_supported_file_for_kind`.
+const NOISE_CHILD_FILE_NAMES: [&str; 9] = [
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "tsconfig.json",
+    "pyproject.toml",
+    "poetry.lock",
+    "Cargo.toml",
+    "Cargo.lock",
+];
+const ROOT_INSTRUCTION_FILES: [(&str, &str); 3] = [
+    ("AGENTS.md", "local"),
+    ("CLAUDE.md", "claude"),
+    ("GEMINI.md", "gemini"),
+];
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct MarketplaceIndex {
@@ -266,17 +292,8 @@ fn run_codex_detector(home_dir: &Path, codex_home: &Path, workspace_roots: &[Pat
     items
 }
 
-fn run_claude_detector(home_dir: &Path, claude_home: &Path, workspace_roots: &[PathBuf]) -> Vec<CatalogItem> {
-    let mut items = discover_named_documents(
-        workspace_roots,
-        "CLAUDE.md",
-        CatalogKind::Prompt,
-        home_dir,
-        "Claude instructions",
-        "claude",
-        "claude",
-        0.96,
-    );
+fn run_claude_detector(home_dir: &Path, claude_home: &Path, _workspace_roots: &[PathBuf]) -> Vec<CatalogItem> {
+    let mut items = Vec::new();
 
     let installed_plugins = claude_home.join("plugins/installed_plugins.json");
     items.extend(discover_claude_plugins(
@@ -289,16 +306,9 @@ fn run_claude_detector(home_dir: &Path, claude_home: &Path, workspace_roots: &[P
 }
 
 fn run_gemini_detector(home_dir: &Path, workspace_roots: &[PathBuf]) -> Vec<CatalogItem> {
-    discover_named_documents(
-        workspace_roots,
-        "GEMINI.md",
-        CatalogKind::Prompt,
-        home_dir,
-        "Gemini instructions",
-        "gemini",
-        "gemini",
-        0.96,
-    )
+    let _ = home_dir;
+    let _ = workspace_roots;
+    Vec::new()
 }
 
 fn run_mcp_detector(home_dir: &Path, claude_home: &Path, workspace_roots: &[PathBuf]) -> Vec<CatalogItem> {
@@ -355,20 +365,14 @@ fn run_n8n_detector(home_dir: &Path, n8n_home: &Path, workspace_roots: &[PathBuf
 fn run_local_agents_detector(home_dir: &Path, workspace_roots: &[PathBuf]) -> Vec<CatalogItem> {
     let mut items = Vec::new();
 
-    items.extend(discover_named_documents(
-        workspace_roots,
-        "AGENTS.md",
-        CatalogKind::Agent,
-        home_dir,
-        "Agent instructions",
-        "local",
-        "local-agents",
-        0.88,
-    ));
+    for instruction_root in resolve_instruction_workspace_roots(workspace_roots) {
+        if let Some(item) = discover_root_instruction_agent(&instruction_root, home_dir) {
+            items.push(item);
+        }
+    }
 
     for workspace_root in workspace_roots {
         let group = workspace_display_name(workspace_root);
-
         items.extend(discover_skill_documents(
             workspace_root,
             home_dir,
@@ -430,6 +434,131 @@ fn run_local_agents_detector(home_dir: &Path, workspace_roots: &[PathBuf]) -> Ve
     }
 
     items
+}
+
+fn resolve_instruction_workspace_roots(workspace_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for workspace_root in workspace_roots {
+        candidates.extend(find_instruction_root_candidates(workspace_root));
+    }
+
+    collapse_nested_roots(candidates)
+}
+
+fn find_instruction_root_candidates(workspace_root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if !workspace_root.exists() {
+        return candidates;
+    }
+
+    for entry in WalkDir::new(workspace_root)
+        .max_depth(MAX_SCAN_DEPTH)
+        .into_iter()
+        .filter_entry(should_visit)
+        .flatten()
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+
+        if has_root_instruction_files(entry.path()) {
+            candidates.push(entry.path().to_path_buf());
+        }
+    }
+
+    collapse_nested_roots(candidates)
+}
+
+fn discover_root_instruction_agent(workspace_root: &Path, home_dir: &Path) -> Option<CatalogItem> {
+    let mut docs = ROOT_INSTRUCTION_FILES
+        .iter()
+        .filter_map(|(file_name, provider)| {
+            let path = workspace_root.join(file_name);
+            path.is_file()
+                .then(|| (path, *provider, (*file_name).to_ascii_lowercase()))
+        })
+        .collect::<Vec<_>>();
+
+    if docs.is_empty() {
+        return None;
+    }
+
+    docs.sort_by_key(|(path, _, _)| {
+        if path.file_name().map(|value| value == "AGENTS.md").unwrap_or(false) {
+            0
+        } else if path
+            .file_name()
+            .map(|value| value == "CLAUDE.md")
+            .unwrap_or(false)
+        {
+            1
+        } else {
+            2
+        }
+    });
+
+    let (primary_path, primary_provider, _) = &docs[0];
+    let display_name = workspace_display_name(workspace_root);
+    let summary = docs.iter().fold(None, |current, (path, _, _)| {
+        choose_richer_option(current, extract_markdown_summary(path))
+    });
+    let tags = docs
+        .iter()
+        .map(|(_, _, file_name)| file_name.clone())
+        .collect::<Vec<_>>();
+    let provider = if docs.len() == 1 {
+        (*primary_provider).to_string()
+    } else {
+        "multi".to_string()
+    };
+
+    Some(build_item(
+        CatalogKind::Agent,
+        primary_path,
+        home_dir,
+        display_name.clone(),
+        display_name.clone(),
+        summary.or_else(|| Some("Root workspace instructions discovered locally.".into())),
+        format!("{display_name} agent"),
+        display_name,
+        tags,
+        None,
+        Some("workspace-instructions".into()),
+        provider,
+        "local-agents".into(),
+        Some(display_path(primary_path, home_dir)),
+        0.96,
+    ))
+}
+
+fn has_root_instruction_files(path: &Path) -> bool {
+    ROOT_INSTRUCTION_FILES
+        .iter()
+        .any(|(file_name, _)| path.join(file_name).is_file())
+}
+
+fn collapse_nested_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut unique = roots
+        .into_iter()
+        .map(|root| fs::canonicalize(&root).unwrap_or(root))
+        .collect::<Vec<_>>();
+    unique.sort_by(|left, right| {
+        component_depth(left)
+            .cmp(&component_depth(right))
+            .then_with(|| left.cmp(right))
+    });
+    unique.dedup();
+
+    let mut collapsed = Vec::new();
+    for root in unique {
+        if collapsed.iter().any(|existing: &PathBuf| root.starts_with(existing)) {
+            continue;
+        }
+        collapsed.push(root);
+    }
+
+    collapsed
 }
 
 fn run_custom_rules_detector(home_dir: &Path, workspace_roots: &[PathBuf]) -> Vec<CatalogItem> {
@@ -775,59 +904,6 @@ fn discover_direct_items(
     items
 }
 
-fn discover_named_documents(
-    workspace_roots: &[PathBuf],
-    file_name: &str,
-    kind: CatalogKind,
-    home_dir: &Path,
-    origin_label: &str,
-    provider: &str,
-    detector: &str,
-    confidence: f64,
-) -> Vec<CatalogItem> {
-    let mut items = Vec::new();
-
-    for workspace_root in workspace_roots {
-        let group = workspace_display_name(workspace_root);
-        for entry in WalkDir::new(workspace_root)
-            .max_depth(MAX_SCAN_DEPTH)
-            .into_iter()
-            .filter_entry(should_visit)
-            .flatten()
-        {
-            if !entry.file_type().is_file() || entry.file_name() != file_name {
-                continue;
-            }
-
-            let path = entry.path().to_path_buf();
-            let summary = extract_markdown_summary(&path);
-            let display_name = workspace_display_name(
-                path.parent().unwrap_or(workspace_root),
-            );
-
-            items.push(build_item(
-                kind,
-                &path,
-                home_dir,
-                display_name.clone(),
-                display_name,
-                summary.or_else(|| Some(format!("{origin_label} discovered in the local workspace."))),
-                format!("{group} {}", kind_label(kind).to_lowercase()),
-                group.clone(),
-                infer_extension_tags(&path),
-                None,
-                Some(file_name.to_lowercase()),
-                provider.to_string(),
-                detector.to_string(),
-                Some(display_path(&path, home_dir)),
-                confidence,
-            ));
-        }
-    }
-
-    items
-}
-
 fn discover_workspace_mcp_configs(workspace_root: &Path, home_dir: &Path) -> Vec<CatalogItem> {
     let mut items = Vec::new();
     let candidates = [
@@ -1091,10 +1167,16 @@ fn discover_direct_children_in_named_dirs(
             if name.starts_with('.') {
                 continue;
             }
+            if NOISE_CHILD_FILE_NAMES.contains(&name.as_str()) {
+                continue;
+            }
 
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
+            if file_type.is_dir() && NOISE_CHILD_DIR_NAMES.contains(&name.as_str()) {
+                continue;
+            }
             if file_type.is_file() && !is_supported_file_for_kind(&path, kind) {
                 continue;
             }
@@ -1770,9 +1852,6 @@ fn is_workspace_candidate(path: &Path, home_dir: &Path) -> bool {
     if !path.is_absolute() || !path.is_dir() || path == Path::new("/") || path == home_dir {
         return false;
     }
-    if is_excluded_discovery_path(path, home_dir) {
-        return false;
-    }
     if path.starts_with(home_dir.join(".codex"))
         || path.starts_with(home_dir.join(".claude"))
         || path.starts_with(home_dir.join(".gemini"))
@@ -2357,18 +2436,6 @@ fn component_depth(path: &Path) -> usize {
     path.components().count()
 }
 
-fn is_excluded_discovery_path(path: &Path, home_dir: &Path) -> bool {
-    let canonical = fs::canonicalize(path).ok();
-
-    EXCLUDED_DISCOVERY_DIRS.iter().any(|relative| {
-        let excluded_root = home_dir.join(relative);
-        path.starts_with(&excluded_root)
-            || canonical
-                .as_ref()
-                .is_some_and(|resolved_path| resolved_path.starts_with(&excluded_root))
-    })
-}
-
 fn expand_path(value: &str, home_dir: &Path) -> PathBuf {
     if value == "~" {
         home_dir.to_path_buf()
@@ -2461,6 +2528,43 @@ fn should_visit(entry: &DirEntry) -> bool {
 mod tests {
     use super::*;
 
+    struct TestTree {
+        root: PathBuf,
+    }
+
+    impl TestTree {
+        fn new(label: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("agent-control-{label}-{nonce}"));
+            fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn home(&self) -> PathBuf {
+            self.root.join("home")
+        }
+
+        fn workspace(&self, relative: &str) -> PathBuf {
+            self.home().join(relative)
+        }
+
+        fn write_file(&self, path: &Path, content: &str) {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, content).unwrap();
+        }
+    }
+
+    impl Drop for TestTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
     fn sample_item(kind: CatalogKind, confidence: f64, summary: Option<&str>) -> CatalogItem {
         CatalogItem {
             id: "~/workspace/package.json::demo".into(),
@@ -2480,6 +2584,15 @@ mod tests {
             entrypoint: None,
             confidence,
         }
+    }
+
+    fn collect_instruction_items(home: &Path, workspace_root: &Path) -> Vec<CatalogItem> {
+        let workspace_roots = vec![workspace_root.to_path_buf()];
+        let mut items = Vec::new();
+        items.extend(run_local_agents_detector(home, &workspace_roots));
+        items.extend(run_claude_detector(home, &home.join(".claude"), &workspace_roots));
+        items.extend(run_gemini_detector(home, &workspace_roots));
+        items
     }
 
     #[test]
@@ -2522,7 +2635,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_candidate_excludes_cloud_storage_subtree() {
+    fn workspace_candidate_allows_cloud_storage_subtree() {
         let nonce = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2535,11 +2648,169 @@ mod tests {
         fs::create_dir_all(&excluded).unwrap();
         fs::create_dir_all(&allowed).unwrap();
 
-        assert!(is_excluded_discovery_path(&excluded, &home));
-        assert!(!is_excluded_discovery_path(&allowed, &home));
-        assert!(!is_workspace_candidate(&excluded, &home));
+        assert!(is_workspace_candidate(&excluded, &home));
         assert!(is_workspace_candidate(&allowed, &home));
 
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn nested_instruction_files_under_child_repo_do_not_create_extra_entries() {
+        let tree = TestTree::new("nested-instructions");
+        let workspace = tree.workspace("Documents/project");
+        let child_repo = workspace.join("repo");
+
+        fs::create_dir_all(&workspace).unwrap();
+        tree.write_file(
+            &child_repo.join("AGENTS.md"),
+            "# repo\n\nChild repo instructions.\n",
+        );
+        tree.write_file(
+            &child_repo.join("backend/AGENTS.md"),
+            "# backend\n\nNested backend instructions.\n",
+        );
+        tree.write_file(
+            &child_repo.join("frontend/CLAUDE.md"),
+            "# frontend\n\nNested claude instructions.\n",
+        );
+        tree.write_file(
+            &child_repo.join("tools/GEMINI.md"),
+            "# tools\n\nNested gemini instructions.\n",
+        );
+
+        let items = collect_instruction_items(&tree.home(), &workspace);
+        let agent_items = items
+            .iter()
+            .filter(|item| item.kind == CatalogKind::Agent)
+            .collect::<Vec<_>>();
+
+        assert_eq!(agent_items.len(), 1);
+        assert_eq!(agent_items[0].display_name, "repo");
+        assert_eq!(count_by_kind(&items, CatalogKind::Prompt), 0);
+    }
+
+    #[test]
+    fn root_instruction_files_collapse_to_one_agent_per_workspace() {
+        let tree = TestTree::new("root-instructions");
+        let workspace = tree.workspace("Documents/project");
+
+        tree.write_file(
+            &workspace.join("AGENTS.md"),
+            "# project\n\nRoot AGENTS instructions.\n",
+        );
+        tree.write_file(
+            &workspace.join("CLAUDE.md"),
+            "# project\n\nRoot CLAUDE instructions.\n",
+        );
+        tree.write_file(
+            &workspace.join("GEMINI.md"),
+            "# project\n\nRoot GEMINI instructions.\n",
+        );
+        tree.write_file(
+            &workspace.join("backend/AGENTS.md"),
+            "# backend\n\nNested backend instructions.\n",
+        );
+        tree.write_file(
+            &workspace.join("frontend/CLAUDE.md"),
+            "# frontend\n\nNested frontend instructions.\n",
+        );
+
+        let items = collect_instruction_items(&tree.home(), &workspace);
+        let agent_items = items
+            .iter()
+            .filter(|item| item.kind == CatalogKind::Agent)
+            .collect::<Vec<_>>();
+
+        assert_eq!(agent_items.len(), 1);
+        assert_eq!(count_by_kind(&items, CatalogKind::Prompt), 0);
+        assert_eq!(agent_items[0].display_name, "project");
+    }
+
+    #[test]
+    fn direct_children_scan_skips_node_modules_and_manifest_files() {
+        let tree = TestTree::new("agents-dir-noise");
+        let workspace = tree.workspace("Documents/vf");
+
+        tree.write_file(
+            &workspace.join("agents/node_modules/some-dep/package.json"),
+            "{\"name\": \"some-dep\"}",
+        );
+        tree.write_file(&workspace.join("agents/package.json"), "{\"name\": \"agents\"}");
+        tree.write_file(
+            &workspace.join("agents/realagent/agent.tsx"),
+            "export const agent = {};\n",
+        );
+
+        let items = run_local_agents_detector(&tree.home(), &[workspace.clone()]);
+        let agent_names = items
+            .iter()
+            .filter(|item| item.kind == CatalogKind::Agent)
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !agent_names.contains(&"node_modules"),
+            "node_modules must not be promoted to an Agent entry, got {agent_names:?}"
+        );
+        assert!(
+            !agent_names.contains(&"package"),
+            "a bare package.json must not be promoted to an Agent entry, got {agent_names:?}"
+        );
+        assert!(
+            agent_names.contains(&"realagent"),
+            "a real agent subdirectory must still be discovered, got {agent_names:?}"
+        );
+    }
+
+    #[test]
+    fn parent_instruction_root_wins_over_nested_workspace_root() {
+        let tree = TestTree::new("nested-workspace-roots");
+        let parent = tree.workspace("Documents/parent");
+        let child = parent.join("child");
+
+        tree.write_file(
+            &parent.join("AGENTS.md"),
+            "# parent\n\nParent workspace instructions.\n",
+        );
+        tree.write_file(
+            &child.join("AGENTS.md"),
+            "# child\n\nChild workspace instructions.\n",
+        );
+
+        let items = run_local_agents_detector(&tree.home(), &[parent.clone(), child.clone()]);
+        let agent_items = items
+            .iter()
+            .filter(|item| item.kind == CatalogKind::Agent)
+            .collect::<Vec<_>>();
+
+        assert_eq!(agent_items.len(), 1);
+        assert_eq!(agent_items[0].display_name, "parent");
+    }
+
+    #[test]
+    fn child_repo_instruction_root_is_used_when_parent_has_no_root_instructions() {
+        let tree = TestTree::new("child-repo-root");
+        let parent = tree.workspace("Documents/newsletter-ai");
+        let child = parent.join("tnf-newsletter-platform");
+
+        fs::create_dir_all(&parent).unwrap();
+        tree.write_file(
+            &child.join("AGENTS.md"),
+            "# tnf-newsletter-platform\n\nRepo instructions.\n",
+        );
+        tree.write_file(
+            &child.join("backend/AGENTS.md"),
+            "# backend\n\nNested backend instructions.\n",
+        );
+
+        let items = run_local_agents_detector(&tree.home(), &[parent]);
+        let agent_items = items
+            .iter()
+            .filter(|item| item.kind == CatalogKind::Agent)
+            .collect::<Vec<_>>();
+
+        assert_eq!(agent_items.len(), 1);
+        assert_eq!(agent_items[0].display_name, "tnf-newsletter-platform");
+    }
+
 }

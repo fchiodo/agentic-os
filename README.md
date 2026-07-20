@@ -1,4 +1,4 @@
-# Agent Control
+# Agentic OS
 
 Desktop control plane for local agents, skills, routines, and Codex usage data.
 

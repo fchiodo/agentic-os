@@ -1,11 +1,12 @@
-# Agent Control — Local-First Agentic OS Architecture v1.1
+# Agentic OS — Local-First Architecture v1.1
 
 Status: draft for review · Date: 2026-07-20 (v1.0: 2026-07-15) · Supersedes: "Fabio Agentic OS — Reference Architecture v0.1" (evaluated below)
 Companion document: `docs/UI-SPEC.md` (developer-ready UI specification)
+The app was renamed from "Agent Control" to "Agentic OS" on 2026-07-20; the repository directory and internal identifiers (bundle id, crate name) are unchanged.
 
 ## 1. Purpose and hard constraints
 
-Agent Control becomes a personal agentic OS: a single local system that understands natural-language requests, retrieves the right context across work / PlanPhysique / personal domains, plans multi-step work, uses tools, executes long resumable workflows, asks approval before sensitive operations, and keeps memory, audit trail and data separation.
+Agentic OS is a personal, local-first agentic operating system: a single local system that understands natural-language requests, retrieves the right context across work / PlanPhysique / personal domains, plans multi-step work, uses tools, executes long resumable workflows, asks approval before sensitive operations, and keeps memory, audit trail and data separation.
 
 Hard constraints, in priority order:
 
@@ -55,8 +56,8 @@ The v0.1 proposal is architecturally right and operationally wrong for this cont
 
 ### What v0.1 misses (2026 additions)
 
-1. **ACP (Agent Client Protocol).** Now a cross-vendor standard (JetBrains, Zed, Neovim, VS Code, Microsoft Intelligent Terminal). One ACP client adapter makes Agent Control front-end to *any* compliant agent (Claude Code, Codex via codex-acp, Gemini CLI, Copilot CLI) without per-vendor code.
-2. **Skills/AGENTS.md ARE procedural memory.** The harnesses already consume skills, AGENTS.md, claude.md. Agent Control's existing Catalog discovery (2,545-line `discovery.rs`) is the procedural-memory registry, nearly for free. Procedural memory = versioned files the harnesses natively read; no new runtime needed.
+1. **ACP (Agent Client Protocol).** Now a cross-vendor standard (JetBrains, Zed, Neovim, VS Code, Microsoft Intelligent Terminal). One ACP client adapter makes Agentic OS front-end to *any* compliant agent (Claude Code, Codex via codex-acp, Gemini CLI, Copilot CLI) without per-vendor code.
+2. **Skills/AGENTS.md ARE procedural memory.** The harnesses already consume skills, AGENTS.md, claude.md. Agentic OS's existing Catalog discovery (2,545-line `discovery.rs`) is the procedural-memory registry, nearly for free. Procedural memory = versioned files the harnesses natively read; no new runtime needed.
 3. **Markdown vault as semantic memory.** Human-readable, Obsidian-compatible, git-versioned, portable across agents. The DB indexes it; it never becomes an opaque store.
 4. **Memory as attack surface.** ClawHavoc wrote payloads into MEMORY.md/SOUL.md. All retrieved content (memory included) is untrusted data: wrapped, never interpreted as instructions; writes go through the admission pipeline (§7).
 
@@ -149,7 +150,7 @@ Supervisor–specialist, no free agent-to-agent chat (v0.1 was right). Concretel
 
 ## 4. Harness strategy (the core bet)
 
-Agent Control does not implement an agent loop. It orchestrates the best loops that exist:
+Agentic OS does not implement an agent loop. It orchestrates the best loops that exist:
 
 1. **Codex adapter (first).** Spawn `codex exec --json` as a child process; parse the JSONL ThreadEvents (commands, file changes, messages) into orchestrator events streamed to the Runner UI. `codex app-server` / `remote-control` is the richer protocol when sessions need steering. Sandbox and approval settings pinned per policy profile. Zero API keys: ChatGPT subscription auth.
 2. **Claude adapter (second).** Claude Agent SDK (TypeScript from the Tauri side or via CLI): same loop as Claude Code — tools, permissions, subagents, MCP — drivable programmatically; subscription plans include monthly Agent SDK credits since June 2026.
@@ -248,7 +249,7 @@ Evaluation: a golden dataset of Fabio-real tasks (briefing generation, decision 
 ## 11. Repository structure (evolution, not rewrite)
 
 ```
-agent-control/
+agentic-os/
 ├── src/                      # React UI (existing)
 │   └── features/
 │       ├── today/            # NEW briefing surface
@@ -288,7 +289,7 @@ agent-control/
 
 **Phase 5 — Domain agents (months).** PlanPhysique agent (roadmap/backlog/analytics on its own domain), Research monitor (continuous source watching with novelty detection), Finance (local statement imports, SQLCipher), Personal Ops. Reviewer step becomes default on all side-effectful workflows.
 
-**Non-goals (permanent unless revisited):** payments and banking writes, autonomous prod deploys, medical decisions, free-form multi-agent chat, self-modification of Agent Control's own code or policies, any publicly reachable endpoint.
+**Non-goals (permanent unless revisited):** payments and banking writes, autonomous prod deploys, medical decisions, free-form multi-agent chat, self-modification of Agentic OS's own code or policies, any publicly reachable endpoint.
 
 ## 13. Decision record (answers to v0.1 §20)
 
