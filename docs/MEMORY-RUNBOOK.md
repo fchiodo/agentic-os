@@ -139,9 +139,22 @@ instead of overwriting newer content.
 
 Search applies the domain/status filter in SQL, checks exact titles first,
 then ranks FTS candidates by relevance, recency, trust, and stale penalty.
-`memory_ask` is deliberately extractive: it returns cited excerpts and
-abstains when no evidence exists. It never fabricates a fluent answer without
-supporting vault files.
+`memory_ask` is a bounded retrieval-augmented generation flow:
+
+1. retrieve governed memories and relevant passages from imported sources;
+2. ask the existing Codex harness for a structured list of claims and source IDs
+   in a read-only, 75-second turn;
+3. reject claims with missing/invalid citations or insufficient lexical support;
+4. rebuild the answer and citation numbering only from accepted claims;
+5. return `insufficient` when no verified claim remains.
+
+Imported-source passage chunks are a derived SQLite/FTS index. The preserved
+Markdown/PDF in `_sources` remains the source of truth; existing imports are
+backfilled lazily on the first Ask. A model launch failure is shown as an
+operational error and is never misrepresented as insufficient evidence.
+
+`Save memory` sends the answer through the normal admission gate. `Flag` writes
+an append-only audit event. Both the synthesis and its source paths are audited.
 
 Task context loads full bodies up to the 4,000-token-equivalent character
 budget, compresses overflow entries, excludes sensitive memories, escapes data
@@ -177,7 +190,8 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 The native suite covers FTS escaping, domain isolation, secret rejection,
 identity-preserving update, supersession, approvals, staleness, expiry/archive,
-reindex durability, context safety, run capture, bounded connector ingestion,
+reindex durability, context safety, claim/citation verification, bounded source
+chunking, run capture, bounded connector ingestion,
 grounded answers/abstention, optimistic approval conflicts, IPC serialization,
 document snapshot durability, forced import approval, secret rejection, SSRF
 address filtering, and skill approval.

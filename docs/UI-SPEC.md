@@ -170,6 +170,8 @@ approvals_decide({id, decision: 'approve'|'deny', note?}) -> ApprovalRequest
 memory_tree(domain?) -> VaultNode[]                     // {path, name, kind: 'dir'|'file', domain}
 memory_read(path) -> {markdown, lastModified}
 memory_search(query) -> {path, snippet, score}[]        // FTS5
+memory_ask({question, domain, includeStale}) -> MemoryAnswer
+memory_answer_feedback({answerId, question, domain, feedback: 'flagged'}) -> void
 memory_proposals_list() -> MemoryWriteProposal[]
 memory_proposals_decide({id, decision: 'approve'|'discard'}) -> MemoryWriteProposal
 skills_distill(taskId) -> MemoryWriteProposal           // kind: 'skill'
@@ -238,6 +240,12 @@ Two-column: left = vault tree (grouped by domain, collapsible; `search-field` on
   original PDF path when applicable, extractor/version, quality
   status/score/issues, candidate count, source history/preview, and route every extracted fact to
   the existing pending-proposals rail for approval.
+- **Ask:** retrieve relevant governed memories and imported-source passages,
+  synthesize through the existing model harness, then locally reject uncited or
+  unsupported claims. Render the verified prose, confidence/source count, and
+  citation cards. `Save memory` uses the standard write gate, `Copy` copies only
+  the answer, and `Flag` creates an audit event. Show an explicit insufficient-
+  evidence state instead of a fluent answer when verification accepts no claim.
 
 ### 4.4 Today (`/today`) — Phase 3
 

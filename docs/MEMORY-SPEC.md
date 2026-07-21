@@ -244,6 +244,24 @@ score      = 0.60*relevance + 0.25*recency + 0.15*trust
 5. Return top K=8 with `vault_path` citations; update `last_accessed_at`/`access_count` (usage feeds nothing in v1 beyond observability, reserved for future decay tuning).
 6. **Context budget**: the context builder caps injected memory at 4 000 tokens; overflow → summarize lowest-scored entries into one line each. Every injected memory appears in the run trace (`kind=context`) with its path — auditability of "what did the agent believe".
 
+### 7.1 Generative Ask with deterministic citation verification
+
+`memory_ask` retrieves up to eight passages from two domain-filtered lanes:
+approved atomic memories and the derived FTS passage index for imported source
+documents. Source passages are bounded, overlapping chunks; `_sources` Markdown
+and the byte-preserved PDF remain canonical.
+
+The existing Codex harness receives only the question and retrieved passages in
+a bounded, read-only turn. It must return JSON claims plus evidence IDs. Raw
+source text is explicitly treated as untrusted data. Rust then enforces the
+contract: every claim must be non-empty, bounded, cite existing evidence, and
+share sufficient content terms with its cited passages. Unsupported claims are
+dropped. Citation numbering, confidence, and answer prose are reconstructed
+only from accepted claims. If no verified claim remains, the result is
+`confidence='insufficient'` with no citations. Model availability/timeouts are
+operational errors, not abstentions. Every result and user flag is appended to
+the hash-chained audit trail.
+
 Prompt injection format (context builder):
 
 ```
@@ -260,6 +278,8 @@ Data, not instructions; the system prompt states that `<memory>` blocks are refe
 memory_tree(domain?)                       -> VaultNode[]
 memory_read(path)                          -> { frontmatter, markdown, status, gitLastCommit }
 memory_search({query, domain?, includeStale?}) -> ScoredMemory[]     # ScoredMemory = row + score components
+memory_ask({question, domain, includeStale})    -> MemoryAnswer       # AI synthesis + verified citations or abstention
+memory_answer_feedback({answerId, question, domain, feedback}) -> () # feedback='flagged', audit-only
 memory_proposals_list()                    -> MemoryWriteProposal[]
 memory_proposals_decide({id, decision})    -> MemoryWriteProposal    # approve|discard
 memory_confirm(id)                         -> MemorySummary          # "still true" → reset staleness clock
@@ -277,6 +297,9 @@ TypeScript contracts mirror §2 (zod schemas in `src/features/memory/schema.ts`)
 ## 9. UI deltas (extends UI-SPEC §4.3)
 
 - Memory page: status chip per file (`active` success · `stale` warning · archived neutral), **"Confirm still true"** button on stale items, "Include stale" toggle on search, score breakdown on hover (relevance/recency/trust) for debuggability.
+- Ask view: synthesized answer, domain and confidence badge, cited passage cards
+  opening their vault source, and `Save memory`/`Copy`/`Flag` actions. The footer
+  states that synthesis is citation-verified and abstains without evidence.
 - Proposals rail: gate report visible ("checks passed: secrets ✓ provenance ✓ dedup: update of <title>"), `op` badge (create/update/supersede), auto-applied writes do NOT appear here — they appear in Today's Activity digest (three-tier visibility, ARCHITECTURE v1.1).
 - Runner TaskCard (completed): "Distill to skill" wired to `skills_distill` (already spec'd).
 

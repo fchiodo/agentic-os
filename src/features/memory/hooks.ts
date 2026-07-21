@@ -4,6 +4,7 @@ import {
   memoryDocumentSourceRead,
   memoryImportDocument,
   memoryAsk,
+  memoryAnswerFeedback,
   memoryConfirm,
   memoryMaintenanceRun,
   memoryProposalsDecide,
@@ -18,6 +19,7 @@ import {
 import type {
   DocumentImportRequest,
   ManualSaveRequest,
+  MemoryAnswerFeedbackRequest,
   MemoryAskRequest,
   ProposalDecideRequest,
 } from '@/features/memory/schema'
@@ -68,6 +70,12 @@ export function useMemoryProposals(status?: string) {
 export function useMemoryAsk() {
   return useMutation({
     mutationFn: (request: MemoryAskRequest) => memoryAsk(request),
+  })
+}
+
+export function useMemoryAnswerFeedback() {
+  return useMutation({
+    mutationFn: (request: MemoryAnswerFeedbackRequest) => memoryAnswerFeedback(request),
   })
 }
 

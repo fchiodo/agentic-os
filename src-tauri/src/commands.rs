@@ -271,9 +271,9 @@ pub fn audit_verify_chain(db: State<'_, Db>) -> Result<AuditChainStatus, String>
 use crate::memory;
 use crate::memory::{
     DocumentImportRecord, DocumentImportRequest, DocumentImportResult, DocumentSourceReadResult,
-    MaintenanceResult, ManualSaveRequest, MemoryAnswer, MemoryAskRequest, MemoryIngestRequest,
-    MemoryIngestResult, MemoryReadResult, MemorySearchOpts, MemoryWriteProposal,
-    ProposalDecideRequest, ReindexResult, ScoredMemory, VaultNode,
+    MaintenanceResult, ManualSaveRequest, MemoryAnswer, MemoryAnswerFeedbackRequest,
+    MemoryAskRequest, MemoryIngestRequest, MemoryIngestResult, MemoryReadResult, MemorySearchOpts,
+    MemoryWriteProposal, ProposalDecideRequest, ReindexResult, ScoredMemory, VaultNode,
 };
 
 #[tauri::command]
@@ -304,6 +304,16 @@ pub fn memory_tree(db: State<'_, Db>, domain: Option<String>) -> Result<Vec<Vaul
 #[tauri::command]
 pub fn memory_read(db: State<'_, Db>, path: String) -> Result<MemoryReadResult, String> {
     memory::vault::ensure_vault().map_err(|e| e.to_string())?;
+    if let Some(source) =
+        memory::importer::read_source_by_path(&db, &path).map_err(|e| e.to_string())?
+    {
+        return Ok(MemoryReadResult {
+            frontmatter: None,
+            markdown: source.content,
+            status: "active".to_string(),
+            git_last_commit: source.git_last_commit,
+        });
+    }
     let (content, _full_path) =
         memory::vault::read_file(&path).map_err(|e| e.to_string())?;
     let git_last_commit = memory::vault::git_last_commit(&path);
@@ -345,11 +355,22 @@ pub fn memory_search(
 }
 
 #[tauri::command]
-pub fn memory_ask(
+pub async fn memory_ask(
     db: State<'_, Db>,
     request: MemoryAskRequest,
 ) -> Result<MemoryAnswer, String> {
-    memory::retrieval::ask(&db, &request).map_err(|e| e.to_string())
+    let db = db.inner().clone();
+    memory::retrieval::ask(&db, &request)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_answer_feedback(
+    db: State<'_, Db>,
+    request: MemoryAnswerFeedbackRequest,
+) -> Result<(), String> {
+    memory::retrieval::record_answer_feedback(&db, &request).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

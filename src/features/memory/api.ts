@@ -18,6 +18,7 @@ import {
   type ManualSaveRequest,
   type MaintenanceResult,
   type MemoryAnswer,
+  type MemoryAnswerFeedbackRequest,
   type MemoryAskRequest,
   type MemoryIngestRequest,
   type MemoryIngestResult,
@@ -202,6 +203,9 @@ export async function memorySearch(
 export async function memoryAsk(request: MemoryAskRequest): Promise<MemoryAnswer> {
   if (!isTauriRuntime()) {
     return {
+      id: '00000000-0000-4000-8000-000000000001',
+      question: request.question,
+      domain: request.domain,
       answer:
         'Delta feed daily instead of full: full files over 2GB hit the SFTP timeout. [1]',
       citations: [
@@ -213,14 +217,27 @@ export async function memoryAsk(request: MemoryAskRequest): Promise<MemoryAnswer
           status: 'active',
           excerpt: 'Delta feed daily instead of full: full files over 2GB hit the SFTP timeout.',
           score: 0.87,
+          sourceKind: 'memory',
         },
       ],
       warnings: [],
       abstained: false,
+      confidence: 'medium',
+      confidenceScore: 0.77,
+      sourceCount: 1,
+      model: 'Codex',
+      generatedAt: new Date().toISOString(),
     }
   }
   const payload = await invoke<MemoryAnswer>('memory_ask', { request })
   return memoryAnswerSchema.parse(payload)
+}
+
+export async function memoryAnswerFeedback(
+  request: MemoryAnswerFeedbackRequest,
+): Promise<void> {
+  if (!isTauriRuntime()) return
+  await invoke('memory_answer_feedback', { request })
 }
 
 export async function memoryIngest(

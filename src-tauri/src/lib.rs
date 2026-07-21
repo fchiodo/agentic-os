@@ -83,6 +83,7 @@ pub fn run() {
             commands::memory_read,
             commands::memory_search,
             commands::memory_ask,
+            commands::memory_answer_feedback,
             commands::memory_save_manual,
             commands::memory_ingest,
             commands::memory_import_document,

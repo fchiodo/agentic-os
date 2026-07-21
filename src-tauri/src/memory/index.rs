@@ -9,6 +9,16 @@ use super::frontmatter;
 use super::vault;
 use super::{MemoryRow, ReindexResult};
 
+#[derive(Debug, Clone)]
+pub struct DocumentChunkHit {
+    pub id: i64,
+    pub import_id: String,
+    pub title: String,
+    pub source_path: String,
+    pub body: String,
+    pub score: f64,
+}
+
 /// Create the memory tables if they don't exist.
 pub fn ensure_tables(db: &Db) -> AppResult<()> {
     db.with_conn(|conn| {
@@ -116,8 +126,40 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_document_imports_domain
                 ON document_imports(domain, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                import_id TEXT NOT NULL REFERENCES document_imports(id) ON DELETE CASCADE,
+                domain TEXT NOT NULL,
+                title TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                UNIQUE(import_id, chunk_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_chunks_import
+                ON document_chunks(import_id, chunk_index);
+            CREATE INDEX IF NOT EXISTS idx_document_chunks_domain
+                ON document_chunks(domain);
             "#,
         )?;
+
+        let chunk_fts_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_chunks_fts'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !chunk_fts_exists {
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE document_chunks_fts USING fts5(
+                    title, body,
+                    content='',
+                    contentless_delete=1
+                );",
+            )?;
+        }
 
         let proposal_columns = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_proposals)")?;
@@ -433,6 +475,227 @@ pub fn fts_match_expr(input: &str) -> Option<String> {
     }
 }
 
+/// Replaces the derived source-passage index for one immutable import. The
+/// original Markdown/PDF in the vault remains the source of truth.
+pub fn replace_document_chunks(
+    db: &Db,
+    import_id: &str,
+    domain: &str,
+    title: &str,
+    source_path: &str,
+    body: &str,
+) -> AppResult<usize> {
+    ensure_tables(db)?;
+    let chunks = chunk_source(body);
+    db.with_conn(|conn| {
+        let transaction = conn.unchecked_transaction()?;
+        let existing_ids = {
+            let mut stmt = transaction
+                .prepare("SELECT id FROM document_chunks WHERE import_id = ?1 ORDER BY id")?;
+            let rows = stmt
+                .query_map(params![import_id], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for id in existing_ids {
+            transaction.execute(
+                "DELETE FROM document_chunks_fts WHERE rowid = ?1",
+                params![id],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM document_chunks WHERE import_id = ?1",
+            params![import_id],
+        )?;
+
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO document_chunks (
+                    import_id, domain, title, source_path, chunk_index, body
+                 ) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    import_id,
+                    domain,
+                    title,
+                    source_path,
+                    chunk_index as i64,
+                    chunk,
+                ],
+            )?;
+            let rowid = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO document_chunks_fts(rowid, title, body) VALUES (?1,?2,?3)",
+                params![rowid, title, chunk],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(chunks.len())
+    })
+}
+
+pub fn remove_document_chunks(db: &Db, import_id: &str) -> AppResult<()> {
+    ensure_tables(db)?;
+    db.with_conn(|conn| {
+        let ids = {
+            let mut stmt = conn.prepare("SELECT id FROM document_chunks WHERE import_id = ?1")?;
+            let rows = stmt
+                .query_map(params![import_id], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for id in ids {
+            conn.execute(
+                "DELETE FROM document_chunks_fts WHERE rowid = ?1",
+                params![id],
+            )?;
+        }
+        conn.execute(
+            "DELETE FROM document_chunks WHERE import_id = ?1",
+            params![import_id],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn document_imports_missing_chunks(db: &Db) -> AppResult<Vec<String>> {
+    ensure_tables(db)?;
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT i.id
+             FROM document_imports i
+             LEFT JOIN document_chunks c ON c.import_id = i.id
+             WHERE i.extraction_quality_status != 'failed'
+             GROUP BY i.id
+             HAVING COUNT(c.id) = 0
+             ORDER BY i.created_at",
+        )?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
+pub fn search_document_chunks(
+    db: &Db,
+    query: &str,
+    domain: &str,
+    limit: usize,
+) -> AppResult<Vec<DocumentChunkHit>> {
+    ensure_tables(db)?;
+    let Some(match_expression) = fts_match_expr(query) else {
+        return Ok(Vec::new());
+    };
+    let query_terms = searchable_terms(query);
+    let raw = db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.import_id, c.title, c.source_path, c.body
+             FROM document_chunks_fts f
+             JOIN document_chunks c ON c.id = f.rowid
+             JOIN document_imports i ON i.id = c.import_id
+             WHERE document_chunks_fts MATCH ?1
+               AND c.domain = ?2
+               AND i.extraction_quality_status != 'failed'
+             ORDER BY bm25(document_chunks_fts)
+             LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![match_expression, domain, (limit * 4) as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok::<_, crate::error::AppError>(rows)
+    })?;
+
+    let mut hits = raw
+        .into_iter()
+        .enumerate()
+        .map(|(position, (id, import_id, title, source_path, body))| {
+            let body_terms = searchable_terms(&body);
+            let coverage = if query_terms.is_empty() {
+                0.0
+            } else {
+                query_terms.intersection(&body_terms).count() as f64 / query_terms.len() as f64
+            };
+            let reciprocal_rank = 1.0 / (1.0 + position as f64 * 0.18);
+            DocumentChunkHit {
+                id,
+                import_id,
+                title,
+                source_path,
+                body,
+                score: (0.72 * coverage + 0.28 * reciprocal_rank).clamp(0.0, 1.0),
+            }
+        })
+        .collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+fn searchable_terms(value: &str) -> std::collections::BTreeSet<String> {
+    value
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| term.chars().count() > 2)
+        .map(str::to_string)
+        .collect()
+}
+
+fn chunk_source(body: &str) -> Vec<String> {
+    const TARGET_CHARS: usize = 1_500;
+    const OVERLAP_CHARS: usize = 220;
+    const BOUNDARY_LOOKBACK_CHARS: usize = 240;
+
+    let normalized = body.replace('\0', "").replace("\r\n", "\n");
+    let characters = normalized.chars().collect::<Vec<_>>();
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < characters.len() {
+        let hard_end = (start + TARGET_CHARS).min(characters.len());
+        let mut end = hard_end;
+        if hard_end < characters.len() {
+            let boundary_floor = hard_end
+                .saturating_sub(BOUNDARY_LOOKBACK_CHARS)
+                .max(start + 1);
+            if let Some(boundary) = (boundary_floor..hard_end)
+                .rev()
+                .find(|index| characters[*index].is_whitespace())
+            {
+                end = boundary + 1;
+            }
+        }
+
+        let chunk = characters[start..end]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+        if end == characters.len() {
+            break;
+        }
+        start = end.saturating_sub(OVERLAP_CHARS);
+    }
+    chunks
+}
+
 /// Get a memory row by ID.
 pub fn get_by_id(db: &Db, id: &str) -> AppResult<Option<MemoryRow>> {
     ensure_tables(db)?;
@@ -635,4 +898,30 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRow> {
         content_hash: row.get(19)?,
         status: row.get(20)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_chunking_is_bounded_and_overlapping_even_for_one_long_line() {
+        let body = (0..4_000)
+            .map(|index| char::from(b'a' + (index % 26) as u8))
+            .collect::<String>();
+        let chunks = chunk_source(&body);
+
+        assert!(chunks.len() >= 3);
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 1_500));
+        let tail = chunks[0]
+            .chars()
+            .rev()
+            .take(220)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        let head = chunks[1].chars().take(220).collect::<String>();
+        assert_eq!(tail, head);
+    }
 }

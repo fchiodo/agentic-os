@@ -54,7 +54,7 @@ describe('MemoryPage', () => {
     })
   })
 
-  it('asks memory and renders an answer with a clickable citation', async () => {
+  it('asks memory, renders a synthesized answer, and exposes governed actions', async () => {
     renderPage()
     fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
     fireEvent.change(screen.getByLabelText('Ask the Second Brain'), {
@@ -63,12 +63,24 @@ describe('MemoryPage', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Ask' }).at(-1)!)
 
     await waitFor(() => {
-      expect(screen.getByText('Grounded answer')).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Answer' })).toBeInTheDocument()
+      expect(screen.getByText('Medium confidence · 1 source')).toBeInTheDocument()
       expect(
         screen.getByRole('button', {
-          name: /\[1\] PowerReviews feed is delta, not full/,
+          name: /Open citation 1: PowerReviews feed is delta, not full/,
         }),
       ).toBeInTheDocument()
+      expect(screen.getByText('AI-synthesized · citation verified · abstains without evidence')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save memory' }).at(-1)!)
+    await waitFor(() => {
+      expect(screen.getByText('Answer saved, indexed, and audited.')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Flag' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Flagged' })).toBeDisabled()
     })
   })
 

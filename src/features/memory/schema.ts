@@ -168,13 +168,29 @@ export const memoryCitationSchema = z.object({
   status: memoryStatusSchema,
   excerpt: z.string(),
   score: z.number(),
+  sourceKind: z.enum(['memory', 'source']),
 })
 
 export const memoryAnswerSchema = z.object({
+  id: z.string(),
+  question: z.string(),
+  domain: z.string(),
   answer: z.string(),
   citations: z.array(memoryCitationSchema),
   warnings: z.array(z.string()),
   abstained: z.boolean(),
+  confidence: z.enum(['high', 'medium', 'low', 'insufficient']),
+  confidenceScore: z.number().min(0).max(1),
+  sourceCount: z.number().int().nonnegative(),
+  model: z.string().nullable(),
+  generatedAt: z.string(),
+})
+
+export const memoryAnswerFeedbackRequestSchema = z.object({
+  answerId: z.string(),
+  question: z.string(),
+  domain: z.string(),
+  feedback: z.literal('flagged'),
 })
 
 export const extractedMemoryCandidateSchema = manualSaveRequestSchema.omit({
@@ -276,6 +292,7 @@ export type ManualSaveRequest = z.infer<typeof manualSaveRequestSchema>
 export type MemoryAskRequest = z.infer<typeof memoryAskRequestSchema>
 export type MemoryCitation = z.infer<typeof memoryCitationSchema>
 export type MemoryAnswer = z.infer<typeof memoryAnswerSchema>
+export type MemoryAnswerFeedbackRequest = z.infer<typeof memoryAnswerFeedbackRequestSchema>
 export type ExtractedMemoryCandidate = z.infer<typeof extractedMemoryCandidateSchema>
 export type MemoryIngestRequest = z.infer<typeof memoryIngestRequestSchema>
 export type MemoryIngestFailure = z.infer<typeof memoryIngestFailureSchema>

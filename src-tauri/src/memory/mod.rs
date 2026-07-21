@@ -395,15 +395,36 @@ pub struct MemoryCitation {
     pub status: String,
     pub excerpt: String,
     pub score: f64,
+    /// `memory` for governed atomic notes or `source` for imported source passages.
+    pub source_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryAnswer {
+    pub id: String,
+    pub question: String,
+    pub domain: String,
     pub answer: String,
     pub citations: Vec<MemoryCitation>,
     pub warnings: Vec<String>,
     pub abstained: bool,
+    /// `high`, `medium`, `low`, or `insufficient`.
+    pub confidence: String,
+    pub confidence_score: f64,
+    pub source_count: usize,
+    pub model: Option<String>,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryAnswerFeedbackRequest {
+    pub answer_id: String,
+    pub question: String,
+    pub domain: String,
+    /// Currently `flagged`; kept explicit for future positive feedback.
+    pub feedback: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1099,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_memory_cites_evidence_and_abstains_without_it() {
+    fn memory_search_returns_matching_evidence_and_omits_absent_topics() {
         let roots = EnvRoots::new("ask");
         let db = temp_db("ask");
         let request = ManualSaveRequest::basic(
@@ -1110,31 +1131,62 @@ mod tests {
         );
         pipeline::process_manual_save(&db, &request, "manual").unwrap();
 
-        let answer = retrieval::ask(
+        let matches = retrieval::search(
             &db,
-            &MemoryAskRequest {
-                question: "Why is the PowerReviews feed delta?".to_string(),
-                domain: "work".to_string(),
+            "Why is the PowerReviews feed delta?",
+            Some("work"),
+            &MemorySearchOpts {
                 include_stale: false,
+                limit: Some(8),
             },
         )
         .unwrap();
-        assert!(!answer.abstained);
-        assert_eq!(answer.citations.len(), 1);
-        assert!(answer.answer.contains("[1]"));
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].row.title, "PowerReviews feed mode");
 
-        let absent = retrieval::ask(
+        let absent = retrieval::search(
             &db,
-            &MemoryAskRequest {
-                question: "What is the lunar office policy?".to_string(),
-                domain: "work".to_string(),
+            "What is the lunar office policy?",
+            Some("work"),
+            &MemorySearchOpts {
                 include_stale: false,
+                limit: Some(8),
             },
         )
         .unwrap();
-        assert!(absent.abstained);
-        assert!(absent.citations.is_empty());
+        assert!(absent.is_empty());
         drop(roots);
+    }
+
+    #[test]
+    fn ask_feedback_is_validated_and_appended_to_the_audit_chain() {
+        let db = temp_db("ask-feedback");
+        let answer_id = "00000000-0000-4000-8000-000000000123";
+        retrieval::record_answer_feedback(
+            &db,
+            &MemoryAnswerFeedbackRequest {
+                answer_id: answer_id.to_string(),
+                question: "Which endpoints are available?".to_string(),
+                domain: "work".to_string(),
+                feedback: "flagged".to_string(),
+            },
+        )
+        .unwrap();
+
+        let trace = crate::audit::read_trace(&db, &format!("memory-ask:{answer_id}")).unwrap();
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].kind, "memory_ask_feedback");
+
+        let invalid = retrieval::record_answer_feedback(
+            &db,
+            &MemoryAnswerFeedbackRequest {
+                answer_id: answer_id.to_string(),
+                question: "Which endpoints are available?".to_string(),
+                domain: "work".to_string(),
+                feedback: "approved".to_string(),
+            },
+        );
+        assert!(invalid.is_err());
     }
 
     #[test]
@@ -1282,6 +1334,10 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
         let source = importer::read_source(&db, &result.import.id).unwrap();
         assert_eq!(source.content, body);
         assert!(source.git_last_commit.is_some());
+        let source_by_path = importer::read_source_by_path(&db, &result.import.source_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(source_by_path.content, body);
 
         let before_approval = retrieval::search(
             &db,
@@ -1294,6 +1350,16 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
         )
         .unwrap();
         assert!(before_approval.is_empty());
+        let source_hits = index::search_document_chunks(
+            &db,
+            "OAuth client credentials JWT",
+            "work",
+            8,
+        )
+        .unwrap();
+        assert_eq!(source_hits.len(), 1);
+        assert_eq!(source_hits[0].source_path, result.import.source_path);
+        assert!(source_hits[0].body.contains("short-lived JWT tokens"));
 
         proposals::decide(&db, &result.proposals[0].id, "approve").unwrap();
         let refreshed = importer::list(&db, Some("work")).unwrap();

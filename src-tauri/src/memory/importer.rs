@@ -168,6 +168,21 @@ async fn import_document_inner(
         &acquired.extraction_quality_issues,
     )?;
 
+    if acquired.extraction_quality_status != "failed" {
+        if let Err(error) = super::index::replace_document_chunks(
+            db,
+            &import_id,
+            &request.domain,
+            request.title.trim(),
+            &source_path,
+            &acquired.extraction_text,
+        ) {
+            acquired.warnings.push(format!(
+                "The source was preserved, but its derived Ask index could not be updated ({error}). Reindexing will retry it."
+            ));
+        }
+    }
+
     let candidates = extract_candidates(
         &request.title,
         &acquired.extraction_text,
@@ -279,6 +294,58 @@ pub fn read_source(db: &Db, id: &str) -> AppResult<DocumentSourceReadResult> {
         import: record,
         content,
     })
+}
+
+pub fn read_source_by_path(
+    db: &Db,
+    source_path: &str,
+) -> AppResult<Option<DocumentSourceReadResult>> {
+    super::index::ensure_tables(db)?;
+    let import_id = db.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT id FROM document_imports WHERE source_path = ?1")?;
+        let mut rows = stmt.query_map(params![source_path], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    })?;
+    import_id.map(|id| read_source(db, &id)).transpose()
+}
+
+/// Backfills the derived source-passage index for imports created before the
+/// generative Ask pipeline was installed. One damaged source cannot prevent
+/// other evidence from being queried; failures are returned as UI warnings.
+pub fn ensure_search_chunks(db: &Db) -> Vec<String> {
+    let missing = match super::index::document_imports_missing_chunks(db) {
+        Ok(missing) => missing,
+        Err(error) => {
+            return vec![format!(
+                "Imported source passages could not be checked ({error})."
+            )]
+        }
+    };
+    let mut warnings = Vec::new();
+    for import_id in missing {
+        let result = (|| -> AppResult<()> {
+            let source = read_source(db, &import_id)?;
+            super::index::replace_document_chunks(
+                db,
+                &source.import.id,
+                &source.import.domain,
+                &source.import.title,
+                &source.import.source_path,
+                &source.content,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            warnings.push(format!(
+                "Source {} could not be added to Ask retrieval ({error}).",
+                import_id
+            ));
+        }
+    }
+    warnings
 }
 
 pub(crate) fn refresh_status(db: &Db, import_id: &str) -> AppResult<()> {
@@ -758,6 +825,7 @@ fn persist_source(
         )
     })();
     if let Err(error) = db_result {
+        let _ = super::index::remove_document_chunks(db, id);
         let _ = db.with_conn(|conn| {
             conn.execute("DELETE FROM document_imports WHERE id = ?1", params![id])?;
             Ok(())

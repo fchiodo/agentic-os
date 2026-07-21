@@ -5,10 +5,13 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Copy,
   FileText,
+  Flag,
   FolderOpen,
   MessageCircleQuestion,
   Plus,
+  Save,
   Search,
   Shield,
   Tag,
@@ -23,6 +26,7 @@ import { StatusBadge } from '@/components/ui/status-badge'
 import { DocumentImportPanel } from '@/features/memory/document-import-panel'
 import {
   useMemoryAsk,
+  useMemoryAnswerFeedback,
   useMemoryConfirm,
   useMemoryMaintenanceRun,
   useMemoryProposals,
@@ -34,6 +38,7 @@ import {
   useMemoryTree,
 } from '@/features/memory/hooks'
 import type {
+  MemoryAnswer,
   MemoryType,
   MemoryWriteProposal,
   Sensitivity,
@@ -72,6 +77,21 @@ const DOMAIN_LABELS: Record<string, string> = {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+const CONFIDENCE_LABELS: Record<MemoryAnswer['confidence'], string> = {
+  high: 'High confidence',
+  medium: 'Medium confidence',
+  low: 'Low confidence',
+  insufficient: 'Insufficient evidence',
+}
+
+function savedAnswerBody(answer: MemoryAnswer): string {
+  const sourceList = answer.citations
+    .map((citation) => `[${citation.number}] ${citation.vaultPath}`)
+    .join('\n')
+  const value = sourceList ? `${answer.answer}\n\nSources:\n${sourceList}` : answer.answer
+  return [...value].slice(0, 1_200).join('')
 }
 
 function TreeNode({
@@ -281,12 +301,53 @@ function SaveMemoryForm({ defaultDomain, onClose }: { defaultDomain?: string; on
 
 function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includeStale: boolean; onSelect: (path: string) => void }) {
   const askMutation = useMemoryAsk()
+  const saveMutation = useMemorySaveManual()
+  const feedbackMutation = useMemoryAnswerFeedback()
   const [question, setQuestion] = useState('')
   const [askDomain, setAskDomain] = useState(domain ?? 'work')
+  const [copiedAnswerId, setCopiedAnswerId] = useState<string | null>(null)
+  const [copyError, setCopyError] = useState<string | null>(null)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    setCopiedAnswerId(null)
+    setCopyError(null)
+    saveMutation.reset()
+    feedbackMutation.reset()
     askMutation.mutate({ question: question.trim(), domain: askDomain, includeStale })
+  }
+
+  const copyAnswer = async (answer: MemoryAnswer) => {
+    try {
+      if (!navigator.clipboard) throw new Error('Clipboard access is unavailable.')
+      await navigator.clipboard.writeText(answer.answer)
+      setCopiedAnswerId(answer.id)
+      setCopyError(null)
+    } catch (error) {
+      setCopyError(errorMessage(error))
+    }
+  }
+
+  const saveAnswer = (answer: MemoryAnswer) => {
+    saveMutation.mutate({
+      domain: answer.domain,
+      memType: 'fact',
+      title: `Answer: ${answer.question}`.slice(0, 200),
+      body: savedAnswerBody(answer),
+      tags: ['ask', 'grounded-answer'],
+      sensitivity: 'normal',
+      source: `memory-ask:${answer.id}`,
+      confidence: answer.confidenceScore,
+    })
+  }
+
+  const flagAnswer = (answer: MemoryAnswer) => {
+    feedbackMutation.mutate({
+      answerId: answer.id,
+      question: answer.question,
+      domain: answer.domain,
+      feedback: 'flagged',
+    })
   }
 
   return (
@@ -295,27 +356,63 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
         <MessageCircleQuestion aria-hidden="true" size={20} />
         <input aria-label="Ask the Second Brain" onChange={(event) => setQuestion(event.target.value)} placeholder="What did we decide about the PowerReviews feed?" value={question} />
         <select aria-label="Answer domain" onChange={(event) => setAskDomain(event.target.value)} value={askDomain}>{DOMAINS.map((item) => <option key={item} value={item}>{DOMAIN_LABELS[item]}</option>)}</select>
-        <button className="primary-button" disabled={askMutation.isPending || question.trim().length < 2} type="submit">{askMutation.isPending ? 'Reading…' : 'Ask'}</button>
+        <button className="primary-button" disabled={askMutation.isPending || question.trim().length < 2} type="submit">{askMutation.isPending ? 'Synthesizing…' : 'Ask'}</button>
       </form>
       {askMutation.error && <div className="inline-error" role="alert">{errorMessage(askMutation.error)}</div>}
       {askMutation.data && (
         <div className={`memory-answer ${askMutation.data.abstained ? 'memory-answer--abstained' : ''}`}>
-          <p className="eyebrow">Grounded answer</p>
-          <div className="memory-answer-copy">{askMutation.data.answer}</div>
+          <div className="memory-answer-header">
+            <div className="memory-answer-title">
+              <h2>Answer</h2>
+              <span>{DOMAIN_LABELS[askMutation.data.domain] ?? askMutation.data.domain}</span>
+            </div>
+            <div className={`memory-answer-confidence memory-answer-confidence--${askMutation.data.confidence}`}>
+              <span aria-hidden="true" />
+              {CONFIDENCE_LABELS[askMutation.data.confidence]}
+              {!askMutation.data.abstained && ` · ${askMutation.data.sourceCount} source${askMutation.data.sourceCount === 1 ? '' : 's'}`}
+            </div>
+          </div>
+          <p className="memory-answer-copy">{askMutation.data.answer}</p>
           {askMutation.data.warnings.map((warning) => <div className="memory-answer-warning" key={warning}>{warning}</div>)}
           {askMutation.data.citations.length > 0 && (
             <div className="memory-citations">
+              <span className="memory-citations-label">Cited from your vault</span>
               {askMutation.data.citations.map((citation) => (
-                <button key={citation.id} onClick={() => onSelect(citation.vaultPath)} type="button">
-                  <span>[{citation.number}] {citation.title}</span>
-                  <span>{citation.status} · {Math.round(citation.score * 100)}%</span>
+                <button aria-label={`Open citation ${citation.number}: ${citation.title}`} key={`${citation.id}-${citation.number}`} onClick={() => onSelect(citation.vaultPath)} type="button">
+                  <FileText aria-hidden="true" size={16} />
+                  <span className="memory-citation-copy">
+                    <strong>[{citation.number}] {citation.vaultPath}</strong>
+                    <small title={citation.excerpt}>“{citation.excerpt}”</small>
+                  </span>
+                  <span className="memory-citation-score">{Math.round(citation.score * 100)}%</span>
                 </button>
               ))}
             </div>
           )}
+          <div className="memory-answer-footer">
+            <div className="memory-answer-actions">
+              <button className="primary-button" disabled={askMutation.data.abstained || saveMutation.isPending || Boolean(saveMutation.data)} onClick={() => saveAnswer(askMutation.data)} type="button">
+                <Save aria-hidden="true" size={14} />
+                {saveMutation.isPending ? 'Checking…' : saveMutation.data ? 'Saved' : 'Save memory'}
+              </button>
+              <button className="secondary-button" onClick={() => void copyAnswer(askMutation.data)} type="button">
+                <Copy aria-hidden="true" size={14} />
+                {copiedAnswerId === askMutation.data.id ? 'Copied' : 'Copy'}
+              </button>
+              <button className="secondary-button" disabled={feedbackMutation.isPending || feedbackMutation.isSuccess} onClick={() => flagAnswer(askMutation.data)} type="button">
+                <Flag aria-hidden="true" size={14} />
+                {feedbackMutation.isPending ? 'Flagging…' : feedbackMutation.isSuccess ? 'Flagged' : 'Flag'}
+              </button>
+            </div>
+            <span>AI-synthesized · citation verified · abstains without evidence</span>
+          </div>
+          {saveMutation.data && <div className="memory-operation-result" role="status"><CheckCircle2 aria-hidden="true" size={16} />{saveMutation.data.status === 'auto_applied' ? 'Answer saved, indexed, and audited.' : 'Memory proposal created and waiting for approval.'}</div>}
+          {saveMutation.error && <div className="inline-error" role="alert">{errorMessage(saveMutation.error)}</div>}
+          {copyError && <div className="inline-error" role="alert">{copyError}</div>}
+          {feedbackMutation.error && <div className="inline-error" role="alert">{errorMessage(feedbackMutation.error)}</div>}
         </div>
       )}
-      {!askMutation.data && !askMutation.isPending && <div className="memory-welcome"><MessageCircleQuestion aria-hidden="true" className="memory-welcome-icon" size={48} /><h2>Ask with evidence</h2><p>Answers are extractive and cite exact vault files. If no evidence is present, the system abstains instead of inventing an answer.</p></div>}
+      {!askMutation.data && !askMutation.isPending && <div className="memory-welcome"><MessageCircleQuestion aria-hidden="true" className="memory-welcome-icon" size={48} /><h2>Ask with evidence</h2><p>The AI synthesizes the relevant passages, then a local verifier removes uncited claims. Without sufficient evidence, it abstains instead of inventing an answer.</p></div>}
     </div>
   )
 }
