@@ -1,0 +1,66 @@
+import '@testing-library/jest-dom/vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
+import { MemoryPage } from '@/features/memory/memory-page'
+
+afterEach(cleanup)
+
+function renderPage() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  })
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryPage />
+    </QueryClientProvider>,
+  )
+}
+
+describe('MemoryPage', () => {
+  it('exposes a real stale toggle and runs a manual save through the pipeline', async () => {
+    renderPage()
+
+    const staleToggle = screen.getByRole('checkbox', { name: 'Include stale' })
+    expect(staleToggle).not.toBeChecked()
+    fireEvent.click(staleToggle)
+    expect(staleToggle).toBeChecked()
+
+    const saveButtons = screen.getAllByRole('button', { name: 'Save memory' })
+    fireEvent.click(saveButtons.at(-1)!)
+    fireEvent.change(screen.getByLabelText('Title'), {
+      target: { value: 'Architecture decision' },
+    })
+    fireEvent.change(screen.getByLabelText('Body'), {
+      target: { value: 'Use the governed local memory pipeline.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Run gate and save' }))
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Saved, committed, indexed, and audited.'),
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('asks memory and renders an answer with a clickable citation', async () => {
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
+    fireEvent.change(screen.getByLabelText('Ask the Second Brain'), {
+      target: { value: 'Why is the feed delta?' },
+    })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Ask' }).at(-1)!)
+
+    await waitFor(() => {
+      expect(screen.getByText('Grounded answer')).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', {
+          name: /\[1\] PowerReviews feed is delta, not full/,
+        }),
+      ).toBeInTheDocument()
+    })
+  })
+})

@@ -34,6 +34,10 @@ pub fn run() {
             let db_path = app_data_dir.join("agent-control.db");
             let db = Db::open(&db_path)
                 .unwrap_or_else(|err| panic!("failed to open app database at {db_path:?}: {err}"));
+            memory::vault::ensure_vault()
+                .unwrap_or_else(|err| panic!("failed to initialize memory vault: {err}"));
+            memory::index::reindex(&db)
+                .unwrap_or_else(|err| panic!("failed to rebuild memory index: {err}"));
             app.manage(db.clone());
 
             // Memory maintenance scheduler (MEMORY-SPEC §6): sweep on app
@@ -77,7 +81,9 @@ pub fn run() {
             commands::memory_tree,
             commands::memory_read,
             commands::memory_search,
+            commands::memory_ask,
             commands::memory_save_manual,
+            commands::memory_ingest,
             commands::memory_proposals_list,
             commands::memory_proposals_decide,
             commands::memory_confirm,

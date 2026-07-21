@@ -123,6 +123,7 @@ export const memoryWriteProposalSchema = z.object({
   status: proposalStatusSchema,
   createdAt: z.string(),
   decidedAt: z.string().nullable(),
+  baseContentHash: z.string().nullable(),
 })
 
 export const reindexResultSchema = z.object({
@@ -142,6 +143,59 @@ export const manualSaveRequestSchema = z.object({
   title: z.string(),
   body: z.string(),
   tags: z.array(z.string()),
+  sensitivity: sensitivitySchema.optional(),
+  source: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  validFrom: z.string().optional(),
+  validUntil: z.string().optional(),
+  staleAfterDays: z.number().int().positive().optional(),
+  expires: z.string().optional(),
+  supersedesId: z.string().optional(),
+})
+
+export const memoryAskRequestSchema = z.object({
+  question: z.string(),
+  domain: z.string(),
+  includeStale: z.boolean(),
+})
+
+export const memoryCitationSchema = z.object({
+  id: z.string(),
+  number: z.number(),
+  title: z.string(),
+  vaultPath: z.string(),
+  status: memoryStatusSchema,
+  excerpt: z.string(),
+  score: z.number(),
+})
+
+export const memoryAnswerSchema = z.object({
+  answer: z.string(),
+  citations: z.array(memoryCitationSchema),
+  warnings: z.array(z.string()),
+  abstained: z.boolean(),
+})
+
+export const extractedMemoryCandidateSchema = manualSaveRequestSchema.omit({
+  domain: true,
+  source: true,
+})
+
+export const memoryIngestRequestSchema = z.object({
+  domain: z.string(),
+  source: z.string(),
+  candidates: z.array(extractedMemoryCandidateSchema).min(1).max(10),
+})
+
+export const memoryIngestFailureSchema = z.object({
+  index: z.number(),
+  title: z.string(),
+  error: z.string(),
+})
+
+export const memoryIngestResultSchema = z.object({
+  proposals: z.array(memoryWriteProposalSchema),
+  rejected: z.array(memoryIngestFailureSchema),
 })
 
 export const proposalDecideRequestSchema = z.object({
@@ -169,5 +223,12 @@ export type MemoryWriteProposal = z.infer<typeof memoryWriteProposalSchema>
 export type ReindexResult = z.infer<typeof reindexResultSchema>
 export type MaintenanceResult = z.infer<typeof maintenanceResultSchema>
 export type ManualSaveRequest = z.infer<typeof manualSaveRequestSchema>
+export type MemoryAskRequest = z.infer<typeof memoryAskRequestSchema>
+export type MemoryCitation = z.infer<typeof memoryCitationSchema>
+export type MemoryAnswer = z.infer<typeof memoryAnswerSchema>
+export type ExtractedMemoryCandidate = z.infer<typeof extractedMemoryCandidateSchema>
+export type MemoryIngestRequest = z.infer<typeof memoryIngestRequestSchema>
+export type MemoryIngestFailure = z.infer<typeof memoryIngestFailureSchema>
+export type MemoryIngestResult = z.infer<typeof memoryIngestResultSchema>
 export type ProposalDecideRequest = z.infer<typeof proposalDecideRequestSchema>
 export type MemorySearchOpts = z.infer<typeof memorySearchOptsSchema>

@@ -1,4 +1,5 @@
 import {
+  ArchiveRestore,
   Brain,
   CheckCircle2,
   ChevronDown,
@@ -6,29 +7,39 @@ import {
   Clock,
   FileText,
   FolderOpen,
+  MessageCircleQuestion,
+  Plus,
   Search,
   Shield,
   Tag,
   Trash2,
+  Wrench,
   X,
 } from 'lucide-react'
-import { useCallback, useMemo, useState } from 'react'
+import { type FormEvent, useCallback, useMemo, useState } from 'react'
+import { DiffView } from '@/components/ui/diff-view'
 import { StatusBadge } from '@/components/ui/status-badge'
 import {
+  useMemoryAsk,
   useMemoryConfirm,
+  useMemoryMaintenanceRun,
   useMemoryProposals,
   useMemoryProposalsDecide,
   useMemoryRead,
   useMemoryReindex,
+  useMemorySaveManual,
   useMemorySearch,
   useMemoryTree,
 } from '@/features/memory/hooks'
-import type { VaultNode } from '@/features/memory/schema'
+import type {
+  MemoryType,
+  MemoryWriteProposal,
+  Sensitivity,
+  VaultNode,
+} from '@/features/memory/schema'
 import { formatCompactNumber, formatRelativeTime } from '@/lib/format'
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const DOMAINS = ['work', 'planphysique', 'personal', 'family', 'finance', 'research'] as const
 
 const TYPE_ICONS: Record<string, typeof FileText> = {
   fact: FileText,
@@ -42,6 +53,10 @@ const STATUS_TONE: Record<string, 'accent' | 'neutral' | 'success' | 'warning'> 
   active: 'success',
   stale: 'warning',
   expired: 'neutral',
+  pending: 'warning',
+  approved: 'success',
+  auto_applied: 'accent',
+  discarded: 'neutral',
 }
 
 const DOMAIN_LABELS: Record<string, string> = {
@@ -53,9 +68,9 @@ const DOMAIN_LABELS: Record<string, string> = {
   research: 'Research',
 }
 
-// ---------------------------------------------------------------------------
-// Vault tree node
-// ---------------------------------------------------------------------------
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
 
 function TreeNode({
   node,
@@ -76,35 +91,23 @@ function TreeNode({
       <div>
         <button
           className={`tree-node tree-node--dir ${isSelected ? 'is-selected' : ''}`}
-          onClick={() => setExpanded((v) => !v)}
+          onClick={() => setExpanded((value) => !value)}
           style={{ paddingLeft: `${12 + depth * 16}px` }}
           type="button"
         >
-          {expanded ? (
-            <ChevronDown aria-hidden="true" size={14} />
-          ) : (
-            <ChevronRight aria-hidden="true" size={14} />
-          )}
-          {expanded ? (
-            <FolderOpen aria-hidden="true" size={14} className="tree-icon--open" />
-          ) : (
-            <FolderOpen aria-hidden="true" size={14} />
-          )}
+          {expanded ? <ChevronDown aria-hidden="true" size={14} /> : <ChevronRight aria-hidden="true" size={14} />}
+          <FolderOpen aria-hidden="true" className={expanded ? 'tree-icon--open' : undefined} size={14} />
           <span className="tree-label">{node.name}</span>
         </button>
-        {expanded && node.children.length > 0 && (
-          <div className="tree-children">
-            {node.children.map((child) => (
-              <TreeNode
-                key={child.path}
-                node={child}
-                depth={depth + 1}
-                onSelect={onSelect}
-                selectedPath={selectedPath}
-              />
-            ))}
-          </div>
-        )}
+        {expanded && node.children.map((child) => (
+          <TreeNode
+            key={child.path}
+            depth={depth + 1}
+            node={child}
+            onSelect={onSelect}
+            selectedPath={selectedPath}
+          />
+        ))}
       </div>
     )
   }
@@ -125,442 +128,309 @@ function TreeNode({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Search result card
-// ---------------------------------------------------------------------------
-
-function SearchResult({
-  item,
-  onSelect,
-}: {
-  item: { row: { id: string; title: string; memType: string; domain: string; vaultPath: string; status: string; summary?: string | null }; score: number; relevance: number; recency: number; trust: number }
-  onSelect: (path: string) => void
-}) {
-  const Icon = TYPE_ICONS[item.row.memType] ?? FileText
-  const scorePct = Math.round(item.score * 100)
-
+function MarkdownContent({ markdown }: { markdown: string }) {
   return (
-    <button
-      className="memory-search-result"
-      onClick={() => onSelect(item.row.vaultPath)}
-      type="button"
-    >
-      <div className="memory-search-result-head">
-        <Icon aria-hidden="true" size={16} />
-        <span className="memory-search-result-title">{item.row.title}</span>
-        <StatusBadge label={item.row.memType} tone="accent" />
-        <StatusBadge label={item.row.status} tone={STATUS_TONE[item.row.status] ?? 'neutral'} />
-        <span className="memory-search-score">{scorePct}%</span>
-      </div>
-      {item.row.summary && (
-        <p className="memory-search-result-summary">{item.row.summary}</p>
-      )}
-      <div className="memory-search-result-meta">
-        <span>{item.row.domain}</span>
-        <span className="memory-search-score-detail">
-          rel {Math.round(item.relevance * 100)}% · rec {Math.round(item.recency * 100)}% · trust{' '}
-          {Math.round(item.trust * 100)}%
-        </span>
-      </div>
-    </button>
+    <div className="markdown-body">
+      {markdown.split('\n').map((line, index) => {
+        const key = `${index}-${line.slice(0, 16)}`
+        if (line.startsWith('### ')) return <h4 key={key}>{line.slice(4)}</h4>
+        if (line.startsWith('## ')) return <h3 key={key}>{line.slice(3)}</h3>
+        if (line.startsWith('# ')) return <h2 key={key}>{line.slice(2)}</h2>
+        if (line.startsWith('- ')) return <div className="markdown-list-line" key={key}>• {line.slice(2)}</div>
+        if (!line.trim()) return <br key={key} />
+        return <div key={key}>{line}</div>
+      })}
+    </div>
   )
 }
 
-// ---------------------------------------------------------------------------
-// Memory reader
-// ---------------------------------------------------------------------------
-
-function MemoryReader({
-  path,
-  onClose,
-}: {
-  path: string
-  onClose: () => void
-}) {
-  const { data, isLoading } = useMemoryRead(path)
+function MemoryReader({ path, onClose }: { path: string; onClose: () => void }) {
+  const readQuery = useMemoryRead(path)
   const confirmMutation = useMemoryConfirm()
 
-  if (isLoading) {
-    return (
-      <div className="memory-reader-empty">
-        <p>Loading…</p>
-      </div>
-    )
-  }
+  if (readQuery.isLoading) return <div className="memory-reader-empty"><p>Loading…</p></div>
+  if (readQuery.error) return <div className="memory-reader-empty" role="alert"><p>{errorMessage(readQuery.error)}</p></div>
+  if (!readQuery.data) return <div className="memory-reader-empty"><p>Could not load file.</p></div>
 
-  if (!data) {
-    return (
-      <div className="memory-reader-empty">
-        <p>Could not load file.</p>
-      </div>
-    )
-  }
-
+  const { data } = readQuery
   const fm = data.frontmatter
-
   return (
     <div className="memory-reader">
       <div className="memory-reader-head">
         <div className="memory-reader-head-left">
           <FileText aria-hidden="true" size={18} />
           <div>
-            <p className="eyebrow">{fm ? DOMAIN_LABELS[fm.domain] ?? fm.domain : 'Unknown'}</p>
+            <p className="eyebrow">{fm ? DOMAIN_LABELS[fm.domain] ?? fm.domain : 'Unindexed file'}</p>
             <h2 className="memory-reader-title">{fm?.title ?? path}</h2>
           </div>
         </div>
         <div className="memory-reader-head-right">
-          {fm && (
-            <>
-              <StatusBadge label={fm.memType} tone="accent" />
-              <StatusBadge
-                label={data.status}
-                tone={STATUS_TONE[data.status] ?? 'neutral'}
-              />
-              {fm.sensitivity === 'sensitive' && (
-                <StatusBadge label="sensitive" tone="warning" />
-              )}
-            </>
-          )}
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close reader">
-            <X aria-hidden="true" size={16} />
-          </button>
+          {fm && <StatusBadge label={fm.memType} tone="accent" />}
+          <StatusBadge label={data.status} tone={STATUS_TONE[data.status] ?? 'neutral'} />
+          {fm?.sensitivity === 'sensitive' && <StatusBadge label="sensitive" tone="warning" />}
+          <button aria-label="Close reader" className="icon-button" onClick={onClose} type="button"><X aria-hidden="true" size={16} /></button>
         </div>
       </div>
 
       {fm && (
-        <dl className="memory-reader-meta">
-          <div>
-            <dt>Confidence</dt>
-            <dd>{Math.round(fm.confidence * 100)}%</dd>
-          </div>
-          <div>
-            <dt>Confirmations</dt>
-            <dd>{fm.confirmations ?? 0}</dd>
-          </div>
-          <div>
-            <dt>Provenance</dt>
-            <dd>{fm.provenance.source}</dd>
-          </div>
-          <div>
-            <dt>Created</dt>
-            <dd>{new Date(fm.created).toLocaleDateString()}</dd>
-          </div>
-          {fm.staleAfterDays && (
-            <div>
-              <dt>Stale after</dt>
-              <dd>{fm.staleAfterDays}d</dd>
-            </div>
-          )}
-          {fm.expires && (
-            <div>
-              <dt>Expires</dt>
-              <dd>{fm.expires}</dd>
-            </div>
-          )}
-          {data.gitLastCommit && (
-            <div>
-              <dt>Git</dt>
-              <dd className="mono">{data.gitLastCommit}</dd>
-            </div>
-          )}
-        </dl>
+        <>
+          <dl className="memory-reader-meta">
+            <div><dt>Confidence</dt><dd>{Math.round(fm.confidence * 100)}%</dd></div>
+            <div><dt>Confirmations</dt><dd>{fm.confirmations ?? 0}</dd></div>
+            <div><dt>Provenance</dt><dd>{fm.provenance.source}</dd></div>
+            <div><dt>Created</dt><dd>{new Date(fm.created).toLocaleDateString()}</dd></div>
+            {fm.staleAfterDays && <div><dt>Stale after</dt><dd>{fm.staleAfterDays}d</dd></div>}
+            {fm.expires && <div><dt>Expires</dt><dd>{fm.expires}</dd></div>}
+            {data.gitLastCommit && <div><dt>Git</dt><dd className="mono">{data.gitLastCommit}</dd></div>}
+          </dl>
+          {fm.tags.length > 0 && <div className="tag-row">{fm.tags.map((tag) => <span className="tag-chip" key={tag}>{tag}</span>)}</div>}
+        </>
       )}
 
-      {fm && fm.tags.length > 0 && (
-        <div className="tag-row">
-          {fm.tags.map((tag) => (
-            <span key={tag} className="tag-chip">
-              {tag}
-            </span>
-          ))}
-        </div>
-      )}
-
-      <div className="memory-reader-body">
-        <div className="markdown-body">{data.markdown}</div>
-      </div>
-
+      <div className="memory-reader-body"><MarkdownContent markdown={data.markdown} /></div>
       {fm && data.status === 'stale' && (
         <div className="memory-reader-actions">
-          <button
-            className="primary-button"
-            onClick={() => confirmMutation.mutate(fm.id)}
-            disabled={confirmMutation.isPending}
-            type="button"
-          >
+          <button className="primary-button" disabled={confirmMutation.isPending} onClick={() => confirmMutation.mutate(fm.id)} type="button">
             <CheckCircle2 aria-hidden="true" size={16} />
             {confirmMutation.isPending ? 'Confirming…' : 'Confirm still true'}
           </button>
+          {confirmMutation.error && <span className="inline-error" role="alert">{errorMessage(confirmMutation.error)}</span>}
         </div>
       )}
     </div>
   )
 }
 
-// ---------------------------------------------------------------------------
-// Proposal card
-// ---------------------------------------------------------------------------
-
-function ProposalCard({
-  proposal,
-  onDecide,
-}: {
-  proposal: {
-    id: string
-    vaultPath: string
-    domain: string
-    op: string
-    sensitivity: string
-    requiresApproval: boolean
-    status: string
-    createdAt: string
-    gateReport: string
-  }
-  onDecide: (id: string, decision: string) => void
+function SearchResult({ item, onSelect }: {
+  item: { row: { id: string; title: string; memType: string; domain: string; vaultPath: string; status: string; summary?: string | null }; score: number; relevance: number; recency: number; trust: number }
+  onSelect: (path: string) => void
 }) {
-  const [expanded, setExpanded] = useState(false)
-  const opTone: Record<string, 'accent' | 'success' | 'warning'> = {
-    create: 'success',
-    update: 'accent',
-    supersede: 'warning',
+  const Icon = TYPE_ICONS[item.row.memType] ?? FileText
+  return (
+    <button className="memory-search-result" onClick={() => onSelect(item.row.vaultPath)} type="button">
+      <div className="memory-search-result-head">
+        <Icon aria-hidden="true" size={16} />
+        <span className="memory-search-result-title">{item.row.title}</span>
+        <StatusBadge label={item.row.memType} tone="accent" />
+        <StatusBadge label={item.row.status} tone={STATUS_TONE[item.row.status] ?? 'neutral'} />
+        <span className="memory-search-score">{Math.round(item.score * 100)}%</span>
+      </div>
+      {item.row.summary && <p className="memory-search-result-summary">{item.row.summary}</p>}
+      <div className="memory-search-result-meta">
+        <span>{DOMAIN_LABELS[item.row.domain] ?? item.row.domain}</span>
+        <span className="memory-search-score-detail" title="Relevance · recency · trust">
+          rel {Math.round(item.relevance * 100)}% · rec {Math.round(item.recency * 100)}% · trust {Math.round(item.trust * 100)}%
+        </span>
+      </div>
+    </button>
+  )
+}
+
+function SaveMemoryForm({ defaultDomain, onClose }: { defaultDomain?: string; onClose: () => void }) {
+  const saveMutation = useMemorySaveManual()
+  const [domain, setDomain] = useState(defaultDomain ?? 'work')
+  const [memType, setMemType] = useState<MemoryType>('fact')
+  const [title, setTitle] = useState('')
+  const [body, setBody] = useState('')
+  const [tags, setTags] = useState('')
+  const [sensitivity, setSensitivity] = useState<Sensitivity>('normal')
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    saveMutation.mutate({
+      domain,
+      memType,
+      title: title.trim(),
+      body: body.trim(),
+      tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      sensitivity,
+      source: 'manual',
+    })
   }
 
   return (
+    <form className="memory-compose surface" onSubmit={submit}>
+      <div className="panel-heading">
+        <div><p className="eyebrow">Admission pipeline</p><h2>Save to memory</h2></div>
+        <button aria-label="Close form" className="icon-button" onClick={onClose} type="button"><X aria-hidden="true" size={16} /></button>
+      </div>
+      <p className="row-subtle">The gate checks secrets, provenance, duplication, sensitivity, and domain isolation before anything reaches the vault.</p>
+      <div className="memory-compose-grid">
+        <label><span>Domain</span><select onChange={(event) => setDomain(event.target.value)} value={domain}>{DOMAINS.map((item) => <option key={item} value={item}>{DOMAIN_LABELS[item]}</option>)}</select></label>
+        <label><span>Type</span><select onChange={(event) => setMemType(event.target.value as MemoryType)} value={memType}>{(['fact', 'decision', 'preference', 'entity', 'episode'] as MemoryType[]).map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+        <label><span>Sensitivity</span><select onChange={(event) => setSensitivity(event.target.value as Sensitivity)} value={sensitivity}><option value="normal">normal</option><option value="sensitive">sensitive</option></select></label>
+        <label className="memory-compose-title"><span>Title</span><input maxLength={200} onChange={(event) => setTitle(event.target.value)} required value={title} /></label>
+        <label className="memory-compose-wide"><span>Body</span><textarea maxLength={memType === 'episode' || memType === 'entity' ? undefined : 1200} onChange={(event) => setBody(event.target.value)} required rows={8} value={body} /></label>
+        <label className="memory-compose-wide"><span>Tags <small>comma separated</small></span><input onChange={(event) => setTags(event.target.value)} placeholder="project, vendor, architecture" value={tags} /></label>
+      </div>
+      {saveMutation.error && <div className="inline-error" role="alert">{errorMessage(saveMutation.error)}</div>}
+      {saveMutation.data && (
+        <div className="memory-operation-result" role="status">
+          <CheckCircle2 aria-hidden="true" size={16} />
+          {saveMutation.data.status === 'auto_applied' ? 'Saved, committed, indexed, and audited.' : 'Proposal created and waiting for approval.'}
+        </div>
+      )}
+      <div className="memory-compose-actions">
+        <button className="primary-button" disabled={saveMutation.isPending || !title.trim() || !body.trim()} type="submit"><Plus aria-hidden="true" size={16} />{saveMutation.isPending ? 'Checking…' : 'Run gate and save'}</button>
+      </div>
+    </form>
+  )
+}
+
+function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includeStale: boolean; onSelect: (path: string) => void }) {
+  const askMutation = useMemoryAsk()
+  const [question, setQuestion] = useState('')
+  const [askDomain, setAskDomain] = useState(domain ?? 'work')
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    askMutation.mutate({ question: question.trim(), domain: askDomain, includeStale })
+  }
+
+  return (
+    <div className="memory-ask">
+      <form className="memory-ask-form" onSubmit={submit}>
+        <MessageCircleQuestion aria-hidden="true" size={20} />
+        <input aria-label="Ask the Second Brain" onChange={(event) => setQuestion(event.target.value)} placeholder="What did we decide about the PowerReviews feed?" value={question} />
+        <select aria-label="Answer domain" onChange={(event) => setAskDomain(event.target.value)} value={askDomain}>{DOMAINS.map((item) => <option key={item} value={item}>{DOMAIN_LABELS[item]}</option>)}</select>
+        <button className="primary-button" disabled={askMutation.isPending || question.trim().length < 2} type="submit">{askMutation.isPending ? 'Reading…' : 'Ask'}</button>
+      </form>
+      {askMutation.error && <div className="inline-error" role="alert">{errorMessage(askMutation.error)}</div>}
+      {askMutation.data && (
+        <div className={`memory-answer ${askMutation.data.abstained ? 'memory-answer--abstained' : ''}`}>
+          <p className="eyebrow">Grounded answer</p>
+          <div className="memory-answer-copy">{askMutation.data.answer}</div>
+          {askMutation.data.warnings.map((warning) => <div className="memory-answer-warning" key={warning}>{warning}</div>)}
+          {askMutation.data.citations.length > 0 && (
+            <div className="memory-citations">
+              {askMutation.data.citations.map((citation) => (
+                <button key={citation.id} onClick={() => onSelect(citation.vaultPath)} type="button">
+                  <span>[{citation.number}] {citation.title}</span>
+                  <span>{citation.status} · {Math.round(citation.score * 100)}%</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {!askMutation.data && !askMutation.isPending && <div className="memory-welcome"><MessageCircleQuestion aria-hidden="true" className="memory-welcome-icon" size={48} /><h2>Ask with evidence</h2><p>Answers are extractive and cite exact vault files. If no evidence is present, the system abstains instead of inventing an answer.</p></div>}
+    </div>
+  )
+}
+
+type GateReport = { passed?: boolean; checks?: Array<{ name: string; passed: boolean; detail: string }> }
+
+function ProposalCard({ proposal, onDecide }: { proposal: MemoryWriteProposal; onDecide: (id: string, decision: string) => void }) {
+  const [expanded, setExpanded] = useState(false)
+  const gate = useMemo<GateReport>(() => {
+    try { return JSON.parse(proposal.gateReport) as GateReport } catch { return {} }
+  }, [proposal.gateReport])
+  return (
     <div className="proposal-card">
       <div className="proposal-card-head">
-        <StatusBadge label={proposal.op} tone={opTone[proposal.op] ?? 'neutral'} />
-        <span className="proposal-card-path">{proposal.vaultPath}</span>
+        <StatusBadge label={proposal.op} tone={proposal.op === 'supersede' ? 'warning' : proposal.op === 'create' ? 'success' : 'accent'} />
+        <span className="proposal-card-path" title={proposal.vaultPath}>{proposal.vaultPath}</span>
         <StatusBadge label={proposal.status} tone={STATUS_TONE[proposal.status] ?? 'neutral'} />
       </div>
-      <div className="proposal-card-meta">
-        <span>{proposal.domain}</span>
-        <span>{formatRelativeTime(new Date(proposal.createdAt).getTime())}</span>
-        {proposal.requiresApproval && (
-          <StatusBadge label="needs approval" tone="warning" />
-        )}
-      </div>
-      <button
-        className="proposal-toggle"
-        onClick={() => setExpanded((v) => !v)}
-        type="button"
-      >
-        {expanded ? 'Hide' : 'Show'} gate report
-      </button>
+      <div className="proposal-card-meta"><span>{DOMAIN_LABELS[proposal.domain] ?? proposal.domain}</span><span>{formatRelativeTime(new Date(proposal.createdAt).getTime())}</span>{proposal.requiresApproval && <StatusBadge label="needs approval" tone="warning" />}</div>
+      <button className="proposal-toggle" onClick={() => setExpanded((value) => !value)} type="button">{expanded ? 'Hide review' : 'Review gate and diff'}</button>
       {expanded && (
-        <pre className="proposal-gate-report">{proposal.gateReport}</pre>
+        <div className="proposal-review">
+          <div className="proposal-checks">
+            {gate.checks?.map((check) => <div key={check.name}><span>{check.passed ? '✓' : '×'} {check.name}</span><small>{check.detail}</small></div>)}
+          </div>
+          <DiffView unifiedDiff={proposal.unifiedDiff} />
+        </div>
       )}
       {proposal.status === 'pending' && proposal.requiresApproval && (
         <div className="proposal-actions">
-          <button
-            className="primary-button"
-            onClick={() => onDecide(proposal.id, 'approve')}
-            type="button"
-          >
-            <CheckCircle2 aria-hidden="true" size={14} />
-            Approve
-          </button>
-          <button
-            className="icon-button"
-            onClick={() => onDecide(proposal.id, 'discard')}
-            type="button"
-          >
-            <Trash2 aria-hidden="true" size={14} />
-            Discard
-          </button>
+          <button className="primary-button" onClick={() => onDecide(proposal.id, 'approve')} type="button"><CheckCircle2 aria-hidden="true" size={14} />Approve</button>
+          <button className="icon-button" onClick={() => onDecide(proposal.id, 'discard')} title="Discard" type="button"><Trash2 aria-hidden="true" size={14} /></button>
         </div>
       )}
     </div>
   )
 }
 
-// ---------------------------------------------------------------------------
-// Main page
-// ---------------------------------------------------------------------------
-
 export function MemoryPage() {
-  const [searchQuery, setSearchQuery] = useState('')
+  const [searchText, setSearchText] = useState('')
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
-  const [showProposals, setShowProposals] = useState(false)
   const [domainFilter, setDomainFilter] = useState<string | undefined>()
+  const [includeStale, setIncludeStale] = useState(false)
+  const [mode, setMode] = useState<'search' | 'ask'>('search')
+  const [showComposer, setShowComposer] = useState(false)
+  const [railTab, setRailTab] = useState<'pending' | 'activity'>('pending')
 
   const treeQuery = useMemoryTree(domainFilter)
-  const searchQuery_ = useMemorySearch(searchQuery, domainFilter)
+  const searchQuery = useMemorySearch(searchText, domainFilter, includeStale)
   const proposalsQuery = useMemoryProposals()
   const decideMutation = useMemoryProposalsDecide()
   const reindexMutation = useMemoryReindex()
+  const maintenanceMutation = useMemoryMaintenanceRun()
 
-  const pendingProposals = useMemo(
-    () => proposalsQuery.data?.filter((p) => p.status === 'pending') ?? [],
-    [proposalsQuery.data],
-  )
-
-  const handleSelect = useCallback((path: string) => {
-    setSelectedPath(path)
-    setSearchQuery('')
-  }, [])
-
-  const handleDecide = useCallback(
-    (id: string, decision: string) => {
-      decideMutation.mutate({ id, decision })
-    },
-    [decideMutation],
-  )
-
-  const domains = ['work', 'planphysique', 'personal', 'family', 'finance', 'research']
+  const pending = useMemo(() => proposalsQuery.data?.filter((proposal) => proposal.status === 'pending') ?? [], [proposalsQuery.data])
+  const activity = useMemo(() => proposalsQuery.data?.filter((proposal) => proposal.status !== 'pending') ?? [], [proposalsQuery.data])
+  const visibleProposals = railTab === 'pending' ? pending : activity
+  const selectPath = useCallback((path: string) => { setSelectedPath(path); setShowComposer(false) }, [])
 
   return (
     <section className="page-section memory-page">
       <div className="memory-layout">
-        {/* ---- Left: tree ---- */}
         <aside className="memory-sidebar surface">
           <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Vault</p>
-              <h2>Memory tree</h2>
-            </div>
-            <button
-              className="icon-button"
-              onClick={() => reindexMutation.mutate()}
-              disabled={reindexMutation.isPending}
-              type="button"
-              aria-label="Reindex vault"
-            >
-              <Brain aria-hidden="true" size={16} />
-            </button>
+            <div><p className="eyebrow">Local vault</p><h2>Second Brain</h2></div>
+            <button aria-label="Save a memory" className="icon-button" onClick={() => { setShowComposer(true); setSelectedPath(null) }} type="button"><Plus aria-hidden="true" size={16} /></button>
           </div>
-
           <div className="memory-domain-strip">
-            <button
-              className={`segment-button ${!domainFilter ? 'is-active' : ''}`}
-              onClick={() => setDomainFilter(undefined)}
-              type="button"
-            >
-              All
-            </button>
-            {domains.map((d) => (
-              <button
-                key={d}
-                className={`segment-button ${domainFilter === d ? 'is-active' : ''}`}
-                onClick={() => setDomainFilter(d)}
-                type="button"
-              >
-                {DOMAIN_LABELS[d] ?? d}
-              </button>
-            ))}
+            <button className={`segment-button ${!domainFilter ? 'is-active' : ''}`} onClick={() => setDomainFilter(undefined)} type="button">All</button>
+            {DOMAINS.map((domain) => <button className={`segment-button ${domainFilter === domain ? 'is-active' : ''}`} key={domain} onClick={() => setDomainFilter(domain)} type="button">{DOMAIN_LABELS[domain]}</button>)}
           </div>
-
           <div className="memory-tree">
-            {treeQuery.data?.map((node) => (
-              <TreeNode
-                key={node.path}
-                node={node}
-                depth={0}
-                onSelect={handleSelect}
-                selectedPath={selectedPath}
-              />
-            ))}
-            {treeQuery.data && treeQuery.data.length === 0 && (
-              <div className="empty-state">
-                <h3>Empty vault</h3>
-                <p>No memory files yet. Save something to get started.</p>
-              </div>
-            )}
+            {treeQuery.isLoading && <span className="row-subtle">Loading vault…</span>}
+            {treeQuery.error && <span className="inline-error" role="alert">{errorMessage(treeQuery.error)}</span>}
+            {treeQuery.data?.map((node) => <TreeNode depth={0} key={node.path} node={node} onSelect={selectPath} selectedPath={selectedPath} />)}
+            {treeQuery.data?.length === 0 && <div className="empty-state"><h3>Empty vault</h3><p>Save a fact or decision to begin.</p></div>}
           </div>
-
-          <div className="memory-sidebar-footer">
-            <span className="row-subtle">
-              {formatCompactNumber(proposalsQuery.data?.length ?? 0)} proposals
-            </span>
-            {pendingProposals.length > 0 && (
-              <StatusBadge label={`${pendingProposals.length} pending`} tone="warning" />
-            )}
+          <div className="memory-sidebar-tools">
+            <button disabled={reindexMutation.isPending} onClick={() => reindexMutation.mutate()} type="button"><ArchiveRestore aria-hidden="true" size={14} />{reindexMutation.isPending ? 'Indexing…' : 'Reindex'}</button>
+            <button disabled={maintenanceMutation.isPending} onClick={() => maintenanceMutation.mutate()} type="button"><Wrench aria-hidden="true" size={14} />{maintenanceMutation.isPending ? 'Running…' : 'Maintenance'}</button>
           </div>
+          {(reindexMutation.data || maintenanceMutation.data) && <div className="memory-maintenance-result" role="status">{reindexMutation.data && `${reindexMutation.data.indexed} indexed · ${reindexMutation.data.drifted} drifted · ${reindexMutation.data.orphaned} orphaned`}{maintenanceMutation.data && `${maintenanceMutation.data.expired} archived · ${maintenanceMutation.data.markedStale} stale`}</div>}
+          {(reindexMutation.error || maintenanceMutation.error) && <div className="inline-error" role="alert">{errorMessage(reindexMutation.error ?? maintenanceMutation.error)}</div>}
+          <div className="memory-sidebar-footer"><span className="row-subtle">{formatCompactNumber(proposalsQuery.data?.length ?? 0)} writes</span>{pending.length > 0 && <StatusBadge label={`${pending.length} pending`} tone="warning" />}</div>
         </aside>
 
-        {/* ---- Center: search + reader ---- */}
         <main className="memory-main">
-          {!selectedPath ? (
+          {showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={() => setSelectedPath(null)} path={selectedPath} /> : (
             <>
-              <div className="surface memory-search-bar">
-                <Search aria-hidden="true" size={18} />
-                <input
-                  aria-label="Search memory"
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search the vault…"
-                  type="search"
-                  value={searchQuery}
-                />
-                <div className="memory-search-toggle">
-                  <label className="memory-toggle-label">
-                    <input
-                      type="checkbox"
-                      checked={searchQuery_.data !== undefined}
-                      readOnly
-                    />
-                    Include stale
-                  </label>
-                </div>
+              <div className="surface memory-mode-bar">
+                <div className="memory-mode-switch"><button className={mode === 'search' ? 'is-active' : ''} onClick={() => setMode('search')} type="button"><Search aria-hidden="true" size={15} />Search</button><button className={mode === 'ask' ? 'is-active' : ''} onClick={() => setMode('ask')} type="button"><MessageCircleQuestion aria-hidden="true" size={15} />Ask</button></div>
+                <label className="memory-toggle-label"><input checked={includeStale} onChange={(event) => setIncludeStale(event.target.checked)} type="checkbox" />Include stale</label>
+                <button className="primary-button" onClick={() => setShowComposer(true)} type="button"><Plus aria-hidden="true" size={15} />Save memory</button>
               </div>
-
-              <div className="memory-search-results">
-                {searchQuery.length >= 2 && searchQuery_.data && searchQuery_.data.length > 0 ? (
-                  searchQuery_.data.map((item) => (
-                    <SearchResult
-                      key={item.row.id}
-                      item={item}
-                      onSelect={handleSelect}
-                    />
-                  ))
-                ) : searchQuery.length >= 2 && searchQuery_.data?.length === 0 ? (
-                  <div className="empty-state">
-                    <h3>No results</h3>
-                    <p>Try different keywords or broaden your search.</p>
+              {mode === 'search' ? (
+                <>
+                  <div className="surface memory-search-bar"><Search aria-hidden="true" size={18} /><input aria-label="Search memory" onChange={(event) => setSearchText(event.target.value)} placeholder="Search titles, facts, decisions, people…" type="search" value={searchText} /></div>
+                  <div className="memory-search-results">
+                    {searchQuery.error && <div className="inline-error" role="alert">{errorMessage(searchQuery.error)}</div>}
+                    {searchText.length >= 2 && searchQuery.data?.map((item) => <SearchResult item={item} key={item.row.id} onSelect={selectPath} />)}
+                    {searchText.length >= 2 && searchQuery.data?.length === 0 && <div className="empty-state"><h3>No evidence found</h3><p>Try other terms, another domain, or include stale memories.</p></div>}
+                    {searchText.length < 2 && <div className="memory-welcome"><Brain aria-hidden="true" className="memory-welcome-icon" size={48} /><h2>Your governed memory</h2><p>Markdown is the source of truth; SQLite powers retrieval; Git and the audit chain preserve every change.</p></div>}
                   </div>
-                ) : (
-                  <div className="memory-welcome">
-                    <Brain aria-hidden="true" size={48} className="memory-welcome-icon" />
-                    <h2>Second Brain</h2>
-                    <p>
-                      Your personal knowledge vault. Search across domains, browse the tree, or
-                      save new memories manually.
-                    </p>
-                  </div>
-                )}
-              </div>
+                </>
+              ) : <AskMemory domain={domainFilter} includeStale={includeStale} onSelect={selectPath} />}
             </>
-          ) : (
-            <MemoryReader path={selectedPath} onClose={() => setSelectedPath(null)} />
           )}
         </main>
 
-        {/* ---- Right: proposals rail ---- */}
-        <aside className={`memory-proposals-rail surface ${showProposals ? 'is-open' : ''}`}>
-          <button
-            className="memory-proposals-toggle"
-            onClick={() => setShowProposals((v) => !v)}
-            type="button"
-          >
-            <Shield aria-hidden="true" size={16} />
-            <span>Proposals</span>
-            {pendingProposals.length > 0 && (
-              <span className="memory-proposals-count">{pendingProposals.length}</span>
-            )}
-          </button>
-
-          {showProposals && (
-            <div className="memory-proposals-list">
-              {proposalsQuery.data && proposalsQuery.data.length > 0 ? (
-                proposalsQuery.data.map((p) => (
-                  <ProposalCard key={p.id} proposal={p} onDecide={handleDecide} />
-                ))
-              ) : (
-                <div className="empty-state">
-                  <h3>No proposals</h3>
-                  <p>Memory write proposals will appear here.</p>
-                </div>
-              )}
-            </div>
-          )}
+        <aside className="memory-proposals-rail surface">
+          <div className="memory-proposals-toggle"><Shield aria-hidden="true" size={16} /><span>Governance</span>{pending.length > 0 && <span className="memory-proposals-count">{pending.length}</span>}</div>
+          <div className="memory-rail-tabs"><button className={railTab === 'pending' ? 'is-active' : ''} onClick={() => setRailTab('pending')} type="button">Pending</button><button className={railTab === 'activity' ? 'is-active' : ''} onClick={() => setRailTab('activity')} type="button">Activity</button></div>
+          {decideMutation.error && <div className="inline-error memory-rail-error" role="alert">{errorMessage(decideMutation.error)}</div>}
+          <div className="memory-proposals-list">
+            {visibleProposals.map((proposal) => <ProposalCard key={proposal.id} onDecide={(id, decision) => decideMutation.mutate({ id, decision })} proposal={proposal} />)}
+            {visibleProposals.length === 0 && <div className="empty-state"><h3>{railTab === 'pending' ? 'Nothing to review' : 'No activity yet'}</h3><p>{railTab === 'pending' ? 'Sensitive and truth-changing writes appear here.' : 'Automatic and decided writes appear here.'}</p></div>}
+          </div>
         </aside>
       </div>
     </section>
