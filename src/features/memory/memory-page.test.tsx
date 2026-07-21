@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MemoryPage } from '@/features/memory/memory-page'
+import { arrayBufferToBase64 } from '@/features/memory/binary'
 
 afterEach(cleanup)
 
@@ -21,6 +22,13 @@ function renderPage() {
 }
 
 describe('MemoryPage', () => {
+  it('encodes PDF bytes losslessly for the Tauri import boundary', () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff, 0x10])
+    const encoded = arrayBufferToBase64(bytes.buffer)
+    const decoded = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0))
+    expect(decoded).toEqual(bytes)
+  })
+
   it('exposes a real stale toggle and runs a manual save through the pipeline', async () => {
     renderPage()
 
@@ -83,6 +91,36 @@ describe('MemoryPage', () => {
       expect(screen.getByText('Source preserved and versioned')).toBeInTheDocument()
       expect(screen.getByText(/1 proposal\(s\) waiting for review/)).toBeInTheDocument()
       expect(screen.getByText(/Review and approve the proposed facts/)).toBeInTheDocument()
+    })
+  })
+
+  it('accepts a PDF as binary instead of decoding it with File.text()', async () => {
+    renderPage()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Import document' }).at(-1)!)
+    fireEvent.click(screen.getByRole('tab', { name: 'File' }))
+
+    const bytes = new TextEncoder().encode('%PDF-1.4\nminimal test body')
+    const file = new File([bytes], 'sierra.pdf', { type: 'application/pdf' })
+    Object.defineProperty(file, 'arrayBuffer', {
+      value: async () => bytes.buffer,
+    })
+    const fileInput = screen
+      .getByText('PDF or text document')
+      .closest('label')
+      ?.querySelector('input[type="file"]')
+    expect(fileInput).not.toBeNull()
+    fireEvent.change(fileInput!, {
+      target: { files: [file] },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('sierra')).toBeInTheDocument()
+      expect(screen.getByText('sierra.pdf')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Import and create proposals' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Source preserved and versioned')).toBeInTheDocument()
     })
   })
 })

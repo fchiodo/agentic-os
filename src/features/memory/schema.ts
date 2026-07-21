@@ -206,6 +206,8 @@ export const documentImportRequestSchema = z.object({
   inputKind: documentInputKindSchema,
   title: z.string().min(1).max(200),
   content: z.string().optional(),
+  contentEncoding: z.enum(['utf8', 'base64']).optional(),
+  mimeType: z.string().max(200).optional(),
   sourceUrl: z.string().optional(),
   fileName: z.string().optional(),
 })
@@ -217,6 +219,7 @@ export const documentImportRecordSchema = z.object({
   inputKind: documentInputKindSchema,
   sourceRef: z.string(),
   sourcePath: z.string(),
+  originalPath: z.string().nullable(),
   contentHash: z.string(),
   byteCount: z.number(),
   candidateCount: z.number(),

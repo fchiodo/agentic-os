@@ -456,6 +456,10 @@ pub struct DocumentImportRequest {
     pub title: String,
     /// Required for text/file imports. URL imports fetch the remote body.
     pub content: Option<String>,
+    /// `base64` for binary file uploads; omitted for UTF-8 text.
+    pub content_encoding: Option<String>,
+    /// Browser-provided media type. The importer still verifies file signatures.
+    pub mime_type: Option<String>,
     pub source_url: Option<String>,
     pub file_name: Option<String>,
 }
@@ -469,6 +473,8 @@ pub struct DocumentImportRecord {
     pub input_kind: String,
     pub source_ref: String,
     pub source_path: String,
+    /// Preserved original binary when the source is not plain text (for example a PDF).
+    pub original_path: Option<String>,
     pub content_hash: String,
     pub byte_count: i64,
     pub candidate_count: i64,
@@ -507,6 +513,7 @@ pub struct ProposalDecideRequest {
 mod tests {
     use super::*;
     use crate::db::Db;
+    use base64::Engine as _;
 
     // Env vars are process-global and cargo runs tests in parallel threads:
     // every test that overrides AGENTIC_OS_VAULT_ROOT / AGENTIC_OS_SKILLS_ROOT
@@ -555,6 +562,41 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("agentic-os-mem-{label}-{nonce}.db"));
         Db::open(&path).expect("temp db opens")
+    }
+
+    fn minimal_text_pdf(text: &str) -> Vec<u8> {
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('(', "\\(")
+            .replace(')', "\\)");
+        let stream = format!("BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET");
+        let objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, object).as_bytes());
+        }
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
     }
 
     fn sample_row(id: &str, title: &str, status: &str, last_confirmed: Option<&str>) -> MemoryRow {
@@ -1211,6 +1253,8 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
                     input_kind: "text".to_string(),
                     title: "Sierra Headless API".to_string(),
                     content: Some(body.to_string()),
+                    content_encoding: None,
+                    mime_type: None,
                     source_url: None,
                     file_name: None,
                 },
@@ -1254,6 +1298,54 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
     }
 
     #[test]
+    fn pdf_document_import_extracts_text_and_preserves_original_bytes() {
+        let roots = EnvRoots::new("pdf-document-import");
+        let db = temp_db("pdf-document-import");
+        let pdf = minimal_text_pdf(
+            "Headless API authentication requires OAuth client credentials with short-lived JWT tokens.",
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&pdf);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(importer::import_document(
+                &db,
+                &DocumentImportRequest {
+                    domain: "work".to_string(),
+                    input_kind: "file".to_string(),
+                    title: "Sierra authentication".to_string(),
+                    content: Some(encoded),
+                    content_encoding: Some("base64".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    source_url: None,
+                    file_name: Some("sierra-authentication.pdf".to_string()),
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(result.import.byte_count, pdf.len() as i64);
+        assert!(!result.proposals.is_empty());
+        let original_path = result
+            .import
+            .original_path
+            .as_deref()
+            .expect("PDF original path is recorded");
+        assert!(original_path.ends_with(".pdf"));
+        assert_eq!(vault::read_bytes(original_path).unwrap(), pdf);
+        let source = importer::read_source(&db, &result.import.id).unwrap();
+        assert!(source.content.contains("OAuth client credentials"));
+        assert!(source.content.contains("short-lived JWT tokens"));
+        assert!(source
+            .import
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("original PDF was preserved byte-for-byte")));
+        drop(roots);
+    }
+
+    #[test]
     fn document_import_rejects_real_credentials_without_writing_a_source() {
         let roots = EnvRoots::new("document-secret");
         let db = temp_db("document-secret");
@@ -1271,6 +1363,8 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
                     "Use Authorization: Bearer real-production-token-1234567890 for every request."
                         .to_string(),
                 ),
+                content_encoding: None,
+                mime_type: None,
                 source_url: None,
                 file_name: None,
             },

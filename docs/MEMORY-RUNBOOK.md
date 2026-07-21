@@ -46,10 +46,13 @@ memory, for example API documentation, an email thread export, meeting notes,
 or a Confluence page snapshot.
 
 1. Choose the destination domain and a stable title.
-2. Paste text, select a UTF-8 text file, or provide the final public URL.
+2. Paste text, select a PDF/UTF-8 text file, or provide the final public URL.
 3. The complete body is preserved under
    `_sources/<domain>/<date>-<slug>-<id>.md`, including capture metadata and a
    SHA-256 content hash. It is committed to the vault Git history and audited.
+   For PDFs, this Markdown file contains the locally extracted text and the
+   original binary is preserved byte-for-byte beside it as `.pdf`; the hash and
+   byte count refer to the original PDF.
 4. A deterministic local extractor ranks self-contained claims and creates at
    most 10 atomic fact/decision proposals. Every candidate links back to the
    source snapshot with a wiki link.
@@ -59,8 +62,11 @@ or a Confluence page snapshot.
 Limits and safety rules:
 
 - Maximum decoded source size: 2 MiB; no silent truncation.
-- Text/file imports must be UTF-8. Supported file picker formats include
-  Markdown/MDX, TXT, JSON, YAML, XML, and HTML.
+- Supported uploads include PDF plus UTF-8 Markdown/MDX, TXT, JSON, YAML, XML,
+  and HTML. PDF bytes cross the IPC boundary as base64, are signature-checked,
+  and are parsed locally with a 20-second extraction timeout. Encrypted,
+  malformed, scanned, or image-only PDFs return an explicit error; OCR is not
+  performed silently.
 - Remote imports accept HTTP(S) text only, use a 20-second total timeout, do
   not follow redirects, and reject loopback, private, link-local, reserved,
   credential-bearing, or binary targets. Import the final redirect URL

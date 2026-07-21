@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use reqwest::{redirect::Policy, Url};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::db::Db;
@@ -20,9 +22,12 @@ const MAX_CANDIDATES: usize = 10;
 const MAX_HISTORY_ROWS: i64 = 100;
 
 struct AcquiredDocument {
-    raw: String,
+    source_bytes: Vec<u8>,
+    snapshot_body: String,
     extraction_text: String,
     source_ref: String,
+    original_extension: Option<&'static str>,
+    mime_type: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -34,6 +39,10 @@ struct SourceFrontmatter<'a> {
     title: &'a str,
     input_kind: &'a str,
     source_ref: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<&'a str>,
     captured_at: &'a str,
     content_hash: &'a str,
     trust: &'static str,
@@ -55,22 +64,22 @@ pub async fn import_document(
     validate_request(request)?;
 
     let mut acquired = acquire(request).await?;
-    if acquired.raw.as_bytes().len() > MAX_DOCUMENT_BYTES {
+    if acquired.source_bytes.len() > MAX_DOCUMENT_BYTES {
         return Err(io_error("document exceeds the 2 MiB import limit"));
     }
-    if acquired.raw.trim().is_empty() {
+    if acquired.snapshot_body.trim().is_empty() {
         return Err(io_error("document is empty"));
     }
-    if acquired.raw.contains('\0') {
+    if acquired.original_extension.is_none() && acquired.snapshot_body.contains('\0') {
         return Err(io_error("document contains unsupported NUL bytes"));
     }
-    if super::pipeline::contains_secrets(&acquired.raw) {
+    if super::pipeline::contains_secrets(&acquired.snapshot_body) {
         audit_import_reject(db, &request.title, "secrets detected");
         return Err(io_error(
             "document import rejected: a credential or secret was detected; redact it before importing",
         ));
     }
-    if super::pipeline::contains_prompt_injection(&acquired.raw) {
+    if super::pipeline::contains_prompt_injection(&acquired.snapshot_body) {
         acquired.warnings.push(
             "Possible prompt-injection language detected. The original source was preserved as untrusted and extracted facts still require approval."
                 .to_string(),
@@ -79,21 +88,27 @@ pub async fn import_document(
 
     let import_id = Uuid::new_v4().to_string();
     let created_at = chrono::Utc::now().to_rfc3339();
-    let source_path = format!(
-        "_sources/{}/{}-{}-{}.md",
+    let source_stem = format!(
+        "_sources/{}/{}-{}-{}",
         request.domain,
         chrono::Utc::now().format("%Y-%m-%d"),
         slugify(&request.title),
         &import_id[..8]
     );
-    let content_hash = crate::audit::compute_content_hash(&acquired.raw);
+    let source_path = format!("{source_stem}.md");
+    let original_path = acquired
+        .original_extension
+        .map(|extension| format!("{source_stem}.{extension}"));
+    let content_hash = hash_bytes(&acquired.source_bytes);
     let snapshot = serialize_snapshot(
         &import_id,
         request,
         &acquired.source_ref,
+        original_path.as_deref(),
+        acquired.mime_type.as_deref(),
         &created_at,
         &content_hash,
-        &acquired.raw,
+        &acquired.snapshot_body,
     )?;
 
     persist_source(
@@ -102,10 +117,12 @@ pub async fn import_document(
         request,
         &acquired.source_ref,
         &source_path,
+        original_path.as_deref(),
         &content_hash,
-        acquired.raw.as_bytes().len() as i64,
+        acquired.source_bytes.len() as i64,
         &created_at,
         &snapshot,
+        &acquired.source_bytes,
     )?;
 
     let candidates = extract_candidates(
@@ -178,7 +195,7 @@ pub fn list(db: &Db, domain: Option<&str>) -> AppResult<Vec<DocumentImportRecord
         if let Some(domain) = domain {
             let mut stmt = conn.prepare(
                 "SELECT id, domain, title, input_kind, source_ref, source_path,
-                        content_hash, byte_count, candidate_count, warning_count,
+                        original_path, content_hash, byte_count, candidate_count, warning_count,
                         warnings_json, status, created_at, updated_at
                  FROM document_imports WHERE domain = ?1
                  ORDER BY created_at DESC LIMIT ?2",
@@ -190,7 +207,7 @@ pub fn list(db: &Db, domain: Option<&str>) -> AppResult<Vec<DocumentImportRecord
         } else {
             let mut stmt = conn.prepare(
                 "SELECT id, domain, title, input_kind, source_ref, source_path,
-                        content_hash, byte_count, candidate_count, warning_count,
+                        original_path, content_hash, byte_count, candidate_count, warning_count,
                         warnings_json, status, created_at, updated_at
                  FROM document_imports ORDER BY created_at DESC LIMIT ?1",
             )?;
@@ -253,23 +270,47 @@ async fn acquire(request: &DocumentImportRequest) -> AppResult<AcquiredDocument>
                 .clone()
                 .ok_or_else(|| io_error("content is required for a text import"))?;
             Ok(AcquiredDocument {
+                source_bytes: raw.as_bytes().to_vec(),
                 extraction_text: raw.clone(),
-                raw,
+                snapshot_body: raw,
                 source_ref: "manual:pasted-text".to_string(),
+                original_extension: None,
+                mime_type: Some("text/plain; charset=utf-8".to_string()),
                 warnings: Vec::new(),
             })
         }
         "file" => {
-            let raw = request
-                .content
-                .clone()
-                .ok_or_else(|| io_error("content is required for a file import"))?;
             let file_name = request
                 .file_name
                 .as_deref()
                 .map(clean_reference)
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| "uploaded-document".to_string());
+            let mime_type = request
+                .mime_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_lowercase);
+            let is_pdf = file_name.to_ascii_lowercase().ends_with(".pdf")
+                || mime_type.as_deref() == Some("application/pdf");
+            if is_pdf {
+                return acquire_pdf(request, &file_name, mime_type).await;
+            }
+
+            if request
+                .content_encoding
+                .as_deref()
+                .is_some_and(|value| value != "utf8")
+            {
+                return Err(io_error(
+                    "binary uploads are currently supported only for PDF files",
+                ));
+            }
+            let raw = request
+                .content
+                .clone()
+                .ok_or_else(|| io_error("content is required for a file import"))?;
             let is_html = file_name.ends_with(".html") || file_name.ends_with(".htm");
             let extraction_text = if is_html {
                 html_to_text(&raw)
@@ -277,9 +318,12 @@ async fn acquire(request: &DocumentImportRequest) -> AppResult<AcquiredDocument>
                 raw.clone()
             };
             Ok(AcquiredDocument {
+                source_bytes: raw.as_bytes().to_vec(),
                 extraction_text,
-                raw,
+                snapshot_body: raw,
                 source_ref: format!("file:{file_name}"),
+                original_extension: None,
+                mime_type,
                 warnings: if is_html {
                     vec!["HTML markup was normalized only for extraction; the source snapshot preserves the original document.".to_string()]
                 } else {
@@ -298,6 +342,73 @@ async fn acquire(request: &DocumentImportRequest) -> AppResult<AcquiredDocument>
         }
         _ => Err(io_error("inputKind must be text, file, or url")),
     }
+}
+
+async fn acquire_pdf(
+    request: &DocumentImportRequest,
+    file_name: &str,
+    mime_type: Option<String>,
+) -> AppResult<AcquiredDocument> {
+    if request.content_encoding.as_deref() != Some("base64") {
+        return Err(io_error(
+            "PDF upload is not encoded correctly; select the file again after updating the app",
+        ));
+    }
+    let encoded = request
+        .content
+        .as_deref()
+        .ok_or_else(|| io_error("content is required for a PDF import"))?;
+    let max_encoded_len = MAX_DOCUMENT_BYTES.div_ceil(3) * 4;
+    if encoded.len() > max_encoded_len {
+        return Err(io_error("document exceeds the 2 MiB import limit"));
+    }
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| io_error("PDF upload contains invalid base64 data"))?;
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(io_error("document exceeds the 2 MiB import limit"));
+    }
+    if !bytes.starts_with(b"%PDF-") {
+        return Err(io_error(
+            "the selected file has a PDF name or media type but no valid PDF signature",
+        ));
+    }
+
+    let extraction_bytes = bytes.clone();
+    let extraction = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(&extraction_bytes))
+        }),
+    )
+    .await
+    .map_err(|_| io_error("PDF text extraction exceeded the 20 second safety limit"))?
+    .map_err(|_| io_error("PDF text extraction worker failed"))?
+    .map_err(|_| io_error("PDF parser stopped while reading an invalid document"))?
+    .map_err(|error| {
+        io_error(format!(
+            "could not extract text from this PDF (it may be encrypted or malformed): {error}"
+        ))
+    })?;
+    let extraction_text = normalize_pdf_text(&extraction);
+    if extraction_text.trim().is_empty() {
+        return Err(io_error(
+            "the PDF contains no machine-readable text; scanned or image-only PDFs require OCR",
+        ));
+    }
+
+    Ok(AcquiredDocument {
+        source_bytes: bytes,
+        snapshot_body: extraction_text.clone(),
+        extraction_text,
+        source_ref: format!("file:{file_name}"),
+        original_extension: Some("pdf"),
+        mime_type: Some(mime_type.unwrap_or_else(|| "application/pdf".to_string())),
+        warnings: vec![
+            "Text was extracted locally from the PDF for search and fact proposals; the original PDF was preserved byte-for-byte beside the source snapshot."
+                .to_string(),
+        ],
+    })
 }
 
 async fn fetch_url(value: &str) -> AppResult<AcquiredDocument> {
@@ -415,13 +526,20 @@ async fn fetch_url(value: &str) -> AppResult<AcquiredDocument> {
         warnings.push("HTML markup was normalized only for extraction; the source snapshot preserves the original response.".to_string());
     }
     Ok(AcquiredDocument {
+        source_bytes: raw.as_bytes().to_vec(),
         extraction_text: if is_html {
             html_to_text(&raw)
         } else {
             raw.clone()
         },
-        raw,
+        snapshot_body: raw,
         source_ref: url.to_string(),
+        original_extension: None,
+        mime_type: if content_type.is_empty() {
+            None
+        } else {
+            Some(content_type)
+        },
         warnings,
     })
 }
@@ -434,6 +552,26 @@ fn validate_request(request: &DocumentImportRequest) -> AppResult<()> {
     }
     if !matches!(request.input_kind.as_str(), "text" | "file" | "url") {
         return Err(io_error("inputKind must be text, file, or url"));
+    }
+    if request
+        .content_encoding
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "utf8" | "base64"))
+    {
+        return Err(io_error("contentEncoding must be utf8 or base64"));
+    }
+    if request.input_kind != "file" && request.content_encoding.is_some() {
+        return Err(io_error(
+            "contentEncoding is supported only for file imports",
+        ));
+    }
+    if request.mime_type.as_deref().is_some_and(|value| {
+        value.chars().count() > 200
+            || value
+                .chars()
+                .any(|character| matches!(character, '\r' | '\n' | '\0'))
+    }) {
+        return Err(io_error("mimeType is invalid"));
     }
     if matches!(request.input_kind.as_str(), "text" | "file")
         && request
@@ -472,21 +610,37 @@ fn persist_source(
     request: &DocumentImportRequest,
     source_ref: &str,
     source_path: &str,
+    original_path: Option<&str>,
     content_hash: &str,
     byte_count: i64,
     created_at: &str,
     snapshot: &str,
+    source_bytes: &[u8],
 ) -> AppResult<()> {
     let _guard = super::vault::lock_writes();
     super::vault::ensure_vault()?;
     if super::vault::file_exists(source_path)? {
         return Err(io_error("document source path already exists"));
     }
+    if let Some(path) = original_path {
+        if super::vault::file_exists(path)? {
+            return Err(io_error("document original path already exists"));
+        }
+    }
     super::vault::write_file_atomic(source_path, snapshot)?;
+    if let Some(path) = original_path {
+        if let Err(error) = super::vault::write_bytes_atomic(path, source_bytes) {
+            let _ = super::vault::remove_file(source_path);
+            return Err(error);
+        }
+    }
     if let Err(error) =
         super::vault::git_commit(&format!("mem({}): import source {}", request.domain, id))
     {
         let _ = super::vault::remove_file(source_path);
+        if let Some(path) = original_path {
+            let _ = super::vault::remove_file(path);
+        }
         return Err(error);
     }
 
@@ -495,9 +649,9 @@ fn persist_source(
             conn.execute(
                 "INSERT INTO document_imports (
                     id, domain, title, input_kind, source_ref, source_path,
-                    content_hash, byte_count, candidate_count, warning_count,
+                    original_path, content_hash, byte_count, candidate_count, warning_count,
                     warnings_json, status, created_at, updated_at
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,0,'[]','pending',?9,?9)",
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,0,'[]','pending',?10,?10)",
                 params![
                     id,
                     request.domain,
@@ -505,6 +659,7 @@ fn persist_source(
                     request.input_kind,
                     source_ref,
                     source_path,
+                    original_path,
                     content_hash,
                     byte_count,
                     created_at,
@@ -524,6 +679,7 @@ fn persist_source(
                 "inputKind": request.input_kind,
                 "sourceRef": source_ref,
                 "sourcePath": source_path,
+                "originalPath": original_path,
                 "contentHash": content_hash,
                 "byteCount": byte_count,
             }),
@@ -537,6 +693,9 @@ fn persist_source(
             Ok(())
         });
         let _ = super::vault::remove_file(source_path);
+        if let Some(path) = original_path {
+            let _ = super::vault::remove_file(path);
+        }
         let _ = super::vault::git_commit(&format!("mem({}): rollback import {id}", request.domain));
         return Err(error);
     }
@@ -579,7 +738,7 @@ fn get(db: &Db, id: &str) -> AppResult<Option<DocumentImportRecord>> {
     db.with_conn(|conn| {
         conn.query_row(
             "SELECT id, domain, title, input_kind, source_ref, source_path,
-                    content_hash, byte_count, candidate_count, warning_count,
+                    original_path, content_hash, byte_count, candidate_count, warning_count,
                     warnings_json, status, created_at, updated_at
              FROM document_imports WHERE id = ?1",
             params![id],
@@ -591,7 +750,7 @@ fn get(db: &Db, id: &str) -> AppResult<Option<DocumentImportRecord>> {
 }
 
 fn row_to_import(row: &rusqlite::Row) -> rusqlite::Result<DocumentImportRecord> {
-    let warnings_json: String = row.get(10)?;
+    let warnings_json: String = row.get(11)?;
     Ok(DocumentImportRecord {
         id: row.get(0)?,
         domain: row.get(1)?,
@@ -599,14 +758,15 @@ fn row_to_import(row: &rusqlite::Row) -> rusqlite::Result<DocumentImportRecord> 
         input_kind: row.get(3)?,
         source_ref: row.get(4)?,
         source_path: row.get(5)?,
-        content_hash: row.get(6)?,
-        byte_count: row.get(7)?,
-        candidate_count: row.get(8)?,
-        warning_count: row.get(9)?,
+        original_path: row.get(6)?,
+        content_hash: row.get(7)?,
+        byte_count: row.get(8)?,
+        candidate_count: row.get(9)?,
+        warning_count: row.get(10)?,
         warnings: serde_json::from_str(&warnings_json).unwrap_or_default(),
-        status: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        status: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -614,6 +774,8 @@ fn serialize_snapshot(
     id: &str,
     request: &DocumentImportRequest,
     source_ref: &str,
+    original_path: Option<&str>,
+    mime_type: Option<&str>,
     captured_at: &str,
     content_hash: &str,
     body: &str,
@@ -625,6 +787,8 @@ fn serialize_snapshot(
         title: request.title.trim(),
         input_kind: &request.input_kind,
         source_ref,
+        original_path,
+        mime_type,
         captured_at,
         content_hash,
         trust: "untrusted",
@@ -904,6 +1068,28 @@ fn html_to_text(value: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
+}
+
+fn normalize_pdf_text(value: &str) -> String {
+    value
+        .replace('\0', "")
+        .replace('\u{000c}', "\n\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn hash_bytes(value: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn supported_content_type(value: &str) -> bool {

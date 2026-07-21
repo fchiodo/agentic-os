@@ -99,6 +99,7 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
                 input_kind TEXT NOT NULL,
                 source_ref TEXT NOT NULL,
                 source_path TEXT NOT NULL UNIQUE,
+                original_path TEXT,
                 content_hash TEXT NOT NULL,
                 byte_count INTEGER NOT NULL,
                 candidate_count INTEGER NOT NULL DEFAULT 0,
@@ -150,6 +151,15 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
         {
             conn.execute(
                 "ALTER TABLE document_imports ADD COLUMN warnings_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
+        if !import_columns
+            .iter()
+            .any(|column| column == "original_path")
+        {
+            conn.execute(
+                "ALTER TABLE document_imports ADD COLUMN original_path TEXT",
                 [],
             )?;
         }

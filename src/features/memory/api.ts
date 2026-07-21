@@ -307,8 +307,13 @@ export async function memoryImportDocument(
       inputKind: request.inputKind,
       sourceRef: request.sourceUrl ?? (request.fileName ? `file:${request.fileName}` : 'manual:pasted-text'),
       sourcePath: `_sources/${request.domain}/${Date.now()}.md`,
+      originalPath: request.mimeType === 'application/pdf'
+        ? `_sources/${request.domain}/${Date.now()}.pdf`
+        : null,
       contentHash: 'mock-hash',
-      byteCount: new TextEncoder().encode(request.content ?? '').length,
+      byteCount: request.contentEncoding === 'base64'
+        ? Math.floor((request.content?.length ?? 0) * 3 / 4)
+        : new TextEncoder().encode(request.content ?? '').length,
       candidateCount: 1,
       warningCount: 0,
       warnings: [],

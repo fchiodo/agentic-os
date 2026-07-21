@@ -117,6 +117,15 @@ pub fn read_file(relative_path: &str) -> AppResult<(String, PathBuf)> {
     Ok((content, full))
 }
 
+/// Read an exact binary artifact from the vault. Path validation is identical
+/// to Markdown reads, so callers cannot escape the local vault root.
+#[cfg(test)]
+pub fn read_bytes(relative_path: &str) -> AppResult<Vec<u8>> {
+    let root = vault_root()?;
+    let full = canonicalize_under(&root, relative_path)?;
+    Ok(fs::read(full)?)
+}
+
 pub fn file_exists(relative_path: &str) -> AppResult<bool> {
     let root = vault_root()?;
     Ok(canonicalize_under(&root, relative_path)?.is_file())
@@ -128,11 +137,23 @@ pub fn file_exists(relative_path: &str) -> AppResult<bool> {
 pub fn write_file_atomic(relative_path: &str, content: &str) -> AppResult<PathBuf> {
     let root = vault_root()?;
     let full = canonicalize_under(&root, relative_path)?;
-    atomic_replace(&full, content)?;
+    atomic_replace_bytes(&full, content.as_bytes())?;
     Ok(full)
 }
 
 fn atomic_replace(full: &Path, content: &str) -> AppResult<()> {
+    atomic_replace_bytes(full, content.as_bytes())
+}
+
+/// Atomically persist a binary source artifact in the vault.
+pub fn write_bytes_atomic(relative_path: &str, content: &[u8]) -> AppResult<PathBuf> {
+    let root = vault_root()?;
+    let full = canonicalize_under(&root, relative_path)?;
+    atomic_replace_bytes(&full, content)?;
+    Ok(full)
+}
+
+fn atomic_replace_bytes(full: &Path, content: &[u8]) -> AppResult<()> {
     let parent = full
         .parent()
         .ok_or_else(|| AppError::Io(std::io::Error::other("vault file has no parent")))?;
@@ -149,7 +170,7 @@ fn atomic_replace(full: &Path, content: &str) -> AppResult<()> {
             .create_new(true)
             .write(true)
             .open(&temp)?;
-        handle.write_all(content.as_bytes())?;
+        handle.write_all(content)?;
         handle.sync_all()?;
         fs::rename(&temp, full)?;
         // Best-effort directory sync makes the rename durable on filesystems

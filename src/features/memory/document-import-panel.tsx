@@ -11,12 +11,13 @@ import {
 } from 'lucide-react'
 import { type FormEvent, useState } from 'react'
 import { StatusBadge } from '@/components/ui/status-badge'
+import { arrayBufferToBase64 } from '@/features/memory/binary'
 import {
   useMemoryDocumentImports,
   useMemoryDocumentSourceRead,
   useMemoryImportDocument,
 } from '@/features/memory/hooks'
-import type { DocumentInputKind, MemoryWriteProposal } from '@/features/memory/schema'
+import type { DocumentImportRequest, DocumentInputKind, MemoryWriteProposal } from '@/features/memory/schema'
 import { formatRelativeTime } from '@/lib/format'
 
 const DOMAINS = ['work', 'planphysique', 'personal', 'family', 'finance', 'research'] as const
@@ -55,6 +56,9 @@ export function DocumentImportPanel({
   const [inputKind, setInputKind] = useState<DocumentInputKind>('text')
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
+  const [contentEncoding, setContentEncoding] = useState<DocumentImportRequest['contentEncoding']>()
+  const [mimeType, setMimeType] = useState('')
+  const [fileBytes, setFileBytes] = useState(0)
   const [sourceUrl, setSourceUrl] = useState('')
   const [fileName, setFileName] = useState('')
   const [fileError, setFileError] = useState<string | null>(null)
@@ -62,7 +66,11 @@ export function DocumentImportPanel({
   const importMutation = useMemoryImportDocument()
   const historyQuery = useMemoryDocumentImports(domain)
   const sourceQuery = useMemoryDocumentSourceRead(selectedImportId)
-  const documentBytes = inputKind === 'url' ? 0 : byteLength(content)
+  const documentBytes = inputKind === 'url'
+    ? 0
+    : inputKind === 'file'
+      ? fileBytes
+      : byteLength(content)
   const canSubmit = title.trim().length > 0
     && (inputKind === 'url' ? sourceUrl.trim().length > 0 : content.trim().length > 0)
     && documentBytes <= MAX_DOCUMENT_BYTES
@@ -72,6 +80,11 @@ export function DocumentImportPanel({
     setInputKind(kind)
     importMutation.reset()
     setFileError(null)
+    setContent('')
+    setContentEncoding(undefined)
+    setMimeType('')
+    setFileBytes(0)
+    setFileName('')
   }
 
   const selectFile = async (file: File | undefined) => {
@@ -83,12 +96,33 @@ export function DocumentImportPanel({
       return
     }
     try {
-      const text = await file.text()
-      if (byteLength(text) > MAX_DOCUMENT_BYTES) {
-        setFileError('The decoded file exceeds the 2 MiB limit.')
-        return
+      const normalizedName = file.name.toLocaleLowerCase()
+      const isPdf = file.type.toLocaleLowerCase() === 'application/pdf' || normalizedName.endsWith('.pdf')
+      if (isPdf) {
+        const bytes = await file.arrayBuffer()
+        const signature = new TextDecoder('ascii').decode(bytes.slice(0, 5))
+        if (signature !== '%PDF-') {
+          setFileError('This file has a PDF name or type but does not contain a valid PDF signature.')
+          return
+        }
+        setContent(arrayBufferToBase64(bytes))
+        setContentEncoding('base64')
+        setMimeType('application/pdf')
+      } else {
+        const text = await file.text()
+        if (text.includes('\0')) {
+          setFileError('This binary file type is not supported. Choose a PDF or a UTF-8 text document.')
+          return
+        }
+        if (byteLength(text) > MAX_DOCUMENT_BYTES) {
+          setFileError('The decoded file exceeds the 2 MiB limit.')
+          return
+        }
+        setContent(text)
+        setContentEncoding('utf8')
+        setMimeType(file.type || 'text/plain')
       }
-      setContent(text)
+      setFileBytes(file.size)
       setFileName(file.name)
       if (!title.trim()) setTitle(file.name.replace(/\.[^.]+$/, ''))
     } catch (error) {
@@ -104,6 +138,8 @@ export function DocumentImportPanel({
       inputKind,
       title: title.trim(),
       content: inputKind === 'url' ? undefined : content,
+      contentEncoding: inputKind === 'file' ? contentEncoding : undefined,
+      mimeType: inputKind === 'file' ? mimeType : undefined,
       sourceUrl: inputKind === 'url' ? sourceUrl.trim() : undefined,
       fileName: inputKind === 'file' ? fileName : undefined,
     })
@@ -149,9 +185,9 @@ export function DocumentImportPanel({
 
             {inputKind === 'file' && (
               <label className="document-file-picker">
-                <span>Text document</span>
-                <input accept=".md,.mdx,.txt,.json,.yaml,.yml,.html,.htm,.xml,text/*,application/json,application/xml" onChange={(event) => { void selectFile(event.target.files?.[0]) }} type="file" />
-                <span className="document-file-drop"><Upload aria-hidden="true" size={20} />{fileName || 'Choose a UTF-8 text file up to 2 MiB'}</span>
+                <span>PDF or text document</span>
+                <input accept=".pdf,.md,.mdx,.txt,.json,.yaml,.yml,.html,.htm,.xml,application/pdf,text/*,application/json,application/xml" onChange={(event) => { void selectFile(event.target.files?.[0]) }} type="file" />
+                <span className="document-file-drop"><Upload aria-hidden="true" size={20} />{fileName || 'Choose a PDF or UTF-8 text file up to 2 MiB'}</span>
               </label>
             )}
             {inputKind === 'url' && (
@@ -216,10 +252,11 @@ export function DocumentImportPanel({
           </div>
           {selectedImportId && (
             <div className="document-source-preview">
-              <div><strong>Original source</strong>{sourceQuery.data?.gitLastCommit && <code>{sourceQuery.data.gitLastCommit}</code>}</div>
+              <div><strong>{sourceQuery.data?.import.originalPath ? 'Extracted PDF text' : 'Original source'}</strong>{sourceQuery.data?.gitLastCommit && <code>{sourceQuery.data.gitLastCommit}</code>}</div>
               {sourceQuery.isLoading && <p className="row-subtle">Reading snapshot…</p>}
               {sourceQuery.error && <div className="inline-error" role="alert">{errorMessage(sourceQuery.error)}</div>}
               {sourceQuery.data && <pre>{sourceQuery.data.content}</pre>}
+              {sourceQuery.data?.import.originalPath && <code>Original: {sourceQuery.data.import.originalPath}</code>}
               {sourceQuery.data?.import.sourceRef.startsWith('http') && <a href={sourceQuery.data.import.sourceRef} rel="noreferrer" target="_blank">Open recorded URL <ExternalLink aria-hidden="true" size={13} /></a>}
             </div>
           )}
