@@ -7,6 +7,5 @@ export function useControlStatus() {
   return useQuery({
     queryKey: controlStatusQueryKey,
     queryFn: getControlStatus,
-    refetchInterval: 5_000,
   })
 }

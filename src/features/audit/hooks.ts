@@ -9,7 +9,6 @@ export function useAuditRuns() {
   return useQuery({
     queryKey: auditRunsQueryKey,
     queryFn: listAuditRuns,
-    refetchInterval: 10_000,
   })
 }
 
@@ -25,6 +24,5 @@ export function useAuditChain() {
   return useQuery({
     queryKey: auditChainQueryKey,
     queryFn: verifyAuditChain,
-    refetchInterval: 15_000,
   })
 }

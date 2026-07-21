@@ -159,7 +159,7 @@ export interface ControlStatus {
 Commands (Rust, thin wrappers in `src/lib/tauri.ts`, one TanStack Query hook each in the owning feature):
 
 ```
-control_status() -> ControlStatus                       // polled 5s + invalidated by events
+control_status() -> ControlStatus                       // fetched on demand; never polled
 tasks_list(filter?: {status?, domain?, limit?}) -> TaskSummary[]
 tasks_get(id) -> TaskDetail
 tasks_events_since(id, sinceSeq) -> TaskEvent[]         // catch-up after reconnect/navigation
@@ -186,9 +186,10 @@ settings_schedules() -> {workflowId, cron, lastRun, nextRun, enabled}[]
 **Event streaming.** One global Tauri event channel: `agent-control://task-event`, payload `TaskEvent`. Frontend pattern:
 
 1. A single top-level listener (mounted in `providers.tsx`) pushes events into a Zustand event store keyed by `taskId`, capped at 2 000 events per task in memory (older entries dropped; full log always available from `tasks_events_since`).
-2. On `status_changed`, `approval_required`, `cost_update`: invalidate `control_status`, `tasks_list`, `approvals_list` queries.
-3. On mount of a task detail, call `tasks_events_since(id, lastSeqInStore)` to close any gap, then rely on the live channel. `seq` deduplicates.
-4. Native notifications (tauri-plugin-notification) fire on `approval_required` and terminal statuses (`completed`/`failed`) for tasks the user is not currently viewing. Clicking focuses the app on `/runner` with the task selected.
+2. Live events update only the Runner event store. They do not invalidate TanStack queries or trigger list/status refreshes.
+3. On mount of a task detail, call `tasks_events_since(id, lastSeqInStore)` once to close any gap, then rely on the live channel. `seq` deduplicates.
+4. No query uses a periodic refetch interval. Explicit user mutations may invalidate the directly affected cached data after they complete.
+5. Native notifications (tauri-plugin-notification) fire on `approval_required` and terminal statuses (`completed`/`failed`) for tasks the user is not currently viewing. Clicking focuses the app on `/runner` with the task selected.
 
 ## 4. Page specifications
 

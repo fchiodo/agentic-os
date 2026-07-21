@@ -18,7 +18,6 @@ export function useTasks() {
   return useQuery({
     queryKey: tasksQueryKey,
     queryFn: listTasks,
-    refetchInterval: 5_000,
   })
 }
 
@@ -27,7 +26,6 @@ export function useTaskDetail(id: string | null) {
     queryKey: id ? taskDetailQueryKey(id) : ['tasks', 'detail', 'none'],
     queryFn: () => getTask(id as string),
     enabled: Boolean(id),
-    refetchInterval: 5_000,
   })
 }
 

@@ -135,7 +135,7 @@ impl TaskStatus {
     }
 
     /// Reserved for the scheduler (Phase 3): terminal tasks are safe to
-    /// drop from the in-memory event store / stop polling.
+    /// drop from the in-memory live-event store.
     #[allow(dead_code)]
     pub fn is_terminal(&self) -> bool {
         matches!(

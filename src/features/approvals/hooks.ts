@@ -10,7 +10,6 @@ export function useApprovals() {
   return useQuery({
     queryKey: approvalsQueryKey,
     queryFn: listApprovals,
-    refetchInterval: 5_000,
   })
 }
 
