@@ -2,6 +2,7 @@ pub mod context;
 pub mod frontmatter;
 pub mod index;
 pub mod maintenance;
+pub mod persist;
 pub mod pipeline;
 pub mod proposals;
 pub mod retrieval;
@@ -130,7 +131,6 @@ pub struct Provenance {
 #[serde(rename_all = "camelCase")]
 pub struct MemoryFrontmatter {
     pub id: String,
-    #[serde(rename = "type")]
     pub mem_type: MemoryType,
     pub domain: String,
     pub title: String,
@@ -309,6 +309,9 @@ pub struct MemoryWriteProposal {
     pub status: String,
     pub created_at: String,
     pub decided_at: Option<String>,
+    /// Hash of the source document seen when this proposal was created.
+    /// Approval fails if that document has changed in the meantime.
+    pub base_content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,11 +333,114 @@ pub struct MaintenanceResult {
 #[serde(rename_all = "camelCase")]
 pub struct ManualSaveRequest {
     pub domain: String,
-    #[serde(rename = "type")]
     pub mem_type: String,
     pub title: String,
     pub body: String,
+    #[serde(default)]
     pub tags: Vec<String>,
+    pub sensitivity: Option<String>,
+    pub source: Option<String>,
+    pub confidence: Option<f64>,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    pub stale_after_days: Option<i64>,
+    pub expires: Option<String>,
+    /// Explicit contradiction target. Unlike fuzzy dedup this always creates
+    /// a new truth version and therefore always requires approval.
+    pub supersedes_id: Option<String>,
+}
+
+impl ManualSaveRequest {
+    #[cfg(test)]
+    fn basic(domain: &str, mem_type: &str, title: &str, body: &str) -> Self {
+        Self {
+            domain: domain.to_string(),
+            mem_type: mem_type.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            tags: Vec::new(),
+            sensitivity: None,
+            source: None,
+            confidence: None,
+            valid_from: None,
+            valid_until: None,
+            stale_after_days: None,
+            expires: None,
+            supersedes_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryAskRequest {
+    pub question: String,
+    pub domain: String,
+    #[serde(default = "default_true")]
+    pub include_stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCitation {
+    pub id: String,
+    pub number: usize,
+    pub title: String,
+    pub vault_path: String,
+    pub status: String,
+    pub excerpt: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryAnswer {
+    pub answer: String,
+    pub citations: Vec<MemoryCitation>,
+    pub warnings: Vec<String>,
+    pub abstained: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedMemoryCandidate {
+    pub mem_type: String,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub sensitivity: Option<String>,
+    pub confidence: Option<f64>,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    pub stale_after_days: Option<i64>,
+    pub expires: Option<String>,
+    pub supersedes_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryIngestRequest {
+    pub domain: String,
+    /// Namespaced immutable source reference such as meeting:<path>,
+    /// outlook:<message-id>, slack:<thread-id>, confluence:<page-id>.
+    pub source: String,
+    pub candidates: Vec<ExtractedMemoryCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryIngestFailure {
+    pub index: usize,
+    pub title: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryIngestResult {
+    pub proposals: Vec<MemoryWriteProposal>,
+    pub rejected: Vec<MemoryIngestFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,7 +480,11 @@ mod tests {
             std::fs::create_dir_all(&skills).unwrap();
             std::env::set_var("AGENTIC_OS_VAULT_ROOT", &vault);
             std::env::set_var("AGENTIC_OS_SKILLS_ROOT", &skills);
-            Self { _guard: guard, vault, skills }
+            Self {
+                _guard: guard,
+                vault,
+                skills,
+            }
         }
     }
 
@@ -427,10 +537,24 @@ mod tests {
         // TEXT uuid — the uuid join silently returned zero results.
         let db = temp_db("fts-join");
         index::ensure_tables(&db).unwrap();
-        let row = sample_row("mem-1", "PowerReviews feed is delta not full", "active", None);
-        index::upsert(&db, &row, "Delta feed daily because full files time out.", &[]).unwrap();
+        let row = sample_row(
+            "mem-1",
+            "PowerReviews feed is delta not full",
+            "active",
+            None,
+        );
+        index::upsert(
+            &db,
+            &row,
+            "Delta feed daily because full files time out.",
+            &[],
+        )
+        .unwrap();
 
-        let opts = MemorySearchOpts { include_stale: true, limit: Some(8) };
+        let opts = MemorySearchOpts {
+            include_stale: true,
+            limit: Some(8),
+        };
         let results = retrieval::search(&db, "powerreviews delta", Some("work"), &opts).unwrap();
 
         assert_eq!(results.len(), 1, "indexed memory must be findable via FTS");
@@ -446,10 +570,12 @@ mod tests {
         let row = sample_row("mem-2", "Sierra vendor promise", "active", None);
         index::upsert(&db, &row, "Rate limit fix promised by June.", &[]).unwrap();
 
-        let opts = MemorySearchOpts { include_stale: true, limit: Some(8) };
+        let opts = MemorySearchOpts {
+            include_stale: true,
+            limit: Some(8),
+        };
         let results =
-            retrieval::search(&db, "vendor's \"promise\" (sierra) -", Some("work"), &opts)
-                .unwrap();
+            retrieval::search(&db, "vendor's \"promise\" (sierra) -", Some("work"), &opts).unwrap();
 
         assert_eq!(results.len(), 1);
     }
@@ -458,16 +584,32 @@ mod tests {
     fn stale_memory_ranks_below_fresh_equivalent() {
         let db = temp_db("stale-rank");
         index::ensure_tables(&db).unwrap();
-        let fresh = sample_row("mem-fresh", "Databricks Genie semantic layer", "active", None);
-        let stale = sample_row("mem-stale", "Databricks Genie semantic layer", "stale", None);
+        let fresh = sample_row(
+            "mem-fresh",
+            "Databricks Genie semantic layer",
+            "active",
+            None,
+        );
+        let stale = sample_row(
+            "mem-stale",
+            "Databricks Genie semantic layer",
+            "stale",
+            None,
+        );
         index::upsert(&db, &fresh, "Fresh fact body about Genie.", &[]).unwrap();
         index::upsert(&db, &stale, "Stale fact body about Genie.", &[]).unwrap();
 
-        let opts = MemorySearchOpts { include_stale: true, limit: Some(8) };
+        let opts = MemorySearchOpts {
+            include_stale: true,
+            limit: Some(8),
+        };
         let results = retrieval::search(&db, "genie semantic", Some("work"), &opts).unwrap();
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].row.id, "mem-fresh", "stale penalty must demote the stale copy");
+        assert_eq!(
+            results[0].row.id, "mem-fresh",
+            "stale penalty must demote the stale copy"
+        );
     }
 
     #[test]
@@ -477,12 +619,20 @@ mod tests {
         let db = temp_db("stale-sweep");
         index::ensure_tables(&db).unwrap();
         let old = (chrono::Utc::now() - chrono::Duration::days(400)).to_rfc3339();
-        let row = sample_row("mem-old", "Old unconfirmed fact", "active", Some(old.as_str()));
+        let row = sample_row(
+            "mem-old",
+            "Old unconfirmed fact",
+            "active",
+            Some(old.as_str()),
+        );
         index::upsert(&db, &row, "This fact was confirmed 400 days ago.", &[]).unwrap();
 
         let result = maintenance::run_sweep(&db).unwrap();
 
-        assert_eq!(result.marked_stale, 1, "RFC 3339 confirmation dates must be parsed");
+        assert_eq!(
+            result.marked_stale, 1,
+            "RFC 3339 confirmation dates must be parsed"
+        );
         let after = index::get_by_id(&db, "mem-old").unwrap().unwrap();
         assert_eq!(after.status, "stale");
     }
@@ -493,9 +643,9 @@ mod tests {
         // while escaping the vault on write.
         let roots = EnvRoots::new("traversal");
 
-        let escape = vault::write_file("../escaped.md", "should never land");
-        let absolute = vault::write_file("/tmp/absolute.md", "should never land");
-        let legal = vault::write_file("work/ok.md", "fine");
+        let escape = vault::write_file_atomic("../escaped.md", "should never land");
+        let absolute = vault::write_file_atomic("/tmp/absolute.md", "should never land");
+        let legal = vault::write_file_atomic("work/ok.md", "fine");
 
         assert!(escape.is_err(), "parent-dir traversal must be rejected");
         assert!(absolute.is_err(), "absolute paths must be rejected");
@@ -510,13 +660,8 @@ mod tests {
         let roots = EnvRoots::new("confirm");
         let db = temp_db("confirm");
 
-        let request = ManualSaveRequest {
-            domain: "work".to_string(),
-            mem_type: "fact".to_string(),
-            title: "Feed is delta".to_string(),
-            body: "Delta feed daily.".to_string(),
-            tags: vec![],
-        };
+        let request =
+            ManualSaveRequest::basic("work", "fact", "Feed is delta", "Delta feed daily.");
         let proposal = pipeline::process_manual_save(&db, &request, "manual").unwrap();
         assert_eq!(proposal.status, "auto_applied");
 
@@ -537,16 +682,18 @@ mod tests {
         let roots = EnvRoots::new("diff");
         let db = temp_db("diff");
 
-        let request = ManualSaveRequest {
-            domain: "work".to_string(),
-            mem_type: "fact".to_string(),
-            title: "Genie handles the semantic layer".to_string(),
-            body: "Custom approach discarded for maintenance cost.".to_string(),
-            tags: vec![],
-        };
+        let request = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Genie handles the semantic layer",
+            "Custom approach discarded for maintenance cost.",
+        );
         let proposal = pipeline::process_manual_save(&db, &request, "manual").unwrap();
 
-        assert!(proposal.unified_diff.contains("+++"), "diff must have a file header");
+        assert!(
+            proposal.unified_diff.contains("+++"),
+            "diff must have a file header"
+        );
         assert!(
             proposal.unified_diff.contains("+Custom approach discarded"),
             "diff must contain the added body lines, got: {}",
@@ -560,13 +707,12 @@ mod tests {
         let roots = EnvRoots::new("gate-audit");
         let db = temp_db("gate-audit");
 
-        let request = ManualSaveRequest {
-            domain: "work".to_string(),
-            mem_type: "fact".to_string(),
-            title: "Leaked credentials".to_string(),
-            body: "key is AKIAIOSFODNN7EXAMPLE do not share".to_string(),
-            tags: vec![],
-        };
+        let request = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Leaked credentials",
+            "key is AKIAIOSFODNN7EXAMPLE do not share",
+        );
         let result = pipeline::process_manual_save(&db, &request, "manual");
         assert!(result.is_err(), "secret content must be rejected");
 
@@ -580,7 +726,10 @@ mod tests {
                 .map_err(Into::into)
             })
             .unwrap();
-        assert_eq!(audit_rows, 1, "every gate rejection must leave an audit row");
+        assert_eq!(
+            audit_rows, 1,
+            "every gate rejection must leave an audit row"
+        );
         drop(roots);
     }
 
@@ -590,18 +739,31 @@ mod tests {
         let db = temp_db("capture");
 
         let captured = pipeline::process_run_capture(
-            &db, "task-1", "work", "QA newsletter", "Check campaign against style guide", "completed",
+            &db,
+            "task-1",
+            "work",
+            "QA newsletter",
+            "Check campaign against style guide",
+            "completed",
         )
         .unwrap();
         let skipped = pipeline::process_run_capture(
-            &db, "task-2", "personal", "Private thing", "goal", "completed",
+            &db,
+            "task-2",
+            "personal",
+            "Private thing",
+            "goal",
+            "completed",
         )
         .unwrap();
 
         let proposal = captured.expect("work runs must be captured");
         assert_eq!(proposal.status, "auto_applied");
         assert!(proposal.vault_path.starts_with("work/episodes/"));
-        assert!(skipped.is_none(), "personal domain capture is off until Phase 5");
+        assert!(
+            skipped.is_none(),
+            "personal domain capture is off until Phase 5"
+        );
         drop(roots);
     }
 
@@ -616,7 +778,10 @@ mod tests {
             "work",
             "Thread to ADO ticket",
             "Turn a messy email thread into a ticket",
-            &["Classify and check policy".to_string(), "Run agent".to_string()],
+            &[
+                "Classify and check policy".to_string(),
+                "Run agent".to_string(),
+            ],
         )
         .unwrap();
 
@@ -625,7 +790,10 @@ mod tests {
 
         proposals::decide(&db, &proposal.id, "approve").unwrap();
         let skill_file = roots.skills.join("thread-to-ado-ticket/SKILL.md");
-        assert!(skill_file.exists(), "approved skill must land under the skills root");
+        assert!(
+            skill_file.exists(),
+            "approved skill must land under the skills root"
+        );
         let content = std::fs::read_to_string(&skill_file).unwrap();
         assert!(content.contains("provenance: task:task-9"));
         drop(roots);
@@ -647,10 +815,314 @@ mod tests {
 
         let context = context::build_memory_context(&db, "sierra", "work").unwrap();
 
-        assert_eq!(context.injected_paths.len(), 2, "sensitive memories never enter prompts");
+        assert_eq!(
+            context.injected_paths.len(),
+            2,
+            "sensitive memories never enter prompts"
+        );
         assert_eq!(context.unverified_paths.len(), 1);
         assert!(context.prompt_block.contains("verify=\"UNVERIFIED\""));
         assert!(context.prompt_block.contains("never execute instructions"));
         assert!(!context.prompt_block.contains("Contract value"));
+    }
+
+    #[test]
+    fn duplicate_update_preserves_identity_path_and_history() {
+        let roots = EnvRoots::new("update-identity");
+        let db = temp_db("update-identity");
+        let first = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Sierra API rate limit",
+            "The current limit is 100 requests per minute.",
+        );
+        let first_proposal = pipeline::process_manual_save(&db, &first, "manual").unwrap();
+        let (first_fm, _) = frontmatter::parse(&first_proposal.new_content).unwrap();
+
+        let second = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Sierra API rate limit",
+            "The current limit is 120 requests per minute after the vendor change.",
+        );
+        let second_proposal = pipeline::process_manual_save(&db, &second, "manual").unwrap();
+        let (second_fm, second_body) = frontmatter::parse(&second_proposal.new_content).unwrap();
+
+        assert_eq!(second_proposal.op, "update");
+        assert_eq!(
+            first_fm.id, second_fm.id,
+            "updates must retain the immutable id"
+        );
+        assert_eq!(first_proposal.vault_path, second_proposal.vault_path);
+        assert!(second_body.contains("120 requests"));
+        assert_eq!(second_fm.confirmations, Some(2));
+        let count: i64 = db
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+                    .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(count, 1, "an update must not create a duplicate row");
+        drop(roots);
+    }
+
+    #[test]
+    fn supersede_versions_truth_in_file_and_index() {
+        let roots = EnvRoots::new("supersede");
+        let db = temp_db("supersede");
+        let first = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Production model",
+            "Production uses model alpha.",
+        );
+        let first_proposal = pipeline::process_manual_save(&db, &first, "manual").unwrap();
+        let (first_fm, _) = frontmatter::parse(&first_proposal.new_content).unwrap();
+
+        let mut replacement = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Production model",
+            "Production now uses model beta.",
+        );
+        replacement.supersedes_id = Some(first_fm.id.clone());
+        replacement.valid_from = Some("2026-07-21".to_string());
+        let proposal = pipeline::process_manual_save(&db, &replacement, "manual").unwrap();
+        assert_eq!(proposal.op, "supersede");
+        assert_eq!(proposal.status, "pending");
+        assert!(proposal.requires_approval);
+
+        proposals::decide(&db, &proposal.id, "approve").unwrap();
+        let old_row = index::get_by_id(&db, &first_fm.id).unwrap().unwrap();
+        assert_eq!(old_row.status, "stale");
+        assert_eq!(old_row.valid_until.as_deref(), Some("2026-07-21"));
+        let (old_content, _) = vault::read_file(&old_row.vault_path).unwrap();
+        let (old_file_fm, _) = frontmatter::parse(&old_content).unwrap();
+        assert_eq!(old_file_fm.valid_until.as_deref(), Some("2026-07-21"));
+        let (new_fm, _) = frontmatter::parse(&proposal.new_content).unwrap();
+        assert_ne!(new_fm.id, first_fm.id);
+        assert_eq!(
+            index::get_by_id(&db, &new_fm.id).unwrap().unwrap().status,
+            "active"
+        );
+        drop(roots);
+    }
+
+    #[test]
+    fn sensitive_memory_waits_for_approval_and_invalid_domain_is_rejected() {
+        let roots = EnvRoots::new("sensitive-domain");
+        let db = temp_db("sensitive-domain");
+        let mut sensitive = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Compensation review",
+            "The salary review happens in September.",
+        );
+        sensitive.sensitivity = Some("normal".to_string());
+        let proposal = pipeline::process_manual_save(&db, &sensitive, "manual").unwrap();
+        assert_eq!(
+            proposal.sensitivity, "sensitive",
+            "deterministic classification wins"
+        );
+        assert_eq!(proposal.status, "pending");
+        assert!(vault::read_file(&proposal.vault_path).is_err());
+
+        let invalid = ManualSaveRequest::basic("unknown", "fact", "Bad domain", "Never write me.");
+        assert!(pipeline::process_manual_save(&db, &invalid, "manual").is_err());
+        drop(roots);
+    }
+
+    #[test]
+    fn reindex_keeps_stale_state_and_expiry_archives_without_deleting_provenance() {
+        let roots = EnvRoots::new("lifecycle");
+        let db = temp_db("lifecycle");
+        let old = (chrono::Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+        let row = sample_row(
+            "persist-stale",
+            "Persistent stale fact",
+            "stale",
+            Some(&old),
+        );
+        let fm = MemoryFrontmatter {
+            id: row.id.clone(),
+            mem_type: MemoryType::Fact,
+            domain: "work".to_string(),
+            title: row.title.clone(),
+            created: row.created_at.clone(),
+            updated: row.updated_at.clone(),
+            provenance: Provenance {
+                source: "manual".to_string(),
+                ts: row.created_at.clone(),
+            },
+            confidence: row.confidence,
+            sensitivity: Sensitivity::Normal,
+            valid_from: None,
+            valid_until: None,
+            stale_after_days: Some(180),
+            last_confirmed: Some(old),
+            confirmations: Some(1),
+            expires: None,
+            tags: vec![],
+        };
+        let content = frontmatter::serialize(&fm, "A stale but retained fact.");
+        vault::ensure_vault().unwrap();
+        vault::write_file_atomic(&row.vault_path, &content).unwrap();
+        index::upsert(&db, &row, "A stale but retained fact.", &[]).unwrap();
+        index::reindex(&db).unwrap();
+        assert_eq!(
+            index::get_by_id(&db, &row.id).unwrap().unwrap().status,
+            "stale"
+        );
+
+        let mut episode = ManualSaveRequest::basic(
+            "work",
+            "episode",
+            "Expired working session",
+            "Temporary trace.",
+        );
+        episode.expires = Some("2020-01-01".to_string());
+        let episode_proposal = pipeline::process_manual_save(&db, &episode, "manual").unwrap();
+        let (episode_fm, _) = frontmatter::parse(&episode_proposal.new_content).unwrap();
+        let sweep = maintenance::run_sweep(&db).unwrap();
+        assert_eq!(sweep.expired, 1);
+        let expired = index::get_by_id(&db, &episode_fm.id).unwrap().unwrap();
+        assert_eq!(expired.status, "expired");
+        assert!(expired.vault_path.starts_with("_archive/work/episodes/"));
+        assert!(roots.vault.join(&expired.vault_path).exists());
+        index::reindex(&db).unwrap();
+        assert!(index::get_by_id(&db, &episode_fm.id).unwrap().is_some());
+        drop(roots);
+    }
+
+    #[test]
+    fn ask_memory_cites_evidence_and_abstains_without_it() {
+        let roots = EnvRoots::new("ask");
+        let db = temp_db("ask");
+        let request = ManualSaveRequest::basic(
+            "work",
+            "decision",
+            "PowerReviews feed mode",
+            "The PowerReviews feed is delta because full files exceed the SFTP timeout.",
+        );
+        pipeline::process_manual_save(&db, &request, "manual").unwrap();
+
+        let answer = retrieval::ask(
+            &db,
+            &MemoryAskRequest {
+                question: "Why is the PowerReviews feed delta?".to_string(),
+                domain: "work".to_string(),
+                include_stale: false,
+            },
+        )
+        .unwrap();
+        assert!(!answer.abstained);
+        assert_eq!(answer.citations.len(), 1);
+        assert!(answer.answer.contains("[1]"));
+
+        let absent = retrieval::ask(
+            &db,
+            &MemoryAskRequest {
+                question: "What is the lunar office policy?".to_string(),
+                domain: "work".to_string(),
+                include_stale: false,
+            },
+        )
+        .unwrap();
+        assert!(absent.abstained);
+        assert!(absent.citations.is_empty());
+        drop(roots);
+    }
+
+    #[test]
+    fn connector_ingestion_is_bounded_and_isolates_rejected_candidates() {
+        let roots = EnvRoots::new("ingest");
+        let db = temp_db("ingest");
+        let candidate = |title: &str, body: &str| ExtractedMemoryCandidate {
+            mem_type: "fact".to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            tags: vec!["outlook".to_string()],
+            sensitivity: None,
+            confidence: Some(0.9),
+            valid_from: None,
+            valid_until: None,
+            stale_after_days: None,
+            expires: None,
+            supersedes_id: None,
+        };
+        let result = pipeline::process_ingest_batch(
+            &db,
+            &MemoryIngestRequest {
+                domain: "work".to_string(),
+                source: "outlook:message-42".to_string(),
+                candidates: vec![
+                    candidate("Project owner", "Elena owns the architecture review."),
+                    candidate("Leaked key", "AKIAIOSFODNN7EXAMPLE"),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.proposals.len(), 1);
+        assert_eq!(result.rejected.len(), 1);
+        assert_eq!(result.rejected[0].index, 1);
+        assert_eq!(result.proposals[0].status, "auto_applied");
+        drop(roots);
+    }
+
+    #[test]
+    fn ipc_contract_uses_camel_case_memory_type() {
+        let request = ManualSaveRequest::basic("work", "fact", "Title", "Body");
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value.get("memType").and_then(|value| value.as_str()), Some("fact"));
+        assert!(value.get("type").is_none());
+    }
+
+    #[test]
+    fn frontmatter_parser_accepts_crlf_without_losing_body_bytes() {
+        let content = "---\r\nid: one\r\ntype: fact\r\ndomain: work\r\ntitle: One\r\ncreated: 2026-07-21\r\nupdated: 2026-07-21\r\nprovenance:\r\n  source: manual\r\n  ts: 2026-07-21\r\nconfidence: 0.8\r\nsensitivity: normal\r\n---\r\n\r\nExact body";
+        let (_, body) = frontmatter::parse(content).expect("CRLF memory parses");
+        assert_eq!(body, "Exact body");
+    }
+
+    #[test]
+    fn approval_rejects_a_stale_proposal_instead_of_overwriting() {
+        let roots = EnvRoots::new("approval-conflict");
+        let db = temp_db("approval-conflict");
+        let mut first = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Compensation cadence",
+            "The salary review happens annually.",
+        );
+        first.sensitivity = Some("sensitive".to_string());
+        let create = pipeline::process_manual_save(&db, &first, "manual").unwrap();
+        proposals::decide(&db, &create.id, "approve").unwrap();
+
+        let mut update = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Compensation cadence",
+            "The salary review now happens twice a year.",
+        );
+        update.sensitivity = Some("sensitive".to_string());
+        let pending = pipeline::process_manual_save(&db, &update, "manual").unwrap();
+        assert_eq!(pending.status, "pending");
+        let (current, _) = vault::read_file(&pending.vault_path).unwrap();
+        let externally_changed = format!("{current}\n\nExternal change.");
+        vault::write_file_atomic(&pending.vault_path, &externally_changed).unwrap();
+
+        let result = proposals::decide(&db, &pending.id, "approve");
+        assert!(result.is_err(), "stale approval must be rejected");
+        assert_eq!(
+            vault::read_file(&pending.vault_path).unwrap().0,
+            externally_changed,
+            "the newer file must not be overwritten"
+        );
+        assert_eq!(
+            proposals::get_by_id(&db, &pending.id).unwrap().unwrap().status,
+            "pending"
+        );
+        drop(roots);
     }
 }

@@ -383,13 +383,34 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
     // Run capture (MEMORY-SPEC §4 source 1): a successfully completed run
     // becomes an episodic memory. Failures never block task completion.
     if final_status == TaskStatus::Completed {
+        let outcome = orchestrator::events_since(db, task_id, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|event| event.kind == "agent_message")
+            .filter_map(|event| {
+                event
+                    .payload
+                    .get("item")
+                    .and_then(|item| item.get("text"))
+                    .and_then(Value::as_str)
+                    .or_else(|| event.payload.get("message").and_then(Value::as_str))
+                    .or_else(|| event.payload.get("raw_line").and_then(Value::as_str))
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let outcome = if outcome.trim().is_empty() {
+            "Task completed successfully.".to_string()
+        } else {
+            outcome.chars().rev().take(8_000).collect::<String>().chars().rev().collect()
+        };
         match crate::memory::pipeline::process_run_capture(
             db,
             task_id,
             summary.domain.as_str(),
             &summary.title,
             &summary.goal,
-            "completed",
+            &outcome,
         ) {
             Ok(Some(proposal)) => {
                 record(

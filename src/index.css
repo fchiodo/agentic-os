@@ -2073,6 +2073,55 @@ button.catalog-row:hover {
   overflow-y: auto;
 }
 
+.memory-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 10px 16px;
+}
+
+.memory-mode-switch,
+.memory-rail-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-xs);
+  background: rgba(20, 20, 19, 0.04);
+}
+
+.memory-mode-switch button,
+.memory-rail-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--slate-light);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.memory-mode-switch button.is-active,
+.memory-rail-tabs button.is-active {
+  background: #fff;
+  color: var(--slate-dark);
+  box-shadow: 0 1px 3px rgba(20, 20, 19, 0.08);
+}
+
+.memory-mode-bar .memory-toggle-label {
+  margin-left: auto;
+}
+
+.memory-mode-bar .primary-button {
+  min-height: 34px;
+}
+
 .memory-search-bar {
   display: flex;
   align-items: center;
@@ -2298,6 +2347,17 @@ button.catalog-row:hover {
   white-space: pre-wrap;
 }
 
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 14px 0 6px;
+  line-height: 1.3;
+}
+
+.markdown-list-line {
+  padding-left: 10px;
+}
+
 .memory-reader-actions {
   display: flex;
   gap: 10px;
@@ -2427,6 +2487,252 @@ button.catalog-row:hover {
   font-size: 12px;
 }
 
+.proposal-review {
+  display: grid;
+  gap: 8px;
+}
+
+.proposal-review .diff-view {
+  max-height: 260px;
+  overflow: auto;
+  font-size: 10px;
+}
+
+.proposal-checks {
+  display: grid;
+  gap: 5px;
+}
+
+.proposal-checks > div {
+  display: grid;
+  gap: 1px;
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+  background: rgba(20, 20, 19, 0.03);
+  font-size: 11px;
+}
+
+.proposal-checks small {
+  color: var(--cloud-dark);
+}
+
+.memory-rail-tabs {
+  margin: 0 12px 10px;
+}
+
+.memory-rail-tabs button {
+  flex: 1;
+  justify-content: center;
+}
+
+.memory-rail-error {
+  margin: 0 12px 10px;
+}
+
+.memory-sidebar-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.memory-sidebar-tools button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: #fff;
+  color: var(--slate-medium);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.memory-sidebar-tools button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.memory-maintenance-result,
+.memory-operation-result {
+  color: var(--olive);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.memory-operation-result {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 11px;
+  border: 1px solid rgba(47, 122, 87, 0.22);
+  border-radius: var(--radius-xs);
+  background: rgba(47, 122, 87, 0.06);
+  font-size: 13px;
+}
+
+.inline-error {
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.memory-compose {
+  display: grid;
+  gap: 16px;
+  margin: 20px;
+  padding: 20px;
+}
+
+.memory-compose-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.memory-compose label {
+  display: grid;
+  gap: 6px;
+  color: var(--slate-medium);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.memory-compose label > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.memory-compose label small {
+  color: var(--cloud-dark);
+  font-weight: 400;
+}
+
+.memory-compose input,
+.memory-compose select,
+.memory-compose textarea,
+.memory-ask-form input,
+.memory-ask-form select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: #fff;
+  color: var(--slate-dark);
+  font: inherit;
+  outline: none;
+}
+
+.memory-compose input,
+.memory-compose select,
+.memory-ask-form input,
+.memory-ask-form select {
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.memory-compose textarea {
+  resize: vertical;
+  padding: 10px;
+  line-height: 1.5;
+}
+
+.memory-compose input:focus,
+.memory-compose select:focus,
+.memory-compose textarea:focus,
+.memory-ask-form input:focus,
+.memory-ask-form select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(198, 97, 63, 0.09);
+}
+
+.memory-compose-title,
+.memory-compose-wide {
+  grid-column: 1 / -1;
+}
+
+.memory-compose-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.memory-ask {
+  display: grid;
+  gap: 14px;
+  padding: 16px 20px;
+}
+
+.memory-ask-form {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 150px auto;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+.memory-ask-form > svg {
+  color: var(--accent);
+}
+
+.memory-answer {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+.memory-answer--abstained {
+  border-style: dashed;
+  background: rgba(20, 20, 19, 0.02);
+}
+
+.memory-answer-copy {
+  white-space: pre-wrap;
+  color: var(--slate-dark);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.memory-answer-warning {
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+  background: rgba(179, 121, 31, 0.09);
+  color: var(--slate-medium);
+  font-size: 12px;
+}
+
+.memory-citations {
+  display: grid;
+  gap: 5px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.memory-citations button {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: rgba(20, 20, 19, 0.03);
+  color: var(--slate-medium);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.memory-citations button:hover {
+  background: rgba(198, 97, 63, 0.08);
+  color: var(--slate-dark);
+}
+
 /* -- Responsive -- */
 
 @media (max-width: 1100px) {
@@ -2435,7 +2741,10 @@ button.catalog-row:hover {
   }
 
   .memory-proposals-rail {
-    display: none;
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+    max-height: none;
   }
 }
 
@@ -2445,6 +2754,20 @@ button.catalog-row:hover {
   }
 
   .memory-sidebar {
-    display: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .memory-tree {
+    max-height: 240px;
+  }
+
+  .memory-compose-grid,
+  .memory-ask-form {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-mode-bar {
+    flex-wrap: wrap;
   }
 }

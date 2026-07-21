@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import {
   maintenanceResultSchema,
+  memoryAnswerSchema,
+  memoryIngestResultSchema,
   memoryReadResultSchema,
   memoryWriteProposalSchema,
   reindexResultSchema,
@@ -8,6 +10,10 @@ import {
   vaultNodeSchema,
   type ManualSaveRequest,
   type MaintenanceResult,
+  type MemoryAnswer,
+  type MemoryAskRequest,
+  type MemoryIngestRequest,
+  type MemoryIngestResult,
   type MemoryReadResult,
   type MemorySearchOpts,
   type MemoryWriteProposal,
@@ -186,6 +192,40 @@ export async function memorySearch(
   return scoredMemorySchema.array().parse(payload)
 }
 
+export async function memoryAsk(request: MemoryAskRequest): Promise<MemoryAnswer> {
+  if (!isTauriRuntime()) {
+    return {
+      answer:
+        'Delta feed daily instead of full: full files over 2GB hit the SFTP timeout. [1]',
+      citations: [
+        {
+          id: 'mem-001',
+          number: 1,
+          title: 'PowerReviews feed is delta, not full',
+          vaultPath: 'work/decisions/2026-07-20-powerreviews-feed-delta.md',
+          status: 'active',
+          excerpt: 'Delta feed daily instead of full: full files over 2GB hit the SFTP timeout.',
+          score: 0.87,
+        },
+      ],
+      warnings: [],
+      abstained: false,
+    }
+  }
+  const payload = await invoke<MemoryAnswer>('memory_ask', { request })
+  return memoryAnswerSchema.parse(payload)
+}
+
+export async function memoryIngest(
+  request: MemoryIngestRequest,
+): Promise<MemoryIngestResult> {
+  if (!isTauriRuntime()) {
+    return { proposals: [], rejected: [] }
+  }
+  const payload = await invoke<MemoryIngestResult>('memory_ingest', { request })
+  return memoryIngestResultSchema.parse(payload)
+}
+
 export async function memorySaveManual(
   request: ManualSaveRequest,
 ): Promise<MemoryWriteProposal> {
@@ -207,6 +247,7 @@ export async function memorySaveManual(
       status: 'auto_applied',
       createdAt: new Date().toISOString(),
       decidedAt: null,
+      baseContentHash: null,
     }
   }
   const payload = await invoke<MemoryWriteProposal>('memory_save_manual', { request })
@@ -271,6 +312,7 @@ export async function skillsDistill(taskId: string): Promise<MemoryWriteProposal
       status: 'pending',
       createdAt: new Date().toISOString(),
       decidedAt: null,
+      baseContentHash: null,
     }
   }
   const payload = await invoke<MemoryWriteProposal>('skills_distill', { taskId })

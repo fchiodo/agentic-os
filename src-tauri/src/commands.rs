@@ -270,14 +270,34 @@ pub fn audit_verify_chain(db: State<'_, Db>) -> Result<AuditChainStatus, String>
 
 use crate::memory;
 use crate::memory::{
-    MaintenanceResult, ManualSaveRequest, MemoryReadResult, MemorySearchOpts, MemoryWriteProposal,
+    MaintenanceResult, ManualSaveRequest, MemoryAnswer, MemoryAskRequest, MemoryIngestRequest,
+    MemoryIngestResult, MemoryReadResult, MemorySearchOpts, MemoryWriteProposal,
     ProposalDecideRequest, ReindexResult, ScoredMemory, VaultNode,
 };
 
 #[tauri::command]
-pub fn memory_tree(domain: Option<String>) -> Result<Vec<VaultNode>, String> {
+pub fn memory_tree(db: State<'_, Db>, domain: Option<String>) -> Result<Vec<VaultNode>, String> {
     memory::vault::ensure_vault().map_err(|e| e.to_string())?;
-    memory::vault::tree(domain.as_deref()).map_err(|e| e.to_string())
+    memory::index::ensure_tables(&db).map_err(|e| e.to_string())?;
+    let mut nodes = memory::vault::tree(domain.as_deref()).map_err(|e| e.to_string())?;
+
+    fn enrich(db: &Db, nodes: &mut [VaultNode]) -> Result<(), String> {
+        for node in nodes {
+            if node.is_dir {
+                enrich(db, &mut node.children)?;
+            } else if let Some((id, mem_type, status)) =
+                memory::index::metadata_by_path(db, &node.path).map_err(|e| e.to_string())?
+            {
+                node.memory_id = Some(id);
+                node.mem_type = Some(mem_type);
+                node.status = Some(status);
+            }
+        }
+        Ok(())
+    }
+
+    enrich(&db, &mut nodes)?;
+    Ok(nodes)
 }
 
 #[tauri::command]
@@ -324,11 +344,27 @@ pub fn memory_search(
 }
 
 #[tauri::command]
+pub fn memory_ask(
+    db: State<'_, Db>,
+    request: MemoryAskRequest,
+) -> Result<MemoryAnswer, String> {
+    memory::retrieval::ask(&db, &request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn memory_save_manual(
     db: State<'_, Db>,
     request: ManualSaveRequest,
 ) -> Result<MemoryWriteProposal, String> {
     memory::pipeline::process_manual_save(&db, &request, "manual").map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_ingest(
+    db: State<'_, Db>,
+    request: MemoryIngestRequest,
+) -> Result<MemoryIngestResult, String> {
+    memory::pipeline::process_ingest_batch(&db, &request).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -376,7 +412,19 @@ pub fn skills_distill(db: State<'_, Db>, task_id: String) -> Result<MemoryWriteP
         return Err("only completed tasks can be distilled into skills".to_string());
     }
 
-    let step_titles: Vec<String> = detail.steps.iter().map(|s| s.title.clone()).collect();
+    let trace_steps: Vec<String> = audit::read_trace(&db, &task_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|entry| matches!(entry.kind.as_str(), "tool_call" | "approval" | "output"))
+        .map(|entry| entry.summary)
+        .filter(|summary| !summary.trim().is_empty())
+        .take(25)
+        .collect();
+    let step_titles: Vec<String> = if trace_steps.is_empty() {
+        detail.steps.iter().map(|step| step.title.clone()).collect()
+    } else {
+        trace_steps
+    };
 
     memory::pipeline::process_skill_distill(
         &db,

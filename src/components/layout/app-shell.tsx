@@ -50,6 +50,7 @@ const navigation = [
     to: '/usage',
   },
   {
+    badgeKey: 'pendingMemoryProposals' as const,
     icon: BrainCircuit,
     label: 'Memory',
     summary: 'Persistent context and notes',

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  memoryAsk,
   memoryConfirm,
   memoryMaintenanceRun,
   memoryProposalsDecide,
@@ -11,7 +12,11 @@ import {
   memoryTree,
   skillsDistill,
 } from '@/features/memory/api'
-import type { ManualSaveRequest, ProposalDecideRequest } from '@/features/memory/schema'
+import type {
+  ManualSaveRequest,
+  MemoryAskRequest,
+  ProposalDecideRequest,
+} from '@/features/memory/schema'
 
 export const memoryTreeQueryKey = ['memory', 'tree'] as const
 export const memorySearchQueryKey = ['memory', 'search'] as const
@@ -55,12 +60,19 @@ export function useMemoryProposals(status?: string) {
   })
 }
 
+export function useMemoryAsk() {
+  return useMutation({
+    mutationFn: (request: MemoryAskRequest) => memoryAsk(request),
+  })
+}
+
 export function useMemorySaveManual() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (request: ManualSaveRequest) => memorySaveManual(request),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
     },
   })
@@ -72,6 +84,7 @@ export function useMemoryProposalsDecide() {
     mutationFn: (request: ProposalDecideRequest) => memoryProposalsDecide(request),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
     },
   })
@@ -83,6 +96,8 @@ export function useMemoryConfirm() {
     mutationFn: (id: string) => memoryConfirm(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
+      void queryClient.invalidateQueries({ queryKey: ['memory', 'read'] })
+      void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
     },
   })
 }
@@ -93,6 +108,7 @@ export function useMemoryReindex() {
     mutationFn: memoryReindex,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
     },
   })
 }
@@ -103,6 +119,7 @@ export function useMemoryMaintenanceRun() {
     mutationFn: memoryMaintenanceRun,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
     },
   })
 }

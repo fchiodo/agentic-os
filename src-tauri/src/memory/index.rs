@@ -44,21 +44,26 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
 
         // FTS5 virtual table — create only if not exists (CREATE VIRTUAL TABLE
         // doesn't support IF NOT EXISTS in older sqlite builds, so we check)
-        let has_fts: bool = conn
+        let fts_sql: Option<String> = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_fts'",
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories_fts'",
                 [],
-                |row| row.get::<_, i64>(0),
+                |row| row.get(0),
             )
-            .unwrap_or(0)
-            > 0;
+            .ok();
+        let has_correct_fts = fts_sql
+            .as_deref()
+            .is_some_and(|sql| sql.contains("contentless_delete=1"));
 
-        if !has_fts {
+        if !has_correct_fts {
+            if fts_sql.is_some() {
+                conn.execute_batch("DROP TABLE memories_fts;")?;
+            }
             conn.execute_batch(
                 "CREATE VIRTUAL TABLE memories_fts USING fts5(
                     title, summary, body, tags,
                     content='',
-                    contentless_delete
+                    contentless_delete=1
                 );",
             )?;
         }
@@ -81,11 +86,26 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
                 requires_approval INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL,
-                decided_at TEXT
+                decided_at TEXT,
+                base_content_hash TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_proposals_status ON memory_proposals(status);
             "#,
         )?;
+
+        let has_base_content_hash = {
+            let mut stmt = conn.prepare("PRAGMA table_info(memory_proposals)")?;
+            let columns = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            columns.iter().any(|column| column == "base_content_hash")
+        };
+        if !has_base_content_hash {
+            conn.execute(
+                "ALTER TABLE memory_proposals ADD COLUMN base_content_hash TEXT",
+                [],
+            )?;
+        }
 
         Ok(())
     })
@@ -142,18 +162,20 @@ pub fn upsert(db: &Db, row: &MemoryRow, body: &str, tags: &[String]) -> AppResul
             ],
         )?;
 
-        // FTS upsert: delete old entry, insert new
+        // FTS upsert: delete old entry, insert new. FTS failures are fatal:
+        // returning success with an unsynchronised search index makes the
+        // vault appear to have forgotten a successfully-written memory.
         let tags_str = tags.join(" ");
-        let _ = conn.execute(
+        conn.execute(
             "DELETE FROM memories_fts WHERE rowid IN (SELECT rowid FROM memories WHERE id = ?1)",
             params![row.id],
-        );
-        let _ = conn.execute(
+        )?;
+        conn.execute(
             "INSERT INTO memories_fts (rowid, title, summary, body, tags) VALUES (
                 (SELECT rowid FROM memories WHERE id = ?1), ?2, ?3, ?4, ?5
             )",
             params![row.id, row.title, row.summary, body, tags_str],
-        );
+        )?;
 
         Ok(())
     })
@@ -168,7 +190,14 @@ pub fn reindex(db: &Db) -> AppResult<ReindexResult> {
     let mut drifted = 0i64;
 
     // Walk all domain directories
-    let domains = ["work", "planphysique", "personal", "family", "finance", "research"];
+    let domains = [
+        "work",
+        "planphysique",
+        "personal",
+        "family",
+        "finance",
+        "research",
+    ];
     for domain in &domains {
         let dir = root.join(domain);
         if !dir.exists() {
@@ -188,11 +217,13 @@ pub fn reindex(db: &Db) -> AppResult<ReindexResult> {
         for (id, path) in &rows {
             let full = root.join(path);
             if !full.exists() {
-                conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
-                let _ = conn.execute(
+                // Capture/delete the FTS row while the parent rowid still
+                // exists, then remove the derived row.
+                conn.execute(
                     "DELETE FROM memories_fts WHERE rowid IN (SELECT rowid FROM memories WHERE id = ?1)",
                     params![id],
-                );
+                )?;
+                conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
                 orphaned += 1;
             }
         }
@@ -234,6 +265,15 @@ fn walk_and_index(
             let content_hash = crate::audit::compute_content_hash(&content);
 
             if let Some((fm, body)) = frontmatter::parse(&content) {
+                if fm.domain != domain {
+                    return Err(crate::error::AppError::Io(std::io::Error::other(
+                        format!(
+                            "memory domain fence mismatch: {relative} declares {} but is under {domain}",
+                            fm.domain
+                        ),
+                    )));
+                }
+                let existing = get_by_id(db, &fm.id)?;
                 let row = MemoryRow {
                     id: fm.id.clone(),
                     vault_path: relative.clone(),
@@ -250,23 +290,24 @@ fn walk_and_index(
                     stale_after_days: fm.stale_after_days,
                     last_confirmed_at: fm.last_confirmed.clone(),
                     confirmation_count: fm.confirmations.unwrap_or(0),
-                    last_accessed_at: None,
-                    access_count: 0,
+                    last_accessed_at: existing
+                        .as_ref()
+                        .and_then(|row| row.last_accessed_at.clone()),
+                    access_count: existing.as_ref().map(|row| row.access_count).unwrap_or(0),
                     expires_at: fm.expires.clone(),
-                    provenance: serde_json::to_string(&fm.provenance)
-                        .unwrap_or_default(),
+                    provenance: serde_json::to_string(&fm.provenance).unwrap_or_default(),
                     content_hash: content_hash.clone(),
-                    status: "active".to_string(),
+                    // Lifecycle state is derived locally and is deliberately
+                    // not stored in user-authored YAML. Preserve it during a
+                    // reindex so stale memories do not become active again.
+                    status: existing
+                        .as_ref()
+                        .map(|row| row.status.clone())
+                        .unwrap_or_else(|| "active".to_string()),
                 };
 
                 // Check if content has drifted
-                let existing_hash: Option<String> = db.with_conn(|conn| -> Result<Option<String>, crate::error::AppError> {
-                    Ok(conn.query_row(
-                        "SELECT content_hash FROM memories WHERE id = ?1",
-                        params![fm.id],
-                        |row| row.get(0),
-                    ).ok())
-                }).unwrap_or(None);
+                let existing_hash = existing.as_ref().map(|row| row.content_hash.clone());
 
                 if let Some(old_hash) = existing_hash {
                     if old_hash != content_hash {
@@ -276,6 +317,10 @@ fn walk_and_index(
 
                 upsert(db, &row, &body, &fm.tags)?;
                 *indexed += 1;
+            } else {
+                return Err(crate::error::AppError::Io(std::io::Error::other(
+                    format!("invalid or missing memory frontmatter: {relative}"),
+                )));
             }
         }
     }
@@ -287,10 +332,16 @@ fn walk_and_index(
 /// operators in the input can never break query syntax) and terms are
 /// OR-joined. Returns None when no searchable term survives.
 pub fn fts_match_expr(input: &str) -> Option<String> {
+    const STOPWORDS: [&str; 24] = [
+        "a", "an", "and", "are", "is", "of", "or", "the", "to", "what", "when", "where", "which",
+        "who", "why", "che", "chi", "come", "cosa", "della", "delle", "il", "la", "un",
+    ];
     let terms: Vec<String> = input
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{}\"", t))
+        .map(str::to_lowercase)
+        .filter(|term| term.chars().count() > 1 && !STOPWORDS.contains(&term.as_str()))
+        .map(|term| format!("\"{}\"", term))
         .collect();
 
     if terms.is_empty() {
@@ -375,11 +426,42 @@ pub fn touch(db: &Db, id: &str) -> AppResult<()> {
     })
 }
 
+/// Remove one derived index row and its FTS entry. The vault file is not
+/// touched. Used by compensating rollback after a failed create.
+pub fn remove(db: &Db, id: &str) -> AppResult<()> {
+    ensure_tables(db)?;
+    db.with_conn(|conn| {
+        conn.execute(
+            "DELETE FROM memories_fts WHERE rowid IN (SELECT rowid FROM memories WHERE id = ?1)",
+            params![id],
+        )?;
+        conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        Ok(())
+    })
+}
+
+/// Return lightweight metadata by vault path for tree enrichment.
+pub fn metadata_by_path(db: &Db, path: &str) -> AppResult<Option<(String, String, String)>> {
+    ensure_tables(db)?;
+    db.with_conn(|conn| {
+        let mut stmt =
+            conn.prepare("SELECT id, mem_type, status FROM memories WHERE vault_path = ?1")?;
+        let mut rows = stmt.query_map(params![path], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    })
+}
+
 /// Confirm a memory is still true (resets staleness). The vault file is
 /// the source of truth (MEMORY-SPEC §0.1), so the confirmation MUST be
 /// written into the file's frontmatter first — updating only the index
 /// would be silently undone by the next reindex.
 pub fn confirm(db: &Db, id: &str) -> AppResult<()> {
+    let _write_guard = vault::lock_writes();
     let now = chrono::Utc::now().to_rfc3339();
 
     let row = get_by_id(db, id)?
@@ -396,20 +478,55 @@ pub fn confirm(db: &Db, id: &str) -> AppResult<()> {
     fm.confirmations = Some(fm.confirmations.unwrap_or(0) + 1);
     fm.updated = now.clone();
     let new_content = frontmatter::serialize(&fm, &body);
-    vault::write_file(&row.vault_path, &new_content)?;
-    let _ = vault::git_commit(&format!("mem({}): confirm {}", row.domain, row.title));
+    let old_content = content;
+    vault::write_file_atomic(&row.vault_path, &new_content)?;
+    if let Err(error) = vault::git_commit(&format!("mem({}): confirm {}", row.domain, row.title)) {
+        let _ = vault::write_file_atomic(&row.vault_path, &old_content);
+        return Err(error);
+    }
 
     // 2. Index second, including the new content hash so the next reindex
     // does not read this write as drift.
     let new_hash = crate::audit::compute_content_hash(&new_content);
-    db.with_conn(|conn| {
+    let update_result = db.with_conn(|conn| {
         conn.execute(
             "UPDATE memories SET last_confirmed_at = ?1, confirmation_count = confirmation_count + 1,
                     status = 'active', updated_at = ?1, content_hash = ?2 WHERE id = ?3",
             params![now, new_hash, id],
         )?;
         Ok(())
-    })
+    });
+
+    if let Err(error) = update_result {
+        let _ = vault::write_file_atomic(&row.vault_path, &old_content);
+        let _ = vault::git_commit(&format!(
+            "mem({}): rollback confirm {}",
+            row.domain, row.title
+        ));
+        return Err(error);
+    }
+
+    if let Err(error) = crate::audit::append_row(
+        db,
+        "memory",
+        id,
+        "memory_write",
+        "Memory confirmation persisted",
+        &serde_json::json!({"id": id, "path": row.vault_path, "op": "confirm"}),
+        None,
+        None,
+    ) {
+        let _ = vault::write_file_atomic(&row.vault_path, &old_content);
+        let _ = vault::git_commit(&format!(
+            "mem({}): rollback confirm {}",
+            row.domain, row.title
+        ));
+        if let Some((old_fm, old_body)) = frontmatter::parse(&old_content) {
+            let _ = upsert(db, &row, &old_body, &old_fm.tags);
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRow> {

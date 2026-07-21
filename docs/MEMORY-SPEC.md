@@ -1,5 +1,8 @@
 # Agentic OS — Second Brain / Memory Specification v1.0 (developer handoff)
 
+Implementation status: complete. Operational behavior and release checks are
+documented in [MEMORY-RUNBOOK.md](./MEMORY-RUNBOOK.md).
+
 Companion to `docs/ARCHITECTURE.md` v1.2 (§6–§8) and `docs/UI-SPEC.md` §4.3. Scope: the complete Phase 2 memory implementation — vault, index, write pipeline, TTL/staleness/retrieval-ranking (the three v1.2 refinements), context builder integration, commands, UI deltas, tests. Stack: Rust crate `memsvc` inside `src-tauri`, SQLite (existing app DB), git, markdown. No external memory SaaS — hard constraint (corporate data, local-first).
 
 ## 0. Design invariants (do not violate)
@@ -13,7 +16,7 @@ Companion to `docs/ARCHITECTURE.md` v1.2 (§6–§8) and `docs/UI-SPEC.md` §4.3
 
 ## 1. Vault layout and file format
 
-Default root: `~/AgenticOS/vault/` (configurable in settings; must be outside any workspace the harness can write to via tasks). The vault is its **own git repository**, auto-initialized on first run — separate from the app repo.
+Default root: `~/AgenticOS/vault/` (configurable at deployment through `AGENTIC_OS_VAULT_ROOT`; it must be outside any workspace the harness can write to via tasks). The vault is its **own git repository**, auto-initialized on first run — separate from the app repo.
 
 ```
 vault/
@@ -89,7 +92,8 @@ CREATE INDEX idx_memories_domain ON memories(domain, status);
 
 CREATE VIRTUAL TABLE memories_fts USING fts5(
     title, summary, body, tags,
-    content=''                                -- contentless; body read from file on demand
+    content='',                               -- contentless; body read from file on demand
+    contentless_delete=1                      -- safe per-row upsert/delete
 );
 
 CREATE TABLE memory_proposals (
@@ -107,7 +111,8 @@ CREATE TABLE memory_proposals (
     gate_report TEXT NOT NULL,                -- JSON: which gate checks ran/passed
     requires_approval INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',   -- pending|approved|discarded|auto_applied
-    created_at TEXT NOT NULL, decided_at TEXT
+    created_at TEXT NOT NULL, decided_at TEXT,
+    base_content_hash TEXT                    -- optimistic concurrency guard
 );
 ```
 

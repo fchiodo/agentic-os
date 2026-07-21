@@ -1,6 +1,8 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::error::{AppError, AppResult};
 
@@ -14,6 +16,17 @@ const DOMAIN_DIRS: [&str; 6] = [
     "finance",
     "research",
 ];
+
+static VAULT_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Serialize multi-step vault/Git/index mutations. SQLite has its own mutex,
+/// but Git's index and filesystem compensation also need one writer at a time.
+pub fn lock_writes() -> MutexGuard<'static, ()> {
+    VAULT_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Returns the vault root. Defaults to ~/AgenticOS/vault/; the
 /// AGENTIC_OS_VAULT_ROOT environment variable overrides it (used by
@@ -75,11 +88,25 @@ pub fn write_skill_file(relative_path: &str, content: &str) -> AppResult<PathBuf
     let root = skills_root()?;
     fs::create_dir_all(&root)?;
     let full = canonicalize_under(&root, relative_path)?;
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&full, content)?;
+    atomic_replace(&full, content)?;
     Ok(full)
+}
+
+pub fn read_skill_file(relative_path: &str) -> AppResult<String> {
+    let root = skills_root()?;
+    fs::create_dir_all(&root)?;
+    let full = canonicalize_under(&root, relative_path)?;
+    Ok(fs::read_to_string(full)?)
+}
+
+pub fn remove_skill_file(relative_path: &str) -> AppResult<()> {
+    let root = skills_root()?;
+    fs::create_dir_all(&root)?;
+    let full = canonicalize_under(&root, relative_path)?;
+    if full.exists() {
+        fs::remove_file(full)?;
+    }
+    Ok(())
 }
 
 /// Read a file from the vault. Path must resolve under vault root.
@@ -90,18 +117,65 @@ pub fn read_file(relative_path: &str) -> AppResult<(String, PathBuf)> {
     Ok((content, full))
 }
 
-/// Write a file to the vault. Path must resolve under vault root.
-pub fn write_file(relative_path: &str, content: &str) -> AppResult<PathBuf> {
+pub fn file_exists(relative_path: &str) -> AppResult<bool> {
+    let root = vault_root()?;
+    Ok(canonicalize_under(&root, relative_path)?.is_file())
+}
+
+/// Atomically replace a vault file. The temporary file lives beside the
+/// destination, therefore `rename` cannot cross filesystems and readers
+/// never observe a partially-written Markdown document.
+pub fn write_file_atomic(relative_path: &str, content: &str) -> AppResult<PathBuf> {
     let root = vault_root()?;
     let full = canonicalize_under(&root, relative_path)?;
-
-    // Ensure parent directory exists
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(&full, content)?;
+    atomic_replace(&full, content)?;
     Ok(full)
+}
+
+fn atomic_replace(full: &Path, content: &str) -> AppResult<()> {
+    let parent = full
+        .parent()
+        .ok_or_else(|| AppError::Io(std::io::Error::other("vault file has no parent")))?;
+    fs::create_dir_all(parent)?;
+
+    let file_name = full
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::Io(std::io::Error::other("invalid vault file name")))?;
+    let temp = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+
+    let result = (|| -> AppResult<()> {
+        let mut handle = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)?;
+        handle.write_all(content.as_bytes())?;
+        handle.sync_all()?;
+        fs::rename(&temp, full)?;
+        // Best-effort directory sync makes the rename durable on filesystems
+        // that support syncing directories (macOS/Linux).
+        if let Ok(directory) = fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result?;
+    Ok(())
+}
+
+/// Remove one validated vault file. Used only by compensating rollback for a
+/// failed create; callers must provide an exact relative path.
+pub fn remove_file(relative_path: &str) -> AppResult<()> {
+    let root = vault_root()?;
+    let full = canonicalize_under(&root, relative_path)?;
+    if full.exists() {
+        fs::remove_file(full)?;
+    }
+    Ok(())
 }
 
 /// Move a file to the archive directory (git mv).
@@ -109,16 +183,29 @@ pub fn archive_file(relative_path: &str, domain: &str) -> AppResult<PathBuf> {
     let root = vault_root()?;
     let source = canonicalize_under(&root, relative_path)?;
     let archive_dir = root.join("_archive").join(domain);
-    fs::create_dir_all(&archive_dir)?;
-
-    let file_name = source
-        .file_name()
-        .ok_or_else(|| AppError::Io(std::io::Error::other("no file name")))?;
-    let dest = archive_dir.join(file_name);
+    let domain_root = fs::canonicalize(root.join(domain))?;
+    let suffix = source.strip_prefix(&domain_root).map_err(|_| {
+        AppError::Io(std::io::Error::other(
+            "archive source does not belong to requested domain",
+        ))
+    })?;
+    let dest = archive_dir.join(suffix);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if dest.exists() {
+        return Err(AppError::Io(std::io::Error::other(
+            "archive destination already exists",
+        )));
+    }
 
     // Try git mv first, fall back to fs rename
     let status = Command::new("git")
-        .args(["mv", source.to_str().unwrap_or(""), dest.to_str().unwrap_or("")])
+        .args([
+            "mv",
+            source.to_str().unwrap_or(""),
+            dest.to_str().unwrap_or(""),
+        ])
         .current_dir(&root)
         .status();
 
@@ -131,6 +218,22 @@ pub fn archive_file(relative_path: &str, domain: &str) -> AppResult<PathBuf> {
     }
 }
 
+/// Compensating inverse of `archive_file` used when the Git or SQLite part of
+/// expiry fails. Both paths are validated under the vault root.
+pub fn restore_archived_file(
+    archived_relative_path: &str,
+    original_relative_path: &str,
+) -> AppResult<()> {
+    let root = vault_root()?;
+    let source = canonicalize_under(&root, archived_relative_path)?;
+    let destination = canonicalize_under(&root, original_relative_path)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
 /// Git commit in the vault.
 pub fn git_commit(message: &str) -> AppResult<()> {
     let root = vault_root()?;
@@ -138,19 +241,24 @@ pub fn git_commit(message: &str) -> AppResult<()> {
         return Ok(());
     }
 
-    let _ = Command::new("git")
+    let add = Command::new("git")
         .args(["add", "-A"])
         .current_dir(&root)
-        .status();
+        .status()?;
+    if !add.success() {
+        return Err(AppError::Io(std::io::Error::other("git add failed")));
+    }
 
     let status = Command::new("git")
         .args(["commit", "-m", message, "--allow-empty"])
         .current_dir(&root)
-        .status();
+        .status()?;
 
-    // It's OK if commit fails (nothing to commit)
-    let _ = status;
-    Ok(())
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Io(std::io::Error::other("git commit failed")))
+    }
 }
 
 /// Get the last git commit hash for a file.
@@ -178,7 +286,12 @@ pub fn tree(domain: Option<&str>) -> AppResult<Vec<VaultNode>> {
     }
 
     let domains = match domain {
-        Some(d) => vec![d.to_string()],
+        Some(d) if DOMAIN_DIRS.contains(&d) => vec![d.to_string()],
+        Some(_) => {
+            return Err(AppError::Io(std::io::Error::other(
+                "invalid memory domain",
+            )))
+        }
         None => DOMAIN_DIRS.iter().map(|s| s.to_string()).collect(),
     };
 
@@ -305,24 +418,35 @@ fn git_init(root: &Path) -> AppResult<()> {
     }
 
     // Configure local git user for the vault
-    let _ = Command::new("git")
+    let email = Command::new("git")
         .args(["config", "user.email", "vault@agentic-os.local"])
         .current_dir(root)
-        .status();
-    let _ = Command::new("git")
+        .status()?;
+    let name = Command::new("git")
         .args(["config", "user.name", "Agentic OS Vault"])
         .current_dir(root)
-        .status();
+        .status()?;
+    if !email.success() || !name.success() {
+        return Err(AppError::Io(std::io::Error::other(
+            "git local identity configuration failed",
+        )));
+    }
 
     // Initial commit
-    let _ = Command::new("git")
+    let add = Command::new("git")
         .args(["add", "-A"])
         .current_dir(root)
-        .status();
-    let _ = Command::new("git")
+        .status()?;
+    let commit = Command::new("git")
         .args(["commit", "-m", "mem: initialize vault"])
         .current_dir(root)
-        .status();
+        .status()?;
+
+    if !add.success() || !commit.success() {
+        return Err(AppError::Io(std::io::Error::other(
+            "initial vault commit failed",
+        )));
+    }
 
     Ok(())
 }

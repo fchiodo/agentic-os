@@ -5,10 +5,15 @@ use super::{MemoryFrontmatter, MemoryType, Provenance, Sensitivity};
 /// Parse YAML frontmatter from a markdown file. Expects content starting
 /// with `---\n`. Returns (frontmatter, body_without_frontmatter).
 pub fn parse(content: &str) -> Option<(MemoryFrontmatter, String)> {
-    let content = content.strip_prefix("---\n").or_else(|| content.strip_prefix("---\r\n"))?;
-    let end = content.find("\n---\n").or_else(|| content.find("\n---\r\n"))?;
+    let content = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))?;
+    let (end, delimiter_len) = content
+        .find("\n---\n")
+        .map(|index| (index, 5))
+        .or_else(|| content.find("\n---\r\n").map(|index| (index, 6)))?;
     let yaml_str = &content[..end];
-    let body = &content[end + 5..];
+    let body = &content[end + delimiter_len..];
 
     let yaml: Value = serde_yaml::from_str(yaml_str).ok()?;
     let fm = yaml_to_frontmatter(&yaml)?;
@@ -26,8 +31,11 @@ pub fn serialize(fm: &MemoryFrontmatter, body: &str) -> String {
     out.push_str(&format!("created: {}\n", fm.created));
     out.push_str(&format!("updated: {}\n", fm.updated));
     out.push_str("provenance:\n");
-    out.push_str(&format!("  source: {}\n", fm.provenance.source));
-    out.push_str(&format!("  ts: {}\n", fm.provenance.ts));
+    out.push_str(&format!(
+        "  source: \"{}\"\n",
+        escape_yaml(&fm.provenance.source)
+    ));
+    out.push_str(&format!("  ts: \"{}\"\n", escape_yaml(&fm.provenance.ts)));
     out.push_str(&format!("confidence: {}\n", fm.confidence));
     out.push_str(&format!("sensitivity: {}\n", fm.sensitivity.as_str()));
     if let Some(ref v) = fm.valid_from {
@@ -51,7 +59,7 @@ pub fn serialize(fm: &MemoryFrontmatter, body: &str) -> String {
     if !fm.tags.is_empty() {
         out.push_str("tags:\n");
         for tag in &fm.tags {
-            out.push_str(&format!("  - {}\n", tag));
+            out.push_str(&format!("  - \"{}\"\n", escape_yaml(tag)));
         }
     }
     out.push_str("---\n\n");
@@ -77,11 +85,22 @@ fn yaml_to_frontmatter(yaml: &Value) -> Option<MemoryFrontmatter> {
         source: prov.get("source")?.as_str()?.to_string(),
         ts: prov.get("ts")?.as_str()?.to_string(),
     };
+    if provenance.source.trim().is_empty() || provenance.ts.trim().is_empty() {
+        return None;
+    }
 
     let confidence = obj
         .get("confidence")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.7);
+    if !matches!(
+        domain.as_str(),
+        "work" | "planphysique" | "personal" | "family" | "finance" | "research"
+    ) || title.trim().is_empty()
+        || !(0.0..=1.0).contains(&confidence)
+    {
+        return None;
+    }
     let sensitivity = Sensitivity::parse(
         obj.get("sensitivity")
             .and_then(|v| v.as_str())
@@ -96,16 +115,12 @@ fn yaml_to_frontmatter(yaml: &Value) -> Option<MemoryFrontmatter> {
         .get("valid_until")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let stale_after_days = obj
-        .get("stale_after_days")
-        .and_then(|v| v.as_i64());
+    let stale_after_days = obj.get("stale_after_days").and_then(|v| v.as_i64());
     let last_confirmed = obj
         .get("last_confirmed")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let confirmations = obj
-        .get("confirmations")
-        .and_then(|v| v.as_i64());
+    let confirmations = obj.get("confirmations").and_then(|v| v.as_i64());
     let expires = obj
         .get("expires")
         .and_then(|v| v.as_str())

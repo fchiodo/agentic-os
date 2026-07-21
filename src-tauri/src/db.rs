@@ -26,6 +26,7 @@ impl Db {
             conn: Arc::new(Mutex::new(conn)),
         };
         db.migrate()?;
+        crate::memory::index::ensure_tables(&db)?;
         Ok(db)
     }
 
@@ -124,5 +125,6 @@ impl Db {
         })
     }
 }
-// Memory tables are added by memory::index::ensure_tables() on first access.
-// They live in the same DB but are managed by the memsvc module.
+// Memory tables live in the same system-of-record DB and are migrated during
+// Db::open via memory::index::ensure_tables(). The function remains
+// idempotent because commands and tests may call it defensively.

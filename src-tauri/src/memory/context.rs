@@ -17,6 +17,13 @@ pub struct MemoryContext {
     pub unverified_paths: Vec<String>,
 }
 
+fn escape_data(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Build the memory block injected ahead of a task prompt. Memories are
 /// DATA, never instructions: the wrapper says so explicitly and every
 /// entry carries its source path and status. Stale entries are tagged
@@ -41,20 +48,41 @@ pub fn build_memory_context(db: &Db, query: &str, domain: &str) -> AppResult<Mem
         }
 
         let is_stale = memory.row.status == "stale";
-        let verify_attr = if is_stale { " verify=\"UNVERIFIED\"" } else { "" };
-        let body = memory.row.summary.clone().unwrap_or_default();
+        let verify_attr = if is_stale {
+            " verify=\"UNVERIFIED\""
+        } else {
+            ""
+        };
+        let body = super::vault::read_file(&memory.row.vault_path)
+            .ok()
+            .map(|(content, _)| {
+                super::frontmatter::parse(&content)
+                    .map(|(_, body)| body)
+                    .unwrap_or(content)
+            })
+            .unwrap_or_else(|| memory.row.summary.clone().unwrap_or_default());
 
-        let entry = format!(
+        let mut entry = format!(
             "<memory source=\"{}\" status=\"{}\"{} confirmed=\"{}\">\n{}\n</memory>\n",
             memory.row.vault_path,
             memory.row.status,
             verify_attr,
             memory.row.last_confirmed_at.as_deref().unwrap_or("never"),
-            body,
+            escape_data(&body),
         );
 
         if used_chars + entry.len() > CONTEXT_CHAR_BUDGET {
-            break;
+            let summary = memory.row.summary.clone().unwrap_or_default();
+            entry = format!(
+                "<memory source=\"{}\" status=\"{}\"{} compressed=\"true\">{} </memory>\n",
+                memory.row.vault_path,
+                memory.row.status,
+                verify_attr,
+                escape_data(&summary),
+            );
+            if used_chars + entry.len() > CONTEXT_CHAR_BUDGET {
+                continue;
+            }
         }
         used_chars += entry.len();
         prompt_block.push_str(&entry);
