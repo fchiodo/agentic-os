@@ -105,6 +105,11 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
                 candidate_count INTEGER NOT NULL DEFAULT 0,
                 warning_count INTEGER NOT NULL DEFAULT 0,
                 warnings_json TEXT NOT NULL DEFAULT '[]',
+                extraction_engine TEXT,
+                extraction_version TEXT,
+                extraction_quality_score INTEGER,
+                extraction_quality_status TEXT NOT NULL DEFAULT 'not_applicable',
+                extraction_quality_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -162,6 +167,26 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
                 "ALTER TABLE document_imports ADD COLUMN original_path TEXT",
                 [],
             )?;
+        }
+        for (column, definition) in [
+            ("extraction_engine", "TEXT"),
+            ("extraction_version", "TEXT"),
+            ("extraction_quality_score", "INTEGER"),
+            (
+                "extraction_quality_status",
+                "TEXT NOT NULL DEFAULT 'not_applicable'",
+            ),
+            (
+                "extraction_quality_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            ),
+        ] {
+            if !import_columns.iter().any(|existing| existing == column) {
+                conn.execute(
+                    &format!("ALTER TABLE document_imports ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
         }
 
         Ok(())

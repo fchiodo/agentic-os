@@ -234,8 +234,8 @@ Two-column: left = vault tree (grouped by domain, collapsible; `search-field` on
 - Graph view: explicitly out of scope until Phase 5; do not scaffold it.
 - **Import document:** paste text, choose a PDF/UTF-8 text file, or fetch a public
   HTTP(S) URL. Show the 2 MiB limit, preserved source path, extraction warnings,
-  original PDF path when applicable, candidate count, source history/preview,
-  and route every extracted fact to
+  original PDF path when applicable, extractor/version, quality
+  status/score/issues, candidate count, source history/preview, and route every extracted fact to
   the existing pending-proposals rail for approval.
 
 ### 4.4 Today (`/today`) — Phase 3

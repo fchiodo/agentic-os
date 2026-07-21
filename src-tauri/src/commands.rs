@@ -370,11 +370,12 @@ pub fn memory_ingest(
 
 #[tauri::command]
 pub async fn memory_import_document(
+    app: AppHandle,
     db: State<'_, Db>,
     request: DocumentImportRequest,
 ) -> Result<DocumentImportResult, String> {
     let db = db.inner().clone();
-    memory::importer::import_document(&db, &request)
+    memory::importer::import_document_with_app(&db, &request, &app)
         .await
         .map_err(|e| e.to_string())
 }

@@ -126,6 +126,7 @@ CREATE TABLE memory_proposals (
 | `frontmatter.rs` | Parse/serialize YAML frontmatter (serde_yaml), validation |
 | `index.rs` | SQLite upserts, FTS sync, `reindex()` full scan with `content_hash` drift detection |
 | `pipeline.rs` | §5: extraction → classification → gate → dedup → proposal |
+| `pdf_extraction.rs` | Local MarkItDown sidecar orchestration, independent Rust fallback, deterministic extraction quality gate |
 | `proposals.rs` | Proposal CRUD, apply-on-approve (file write + git commit + index upsert, atomically ordered: file → commit → index) |
 | `retrieval.rs` | §7 scoring, access-stat updates |
 | `maintenance.rs` | §6 TTL/staleness sweeps |
@@ -140,6 +141,35 @@ Git commit message convention: `mem(<domain>): <op> <slug> [<provenance.source>]
 4. **Skill distillation** — `skills_distill(taskId)` produces a `kind='skill'` proposal whose `vault_path` targets the skills directory the harnesses consume (not the vault); same pipeline, same approval.
 
 Extraction uses `modelgw.invoke(capability=fast_extraction)` with a JSON-schema-constrained output: `[{type, domain, title, body, tags, valid_from?, valid_until?, confidence}]`, max 10 candidates per source. Extraction runs in a **read-only context**: the extractor model receives the trace text as data and cannot call tools.
+
+### 4.1 PDF admission pipeline
+
+PDF source bytes are preserved before knowledge admission and processed through
+this local cascade:
+
+```
+PDF bytes → MarkItDown 0.1.6 sidecar → QUALITY GATE
+                                      ├─ pass → snapshot + fact extraction
+                                      └─ fail → pdf-extract fallback → QUALITY GATE
+                                                                          ├─ pass → snapshot + fact extraction
+                                                                          └─ fail → diagnostic only, zero proposals
+```
+
+The sidecar is bundled with Tauri and exposes no file or URL conversion API. It
+accepts one signature-checked, base64 PDF on stdin, runs with a cleared
+environment, and is bounded by input/output sizes and a 25-second timeout. The
+fallback is an independent in-process Rust parser with panic containment and a
+20-second timeout. The pure Rust gate scores output from 0–100 and rejects
+short/empty text, high single-character-token ratios and runs, low readable
+character ratios, replacement glyphs, and unsupported controls. Only a result
+with status `passed` can feed the source index or memory candidate generator.
+Rejected text may be inspected by deterministic secret/injection scanners but
+is never stored as searchable source content.
+
+The `document_imports` record and immutable source frontmatter carry
+`extraction_engine`, `extraction_version`, `extraction_quality_score`,
+`extraction_quality_status`, and `extraction_quality_issues`. The same metadata
+is included in the hash-chained audit event and shown in the import UI.
 
 ## 5. Write pipeline (admission control)
 

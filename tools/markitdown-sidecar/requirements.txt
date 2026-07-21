@@ -1,0 +1,2 @@
+markitdown[pdf]==0.1.6
+pyinstaller==6.21.0

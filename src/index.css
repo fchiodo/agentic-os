@@ -2990,6 +2990,28 @@ button.catalog-row:hover {
   margin-top: 1px;
 }
 
+.document-extraction-quality {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--slate-dark);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.document-quality-issues {
+  margin: 6px 8px 0 24px;
+  padding: 0;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .document-candidate-list {
   display: grid;
   gap: 4px;

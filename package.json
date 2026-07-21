@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 1420 --strictPort",
     "dev:desktop": "tauri dev",
+    "prepare:markitdown": "node scripts/build-markitdown-sidecar.mjs",
     "build": "tsc -b && vite build",
     "build:desktop": "tauri build && pnpm sync:desktop-app",
     "sync:desktop-app": "./scripts/sync-desktop-app.sh",

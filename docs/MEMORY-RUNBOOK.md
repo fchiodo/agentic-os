@@ -50,9 +50,12 @@ or a Confluence page snapshot.
 3. The complete body is preserved under
    `_sources/<domain>/<date>-<slug>-<id>.md`, including capture metadata and a
    SHA-256 content hash. It is committed to the vault Git history and audited.
-   For PDFs, this Markdown file contains the locally extracted text and the
-   original binary is preserved byte-for-byte beside it as `.pdf`; the hash and
-   byte count refer to the original PDF.
+   For PDFs, this Markdown file contains locally extracted text only after it
+   passes the deterministic quality gate. The original binary is always
+   preserved byte-for-byte beside it as `.pdf`; the hash and byte count refer
+   to the original PDF. Extractor name, version, quality score, status, and
+   issues are recorded in the source frontmatter, SQLite history, audit event,
+   and UI.
 4. A deterministic local extractor ranks self-contained claims and creates at
    most 10 atomic fact/decision proposals. Every candidate links back to the
    source snapshot with a wiki link.
@@ -63,10 +66,21 @@ Limits and safety rules:
 
 - Maximum decoded source size: 2 MiB; no silent truncation.
 - Supported uploads include PDF plus UTF-8 Markdown/MDX, TXT, JSON, YAML, XML,
-  and HTML. PDF bytes cross the IPC boundary as base64, are signature-checked,
-  and are parsed locally with a 20-second extraction timeout. Encrypted,
-  malformed, scanned, or image-only PDFs return an explicit error; OCR is not
-  performed silently.
+  and HTML. PDF bytes cross the IPC boundary as base64 and are signature
+  checked. The bundled, local-only MarkItDown 0.1.6 sidecar is the primary PDF
+  extractor (25-second timeout); the in-process `pdf-extract` Rust parser is an
+  independent fallback (20-second timeout).
+- Every extraction attempt passes a deterministic quality gate that detects
+  insufficient text, unreadable character ratios, unsupported control glyphs,
+  and letter-by-letter corruption such as `E x a m p l e`. A rejected primary
+  result triggers the fallback. If neither result passes, the import succeeds
+  only as an immutable original plus a diagnostic snapshot: no corrupted text
+  is indexed and no memory facts are proposed. Encrypted, malformed, scanned,
+  or image-only documents therefore remain reviewable without poisoning the
+  brain. OCR is not performed silently.
+- The converter process accepts one PDF as base64 over standard input. It has
+  no path/URL input, receives a cleared environment, is limited to 2 MiB input
+  and 8 MiB output, and is killed on error or timeout.
 - Remote imports accept HTTP(S) text only, use a 20-second total timeout, do
   not follow redirects, and reject loopback, private, link-local, reserved,
   credential-bearing, or binary targets. Import the final redirect URL
@@ -81,6 +95,17 @@ Limits and safety rules:
   snapshot is retrieved with `memory_document_source_read`. Status is
   `pending`, `partial`, `completed`, or `no_candidates` according to proposal
   decisions.
+
+### Building the MarkItDown sidecar
+
+`pnpm prepare:markitdown` builds a platform-specific one-file executable under
+`src-tauri/binaries/`; generated binaries are ignored by Git. Tauri runs this
+step automatically before development and production desktop builds and
+bundles the executable as an external binary. The build machine needs Python
+3.10–3.14 and Rust; the installed desktop application does not need Python.
+Dependencies are pinned in `tools/markitdown-sidecar/requirements.txt`. Override
+the interpreter with `AGENTIC_OS_PYTHON` and the cross-compilation target with
+`AGENTIC_OS_TARGET_TRIPLE` when necessary.
 
 ## Persistence guarantee
 

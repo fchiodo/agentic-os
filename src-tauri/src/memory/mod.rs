@@ -5,6 +5,7 @@ pub mod index;
 pub mod maintenance;
 pub mod persist;
 pub mod pipeline;
+pub mod pdf_extraction;
 pub mod proposals;
 pub mod retrieval;
 pub mod vault;
@@ -480,6 +481,14 @@ pub struct DocumentImportRecord {
     pub candidate_count: i64,
     pub warning_count: i64,
     pub warnings: Vec<String>,
+    /// Best evaluated PDF converter (`markitdown` or the local fallback).
+    /// It is accepted only when `extraction_quality_status` is `passed`.
+    pub extraction_engine: Option<String>,
+    pub extraction_version: Option<String>,
+    pub extraction_quality_score: Option<i64>,
+    /// `passed`, `failed`, or `not_applicable` for non-PDF sources.
+    pub extraction_quality_status: String,
+    pub extraction_quality_issues: Vec<String>,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
@@ -1327,6 +1336,9 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
 
         assert_eq!(result.import.byte_count, pdf.len() as i64);
         assert!(!result.proposals.is_empty());
+        assert_eq!(result.import.extraction_engine.as_deref(), Some("pdf-extract"));
+        assert_eq!(result.import.extraction_quality_status, "passed");
+        assert!(result.import.extraction_quality_score.unwrap_or_default() >= 70);
         let original_path = result
             .import
             .original_path
@@ -1342,6 +1354,52 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
             .warnings
             .iter()
             .any(|warning| warning.contains("original PDF was preserved byte-for-byte")));
+        drop(roots);
+    }
+
+    #[test]
+    fn corrupted_pdf_text_is_preserved_but_blocked_from_memory_proposals() {
+        let roots = EnvRoots::new("pdf-quality-gate");
+        let db = temp_db("pdf-quality-gate");
+        let pdf = minimal_text_pdf(
+            "E x a m p l e 1 d a y w i n d o w J a n u a r y 1 2 0 2 6 U T C t h r o u g h J a n u a r y 2 2 0 2 6 U T C",
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&pdf);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(importer::import_document(
+                &db,
+                &DocumentImportRequest {
+                    domain: "work".to_string(),
+                    input_kind: "file".to_string(),
+                    title: "Corrupted spacing".to_string(),
+                    content: Some(encoded),
+                    content_encoding: Some("base64".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    source_url: None,
+                    file_name: Some("corrupted-spacing.pdf".to_string()),
+                },
+            ))
+            .unwrap();
+
+        assert!(result.proposals.is_empty());
+        assert_eq!(result.import.status, "no_candidates");
+        assert_eq!(result.import.extraction_quality_status, "failed");
+        assert!(result
+            .import
+            .extraction_quality_issues
+            .iter()
+            .any(|issue| issue.contains("isolated glyphs")));
+        let source = importer::read_source(&db, &result.import.id).unwrap();
+        assert!(source.content.contains("PDF extraction blocked"));
+        assert!(!source.content.contains("E x a m p l e"));
+        assert_eq!(
+            vault::read_bytes(result.import.original_path.as_deref().unwrap()).unwrap(),
+            pdf
+        );
         drop(roots);
     }
 

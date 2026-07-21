@@ -45,6 +45,16 @@ function byteLength(value: string): number {
   return new TextEncoder().encode(value).length
 }
 
+function extractionLabel(engine: string | null, version: string | null): string {
+  if (!engine) return 'No extractor accepted'
+  return version ? `${engine} ${version}` : engine
+}
+
+function sourcePreviewLabel(originalPath: string | null, qualityStatus: string): string {
+  if (!originalPath) return 'Original source'
+  return qualityStatus === 'failed' ? 'PDF extraction diagnostic' : 'Extracted PDF text'
+}
+
 export function DocumentImportPanel({
   defaultDomain,
   onClose,
@@ -218,13 +228,33 @@ export function DocumentImportPanel({
                 <div><strong>Source preserved and versioned</strong><span>{importMutation.data.proposals.length} proposal(s) waiting for review · {importMutation.data.import.byteCount.toLocaleString()} bytes</span></div>
               </div>
               <code>{importMutation.data.import.sourcePath}</code>
+              {importMutation.data.import.extractionQualityStatus !== 'not_applicable' && (
+                <div>
+                  <div className="document-extraction-quality">
+                    <span>{extractionLabel(importMutation.data.import.extractionEngine, importMutation.data.import.extractionVersion)}</span>
+                    <StatusBadge
+                      label={importMutation.data.import.extractionQualityScore === null
+                        ? importMutation.data.import.extractionQualityStatus
+                        : `${importMutation.data.import.extractionQualityStatus} · ${importMutation.data.import.extractionQualityScore}/100`}
+                      tone={importMutation.data.import.extractionQualityStatus === 'passed' ? 'success' : 'danger'}
+                    />
+                  </div>
+                  {importMutation.data.import.extractionQualityIssues.length > 0 && (
+                    <ul className="document-quality-issues">
+                      {importMutation.data.import.extractionQualityIssues.map((issue) => <li key={issue}>{issue}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
               {importMutation.data.warnings.map((warning) => <div className="document-warning" key={warning}><AlertTriangle aria-hidden="true" size={14} />{warning}</div>)}
               {importMutation.data.proposals.length > 0 && (
                 <div className="document-candidate-list">
                   {importMutation.data.proposals.map((proposal) => <span key={proposal.id}>{proposalTitle(proposal)}</span>)}
                 </div>
               )}
-              <p>Review and approve the proposed facts in the Governance panel on the right.</p>
+              <p>{importMutation.data.proposals.length > 0
+                ? 'Review and approve the proposed facts in the Governance panel on the right.'
+                : 'No facts were proposed. The original source remains preserved in history.'}</p>
             </div>
           )}
 
@@ -245,14 +275,30 @@ export function DocumentImportPanel({
               <button className={selectedImportId === item.id ? 'is-active' : ''} key={item.id} onClick={() => setSelectedImportId(item.id)} type="button">
                 <span className="document-history-title">{item.title}</span>
                 <span><StatusBadge label={item.inputKind} tone="neutral" /><StatusBadge label={item.status.replace('_', ' ')} tone={item.status === 'completed' ? 'success' : item.status === 'pending' ? 'warning' : 'neutral'} /></span>
-                <small>{item.candidateCount} facts · {formatRelativeTime(new Date(item.createdAt).getTime())}</small>
+                <small>{item.candidateCount} facts{item.extractionEngine ? ` · ${item.extractionEngine}` : ''}{item.extractionQualityScore === null ? '' : ` · quality ${item.extractionQualityScore}/100`} · {formatRelativeTime(new Date(item.createdAt).getTime())}</small>
               </button>
             ))}
             {historyQuery.data?.length === 0 && <div className="empty-state"><h3>No sources yet</h3><p>Your complete imported documents will be listed here.</p></div>}
           </div>
           {selectedImportId && (
             <div className="document-source-preview">
-              <div><strong>{sourceQuery.data?.import.originalPath ? 'Extracted PDF text' : 'Original source'}</strong>{sourceQuery.data?.gitLastCommit && <code>{sourceQuery.data.gitLastCommit}</code>}</div>
+              <div><strong>{sourceQuery.data ? sourcePreviewLabel(sourceQuery.data.import.originalPath, sourceQuery.data.import.extractionQualityStatus) : 'Source preview'}</strong>{sourceQuery.data?.gitLastCommit && <code>{sourceQuery.data.gitLastCommit}</code>}</div>
+              {sourceQuery.data?.import.extractionQualityStatus !== undefined && sourceQuery.data.import.extractionQualityStatus !== 'not_applicable' && (
+                <div>
+                  <div className="document-extraction-quality">
+                    <span>{extractionLabel(sourceQuery.data.import.extractionEngine, sourceQuery.data.import.extractionVersion)}</span>
+                    <StatusBadge
+                      label={`${sourceQuery.data.import.extractionQualityStatus}${sourceQuery.data.import.extractionQualityScore === null ? '' : ` · ${sourceQuery.data.import.extractionQualityScore}/100`}`}
+                      tone={sourceQuery.data.import.extractionQualityStatus === 'passed' ? 'success' : 'danger'}
+                    />
+                  </div>
+                  {sourceQuery.data.import.extractionQualityIssues.length > 0 && (
+                    <ul className="document-quality-issues">
+                      {sourceQuery.data.import.extractionQualityIssues.map((issue) => <li key={issue}>{issue}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
               {sourceQuery.isLoading && <p className="row-subtle">Reading snapshot…</p>}
               {sourceQuery.error && <div className="inline-error" role="alert">{errorMessage(sourceQuery.error)}</div>}
               {sourceQuery.data && <pre>{sourceQuery.data.content}</pre>}

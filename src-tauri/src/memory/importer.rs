@@ -7,6 +7,7 @@ use reqwest::{redirect::Policy, Url};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tauri::AppHandle;
 use uuid::Uuid;
 
 use crate::db::Db;
@@ -28,6 +29,12 @@ struct AcquiredDocument {
     source_ref: String,
     original_extension: Option<&'static str>,
     mime_type: Option<String>,
+    security_scan_text: String,
+    extraction_engine: Option<String>,
+    extraction_version: Option<String>,
+    extraction_quality_score: Option<i64>,
+    extraction_quality_status: String,
+    extraction_quality_issues: Vec<String>,
     warnings: Vec<String>,
 }
 
@@ -43,6 +50,15 @@ struct SourceFrontmatter<'a> {
     original_path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extraction_engine: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extraction_version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extraction_quality_score: Option<i64>,
+    extraction_quality_status: &'a str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    extraction_quality_issues: &'a [String],
     captured_at: &'a str,
     content_hash: &'a str,
     trust: &'static str,
@@ -56,14 +72,31 @@ struct RankedClaim {
     explicit_decision: bool,
 }
 
+#[cfg(test)]
 pub async fn import_document(
     db: &Db,
     request: &DocumentImportRequest,
 ) -> AppResult<DocumentImportResult> {
+    import_document_inner(db, request, None).await
+}
+
+pub async fn import_document_with_app(
+    db: &Db,
+    request: &DocumentImportRequest,
+    app: &AppHandle,
+) -> AppResult<DocumentImportResult> {
+    import_document_inner(db, request, Some(app)).await
+}
+
+async fn import_document_inner(
+    db: &Db,
+    request: &DocumentImportRequest,
+    app: Option<&AppHandle>,
+) -> AppResult<DocumentImportResult> {
     super::index::ensure_tables(db)?;
     validate_request(request)?;
 
-    let mut acquired = acquire(request).await?;
+    let mut acquired = acquire(request, app).await?;
     if acquired.source_bytes.len() > MAX_DOCUMENT_BYTES {
         return Err(io_error("document exceeds the 2 MiB import limit"));
     }
@@ -73,13 +106,13 @@ pub async fn import_document(
     if acquired.original_extension.is_none() && acquired.snapshot_body.contains('\0') {
         return Err(io_error("document contains unsupported NUL bytes"));
     }
-    if super::pipeline::contains_secrets(&acquired.snapshot_body) {
+    if super::pipeline::contains_secrets(&acquired.security_scan_text) {
         audit_import_reject(db, &request.title, "secrets detected");
         return Err(io_error(
             "document import rejected: a credential or secret was detected; redact it before importing",
         ));
     }
-    if super::pipeline::contains_prompt_injection(&acquired.snapshot_body) {
+    if super::pipeline::contains_prompt_injection(&acquired.security_scan_text) {
         acquired.warnings.push(
             "Possible prompt-injection language detected. The original source was preserved as untrusted and extracted facts still require approval."
                 .to_string(),
@@ -106,6 +139,11 @@ pub async fn import_document(
         &acquired.source_ref,
         original_path.as_deref(),
         acquired.mime_type.as_deref(),
+        acquired.extraction_engine.as_deref(),
+        acquired.extraction_version.as_deref(),
+        acquired.extraction_quality_score,
+        &acquired.extraction_quality_status,
+        &acquired.extraction_quality_issues,
         &created_at,
         &content_hash,
         &acquired.snapshot_body,
@@ -123,6 +161,11 @@ pub async fn import_document(
         &created_at,
         &snapshot,
         &acquired.source_bytes,
+        acquired.extraction_engine.as_deref(),
+        acquired.extraction_version.as_deref(),
+        acquired.extraction_quality_score,
+        &acquired.extraction_quality_status,
+        &acquired.extraction_quality_issues,
     )?;
 
     let candidates = extract_candidates(
@@ -196,7 +239,9 @@ pub fn list(db: &Db, domain: Option<&str>) -> AppResult<Vec<DocumentImportRecord
             let mut stmt = conn.prepare(
                 "SELECT id, domain, title, input_kind, source_ref, source_path,
                         original_path, content_hash, byte_count, candidate_count, warning_count,
-                        warnings_json, status, created_at, updated_at
+                        warnings_json, extraction_engine, extraction_version,
+                        extraction_quality_score, extraction_quality_status,
+                        extraction_quality_json, status, created_at, updated_at
                  FROM document_imports WHERE domain = ?1
                  ORDER BY created_at DESC LIMIT ?2",
             )?;
@@ -208,7 +253,9 @@ pub fn list(db: &Db, domain: Option<&str>) -> AppResult<Vec<DocumentImportRecord
             let mut stmt = conn.prepare(
                 "SELECT id, domain, title, input_kind, source_ref, source_path,
                         original_path, content_hash, byte_count, candidate_count, warning_count,
-                        warnings_json, status, created_at, updated_at
+                        warnings_json, extraction_engine, extraction_version,
+                        extraction_quality_score, extraction_quality_status,
+                        extraction_quality_json, status, created_at, updated_at
                  FROM document_imports ORDER BY created_at DESC LIMIT ?1",
             )?;
             let rows = stmt.query_map(params![MAX_HISTORY_ROWS], row_to_import)?;
@@ -262,7 +309,10 @@ pub(crate) fn refresh_status(db: &Db, import_id: &str) -> AppResult<()> {
     })
 }
 
-async fn acquire(request: &DocumentImportRequest) -> AppResult<AcquiredDocument> {
+async fn acquire(
+    request: &DocumentImportRequest,
+    app: Option<&AppHandle>,
+) -> AppResult<AcquiredDocument> {
     match request.input_kind.as_str() {
         "text" => {
             let raw = request
@@ -272,10 +322,16 @@ async fn acquire(request: &DocumentImportRequest) -> AppResult<AcquiredDocument>
             Ok(AcquiredDocument {
                 source_bytes: raw.as_bytes().to_vec(),
                 extraction_text: raw.clone(),
+                security_scan_text: raw.clone(),
                 snapshot_body: raw,
                 source_ref: "manual:pasted-text".to_string(),
                 original_extension: None,
                 mime_type: Some("text/plain; charset=utf-8".to_string()),
+                extraction_engine: None,
+                extraction_version: None,
+                extraction_quality_score: None,
+                extraction_quality_status: "not_applicable".to_string(),
+                extraction_quality_issues: Vec::new(),
                 warnings: Vec::new(),
             })
         }
@@ -295,7 +351,7 @@ async fn acquire(request: &DocumentImportRequest) -> AppResult<AcquiredDocument>
             let is_pdf = file_name.to_ascii_lowercase().ends_with(".pdf")
                 || mime_type.as_deref() == Some("application/pdf");
             if is_pdf {
-                return acquire_pdf(request, &file_name, mime_type).await;
+                return acquire_pdf(request, &file_name, mime_type, app).await;
             }
 
             if request
@@ -319,11 +375,17 @@ async fn acquire(request: &DocumentImportRequest) -> AppResult<AcquiredDocument>
             };
             Ok(AcquiredDocument {
                 source_bytes: raw.as_bytes().to_vec(),
+                security_scan_text: extraction_text.clone(),
                 extraction_text,
                 snapshot_body: raw,
                 source_ref: format!("file:{file_name}"),
                 original_extension: None,
                 mime_type,
+                extraction_engine: None,
+                extraction_version: None,
+                extraction_quality_score: None,
+                extraction_quality_status: "not_applicable".to_string(),
+                extraction_quality_issues: Vec::new(),
                 warnings: if is_html {
                     vec!["HTML markup was normalized only for extraction; the source snapshot preserves the original document.".to_string()]
                 } else {
@@ -348,6 +410,7 @@ async fn acquire_pdf(
     request: &DocumentImportRequest,
     file_name: &str,
     mime_type: Option<String>,
+    app: Option<&AppHandle>,
 ) -> AppResult<AcquiredDocument> {
     if request.content_encoding.as_deref() != Some("base64") {
         return Err(io_error(
@@ -374,40 +437,22 @@ async fn acquire_pdf(
         ));
     }
 
-    let extraction_bytes = bytes.clone();
-    let extraction = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(&extraction_bytes))
-        }),
-    )
-    .await
-    .map_err(|_| io_error("PDF text extraction exceeded the 20 second safety limit"))?
-    .map_err(|_| io_error("PDF text extraction worker failed"))?
-    .map_err(|_| io_error("PDF parser stopped while reading an invalid document"))?
-    .map_err(|error| {
-        io_error(format!(
-            "could not extract text from this PDF (it may be encrypted or malformed): {error}"
-        ))
-    })?;
-    let extraction_text = normalize_pdf_text(&extraction);
-    if extraction_text.trim().is_empty() {
-        return Err(io_error(
-            "the PDF contains no machine-readable text; scanned or image-only PDFs require OCR",
-        ));
-    }
+    let extraction = super::pdf_extraction::extract_pdf(app, &bytes).await;
 
     Ok(AcquiredDocument {
         source_bytes: bytes,
-        snapshot_body: extraction_text.clone(),
-        extraction_text,
+        snapshot_body: extraction.snapshot_body,
+        extraction_text: extraction.extraction_text,
+        security_scan_text: extraction.security_scan_text,
         source_ref: format!("file:{file_name}"),
         original_extension: Some("pdf"),
         mime_type: Some(mime_type.unwrap_or_else(|| "application/pdf".to_string())),
-        warnings: vec![
-            "Text was extracted locally from the PDF for search and fact proposals; the original PDF was preserved byte-for-byte beside the source snapshot."
-                .to_string(),
-        ],
+        extraction_engine: extraction.engine,
+        extraction_version: extraction.version,
+        extraction_quality_score: Some(extraction.quality.score),
+        extraction_quality_status: extraction.quality.status.to_string(),
+        extraction_quality_issues: extraction.quality.issues,
+        warnings: extraction.warnings,
     })
 }
 
@@ -525,13 +570,15 @@ async fn fetch_url(value: &str) -> AppResult<AcquiredDocument> {
     if is_html {
         warnings.push("HTML markup was normalized only for extraction; the source snapshot preserves the original response.".to_string());
     }
+    let extraction_text = if is_html {
+        html_to_text(&raw)
+    } else {
+        raw.clone()
+    };
     Ok(AcquiredDocument {
         source_bytes: raw.as_bytes().to_vec(),
-        extraction_text: if is_html {
-            html_to_text(&raw)
-        } else {
-            raw.clone()
-        },
+        security_scan_text: extraction_text.clone(),
+        extraction_text,
         snapshot_body: raw,
         source_ref: url.to_string(),
         original_extension: None,
@@ -540,6 +587,11 @@ async fn fetch_url(value: &str) -> AppResult<AcquiredDocument> {
         } else {
             Some(content_type)
         },
+        extraction_engine: None,
+        extraction_version: None,
+        extraction_quality_score: None,
+        extraction_quality_status: "not_applicable".to_string(),
+        extraction_quality_issues: Vec::new(),
         warnings,
     })
 }
@@ -616,6 +668,11 @@ fn persist_source(
     created_at: &str,
     snapshot: &str,
     source_bytes: &[u8],
+    extraction_engine: Option<&str>,
+    extraction_version: Option<&str>,
+    extraction_quality_score: Option<i64>,
+    extraction_quality_status: &str,
+    extraction_quality_issues: &[String],
 ) -> AppResult<()> {
     let _guard = super::vault::lock_writes();
     super::vault::ensure_vault()?;
@@ -646,12 +703,15 @@ fn persist_source(
 
     let db_result = (|| -> AppResult<()> {
         db.with_conn(|conn| {
+            let quality_json = serde_json::to_string(extraction_quality_issues)?;
             conn.execute(
                 "INSERT INTO document_imports (
                     id, domain, title, input_kind, source_ref, source_path,
                     original_path, content_hash, byte_count, candidate_count, warning_count,
-                    warnings_json, status, created_at, updated_at
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,0,'[]','pending',?10,?10)",
+                    warnings_json, extraction_engine, extraction_version,
+                    extraction_quality_score, extraction_quality_status,
+                    extraction_quality_json, status, created_at, updated_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,0,'[]',?10,?11,?12,?13,?14,'pending',?15,?15)",
                 params![
                     id,
                     request.domain,
@@ -662,6 +722,11 @@ fn persist_source(
                     original_path,
                     content_hash,
                     byte_count,
+                    extraction_engine,
+                    extraction_version,
+                    extraction_quality_score,
+                    extraction_quality_status,
+                    quality_json,
                     created_at,
                 ],
             )?;
@@ -682,6 +747,11 @@ fn persist_source(
                 "originalPath": original_path,
                 "contentHash": content_hash,
                 "byteCount": byte_count,
+                "extractionEngine": extraction_engine,
+                "extractionVersion": extraction_version,
+                "extractionQualityScore": extraction_quality_score,
+                "extractionQualityStatus": extraction_quality_status,
+                "extractionQualityIssues": extraction_quality_issues,
             }),
             None,
             None,
@@ -739,7 +809,9 @@ fn get(db: &Db, id: &str) -> AppResult<Option<DocumentImportRecord>> {
         conn.query_row(
             "SELECT id, domain, title, input_kind, source_ref, source_path,
                     original_path, content_hash, byte_count, candidate_count, warning_count,
-                    warnings_json, status, created_at, updated_at
+                    warnings_json, extraction_engine, extraction_version,
+                    extraction_quality_score, extraction_quality_status,
+                    extraction_quality_json, status, created_at, updated_at
              FROM document_imports WHERE id = ?1",
             params![id],
             row_to_import,
@@ -751,6 +823,7 @@ fn get(db: &Db, id: &str) -> AppResult<Option<DocumentImportRecord>> {
 
 fn row_to_import(row: &rusqlite::Row) -> rusqlite::Result<DocumentImportRecord> {
     let warnings_json: String = row.get(11)?;
+    let quality_json: String = row.get(16)?;
     Ok(DocumentImportRecord {
         id: row.get(0)?,
         domain: row.get(1)?,
@@ -764,9 +837,14 @@ fn row_to_import(row: &rusqlite::Row) -> rusqlite::Result<DocumentImportRecord> 
         candidate_count: row.get(9)?,
         warning_count: row.get(10)?,
         warnings: serde_json::from_str(&warnings_json).unwrap_or_default(),
-        status: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        extraction_engine: row.get(12)?,
+        extraction_version: row.get(13)?,
+        extraction_quality_score: row.get(14)?,
+        extraction_quality_status: row.get(15)?,
+        extraction_quality_issues: serde_json::from_str(&quality_json).unwrap_or_default(),
+        status: row.get(17)?,
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
     })
 }
 
@@ -776,6 +854,11 @@ fn serialize_snapshot(
     source_ref: &str,
     original_path: Option<&str>,
     mime_type: Option<&str>,
+    extraction_engine: Option<&str>,
+    extraction_version: Option<&str>,
+    extraction_quality_score: Option<i64>,
+    extraction_quality_status: &str,
+    extraction_quality_issues: &[String],
     captured_at: &str,
     content_hash: &str,
     body: &str,
@@ -789,6 +872,11 @@ fn serialize_snapshot(
         source_ref,
         original_path,
         mime_type,
+        extraction_engine,
+        extraction_version,
+        extraction_quality_score,
+        extraction_quality_status,
+        extraction_quality_issues,
         captured_at,
         content_hash,
         trust: "untrusted",
@@ -1068,18 +1156,6 @@ fn html_to_text(value: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
-}
-
-fn normalize_pdf_text(value: &str) -> String {
-    value
-        .replace('\0', "")
-        .replace('\u{000c}', "\n\n")
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
 }
 
 fn hash_bytes(value: &[u8]) -> String {

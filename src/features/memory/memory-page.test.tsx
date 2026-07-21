@@ -121,6 +121,8 @@ describe('MemoryPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Source preserved and versioned')).toBeInTheDocument()
+      expect(screen.getByText('markitdown 0.1.6')).toBeInTheDocument()
+      expect(screen.getByText('passed · 96/100')).toBeInTheDocument()
     })
   })
 })
