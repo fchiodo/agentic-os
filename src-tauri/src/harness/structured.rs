@@ -40,6 +40,17 @@ pub async fn run_read_only_json(prompt: &str) -> AppResult<StructuredModelOutput
             .arg("--skip-git-repo-check")
             .arg("-s")
             .arg("read-only")
+            // This call is a bounded, evidence-constrained JSON extraction,
+            // not open-ended reasoning — it must NOT inherit the user's
+            // interactive default (often "xhigh" for deep coding work).
+            // Left unpinned, a turn through the corporate proxy on a broad
+            // question routinely blew past MODEL_TIMEOUT_SECS and was
+            // killed outright (observed: "explain me the sierra admin
+            // API" against imported document evidence). "medium" keeps
+            // synthesis quality for genuine explanations while staying
+            // well inside the timeout.
+            .arg("-c")
+            .arg(r#"model_reasoning_effort="medium""#)
             .arg("-C")
             .arg(&work_dir)
             .current_dir(&work_dir)
