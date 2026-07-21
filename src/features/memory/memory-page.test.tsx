@@ -63,4 +63,26 @@ describe('MemoryPage', () => {
       ).toBeInTheDocument()
     })
   })
+
+  it('imports an untruncated document and creates review proposals', async () => {
+    renderPage()
+    const importButtons = screen.getAllByRole('button', { name: 'Import document' })
+    fireEvent.click(importButtons.at(-1)!)
+
+    fireEvent.change(screen.getByLabelText('Document title'), {
+      target: { value: 'Sierra Headless API' },
+    })
+    fireEvent.change(screen.getByLabelText('Full document'), {
+      target: {
+        value: '# Authentication\nSierra supports OAuth client credentials with short-lived JWT tokens.',
+      },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Import and create proposals' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Source preserved and versioned')).toBeInTheDocument()
+      expect(screen.getByText(/1 proposal\(s\) waiting for review/)).toBeInTheDocument()
+      expect(screen.getByText(/Review and approve the proposed facts/)).toBeInTheDocument()
+    })
+  })
 })

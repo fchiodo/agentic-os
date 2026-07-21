@@ -232,6 +232,10 @@ Two-column: left = vault tree (grouped by domain, collapsible; `search-field` on
 - File view: rendered markdown (`react-markdown` + `remark-gfm` — the only new runtime deps approved for this spec) inside `.surface`, `.body-copy` typography; footer meta (path, last modified, domain, sensitivity). "Open in Obsidian" action (`obsidian://open?path=` URI).
 - **Pending proposals rail** (top of page, always visible when count > 0): horizontal list of `ProposalCard`s — `DiffView` + provenance line ("from task {title}, {relative time}") + "Discard" / "Approve write". Skill proposals (`kind: 'skill'`) get a `Wand2` icon and the label "New skill".
 - Graph view: explicitly out of scope until Phase 5; do not scaffold it.
+- **Import document:** paste text, choose a UTF-8 text file, or fetch a public
+  HTTP(S) URL. Show the 2 MiB limit, preserved source path, extraction warnings,
+  candidate count, source history/preview, and route every extracted fact to
+  the existing pending-proposals rail for approval.
 
 ### 4.4 Today (`/today`) — Phase 3
 

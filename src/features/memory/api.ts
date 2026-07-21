@@ -1,5 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import {
+  documentImportRecordSchema,
+  documentImportResultSchema,
+  documentSourceReadResultSchema,
   maintenanceResultSchema,
   memoryAnswerSchema,
   memoryIngestResultSchema,
@@ -8,6 +11,10 @@ import {
   reindexResultSchema,
   scoredMemorySchema,
   vaultNodeSchema,
+  type DocumentImportRecord,
+  type DocumentImportRequest,
+  type DocumentImportResult,
+  type DocumentSourceReadResult,
   type ManualSaveRequest,
   type MaintenanceResult,
   type MemoryAnswer,
@@ -248,6 +255,7 @@ export async function memorySaveManual(
       createdAt: new Date().toISOString(),
       decidedAt: null,
       baseContentHash: null,
+      importId: null,
     }
   }
   const payload = await invoke<MemoryWriteProposal>('memory_save_manual', { request })
@@ -264,6 +272,74 @@ export async function memoryProposalsList(
     status: status ?? null,
   })
   return memoryWriteProposalSchema.array().parse(payload)
+}
+
+export async function memoryImportDocument(
+  request: DocumentImportRequest,
+): Promise<DocumentImportResult> {
+  if (!isTauriRuntime()) {
+    const now = new Date().toISOString()
+    const importId = `import-mock-${Date.now()}`
+    const proposal: MemoryWriteProposal = {
+      id: `proposal-${importId}`,
+      taskId: null,
+      vaultPath: `${request.domain}/memories/${Date.now()}.md`,
+      domain: request.domain,
+      kind: 'memory',
+      op: 'create',
+      supersedesId: null,
+      sensitivity: 'normal',
+      unifiedDiff: '+ extracted fact',
+      newContent: '',
+      provenance: `{"source":"document:${importId}"}`,
+      gateReport: '{"checks":[],"passed":true}',
+      requiresApproval: true,
+      status: 'pending',
+      createdAt: now,
+      decidedAt: null,
+      baseContentHash: null,
+      importId,
+    }
+    const record: DocumentImportRecord = {
+      id: importId,
+      domain: request.domain,
+      title: request.title,
+      inputKind: request.inputKind,
+      sourceRef: request.sourceUrl ?? (request.fileName ? `file:${request.fileName}` : 'manual:pasted-text'),
+      sourcePath: `_sources/${request.domain}/${Date.now()}.md`,
+      contentHash: 'mock-hash',
+      byteCount: new TextEncoder().encode(request.content ?? '').length,
+      candidateCount: 1,
+      warningCount: 0,
+      warnings: [],
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+    }
+    return { import: record, proposals: [proposal], rejected: [], warnings: [] }
+  }
+  const payload = await invoke<DocumentImportResult>('memory_import_document', { request })
+  return documentImportResultSchema.parse(payload)
+}
+
+export async function memoryDocumentImportsList(
+  domain?: string,
+): Promise<DocumentImportRecord[]> {
+  if (!isTauriRuntime()) return []
+  const payload = await invoke<DocumentImportRecord[]>('memory_document_imports_list', {
+    domain: domain ?? null,
+  })
+  return documentImportRecordSchema.array().parse(payload)
+}
+
+export async function memoryDocumentSourceRead(
+  id: string,
+): Promise<DocumentSourceReadResult> {
+  if (!isTauriRuntime()) {
+    throw new Error(`Source ${id} is only available in the desktop app.`)
+  }
+  const payload = await invoke<DocumentSourceReadResult>('memory_document_source_read', { id })
+  return documentSourceReadResultSchema.parse(payload)
 }
 
 export async function memoryProposalsDecide(
@@ -313,6 +389,7 @@ export async function skillsDistill(taskId: string): Promise<MemoryWriteProposal
       createdAt: new Date().toISOString(),
       decidedAt: null,
       baseContentHash: null,
+      importId: null,
     }
   }
   const payload = await invoke<MemoryWriteProposal>('skills_distill', { taskId })

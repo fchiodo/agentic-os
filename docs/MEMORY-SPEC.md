@@ -234,6 +234,9 @@ memory_proposals_list()                    -> MemoryWriteProposal[]
 memory_proposals_decide({id, decision})    -> MemoryWriteProposal    # approve|discard
 memory_confirm(id)                         -> MemorySummary          # "still true" → reset staleness clock
 memory_save_manual({domain, type, title, body, tags}) -> MemoryWriteProposal
+memory_import_document({domain, inputKind, title, content?, sourceUrl?, fileName?}) -> DocumentImportResult
+memory_document_imports_list(domain?)        -> DocumentImportRecord[]
+memory_document_source_read(id)              -> { import, content, gitLastCommit }
 memory_reindex()                           -> { indexed, drifted, orphaned }
 memory_maintenance_run()                   -> { expired, markedStale }
 skills_distill(taskId)                     -> MemoryWriteProposal    # kind=skill

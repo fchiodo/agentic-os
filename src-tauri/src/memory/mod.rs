@@ -1,5 +1,6 @@
 pub mod context;
 pub mod frontmatter;
+pub mod importer;
 pub mod index;
 pub mod maintenance;
 pub mod persist;
@@ -312,6 +313,9 @@ pub struct MemoryWriteProposal {
     /// Hash of the source document seen when this proposal was created.
     /// Approval fails if that document has changed in the meantime.
     pub base_content_hash: Option<String>,
+    /// Import batch that generated the proposal, if any. Imported memories
+    /// always remain pending until the user approves them.
+    pub import_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +445,55 @@ pub struct MemoryIngestFailure {
 pub struct MemoryIngestResult {
     pub proposals: Vec<MemoryWriteProposal>,
     pub rejected: Vec<MemoryIngestFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentImportRequest {
+    pub domain: String,
+    /// One of `text`, `file`, or `url`.
+    pub input_kind: String,
+    pub title: String,
+    /// Required for text/file imports. URL imports fetch the remote body.
+    pub content: Option<String>,
+    pub source_url: Option<String>,
+    pub file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentImportRecord {
+    pub id: String,
+    pub domain: String,
+    pub title: String,
+    pub input_kind: String,
+    pub source_ref: String,
+    pub source_path: String,
+    pub content_hash: String,
+    pub byte_count: i64,
+    pub candidate_count: i64,
+    pub warning_count: i64,
+    pub warnings: Vec<String>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentImportResult {
+    pub import: DocumentImportRecord,
+    pub proposals: Vec<MemoryWriteProposal>,
+    pub rejected: Vec<MemoryIngestFailure>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentSourceReadResult {
+    pub import: DocumentImportRecord,
+    pub content: String,
+    pub git_last_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1123,6 +1176,109 @@ mod tests {
             proposals::get_by_id(&db, &pending.id).unwrap().unwrap().status,
             "pending"
         );
+        drop(roots);
+    }
+
+    #[test]
+    fn document_import_preserves_full_source_and_requires_fact_approval() {
+        let roots = EnvRoots::new("document-import");
+        let db = temp_db("document-import");
+        let body = r#"# Sierra Headless API
+
+## Authentication
+
+Headless API endpoints require authentication unless enforcement is disabled. Sierra supports API tokens with the Headless API scope and OAuth client credentials with short-lived JWT tokens.
+
+Authentication can be tested without organization-wide enforcement by sending the X-Sierra-Force-Headless-API-Authorization header on the request.
+
+## Compatibility date
+
+All API requests are required to include Sierra-API-Compatibility-Date. The latest supported compatibility date is 2025-02-01.
+
+## Conversation history
+
+Conversation history requires a signed userIdentityToken. A Headless API bearer token alone cannot retrieve a user's messages.
+"#;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(importer::import_document(
+                &db,
+                &DocumentImportRequest {
+                    domain: "work".to_string(),
+                    input_kind: "text".to_string(),
+                    title: "Sierra Headless API".to_string(),
+                    content: Some(body.to_string()),
+                    source_url: None,
+                    file_name: None,
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(result.import.byte_count, body.len() as i64);
+        assert!(result.import.source_path.starts_with("_sources/work/"));
+        assert!(!result.proposals.is_empty());
+        assert!(result.proposals.len() <= 10);
+        assert!(result.proposals.iter().all(|proposal| {
+            proposal.status == "pending"
+                && proposal.requires_approval
+                && proposal.import_id.as_deref() == Some(result.import.id.as_str())
+        }));
+        let source = importer::read_source(&db, &result.import.id).unwrap();
+        assert_eq!(source.content, body);
+        assert!(source.git_last_commit.is_some());
+
+        let before_approval = retrieval::search(
+            &db,
+            "OAuth JWT authentication",
+            Some("work"),
+            &MemorySearchOpts {
+                include_stale: true,
+                limit: Some(10),
+            },
+        )
+        .unwrap();
+        assert!(before_approval.is_empty());
+
+        proposals::decide(&db, &result.proposals[0].id, "approve").unwrap();
+        let refreshed = importer::list(&db, Some("work")).unwrap();
+        assert_eq!(refreshed.len(), 1);
+        assert!(matches!(
+            refreshed[0].status.as_str(),
+            "partial" | "completed"
+        ));
+        assert!(vault::read_file(&result.proposals[0].vault_path).is_ok());
+        drop(roots);
+    }
+
+    #[test]
+    fn document_import_rejects_real_credentials_without_writing_a_source() {
+        let roots = EnvRoots::new("document-secret");
+        let db = temp_db("document-secret");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(importer::import_document(
+            &db,
+            &DocumentImportRequest {
+                domain: "work".to_string(),
+                input_kind: "text".to_string(),
+                title: "Unsafe source".to_string(),
+                content: Some(
+                    "Use Authorization: Bearer real-production-token-1234567890 for every request."
+                        .to_string(),
+                ),
+                source_url: None,
+                file_name: None,
+            },
+        ));
+
+        assert!(result.is_err());
+        assert!(importer::list(&db, None).unwrap().is_empty());
+        assert!(!roots.vault.join("_sources").exists());
         drop(roots);
     }
 }

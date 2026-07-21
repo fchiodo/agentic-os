@@ -23,18 +23,58 @@ remote.
 
 ## Admission paths
 
-All content follows one of these two Tauri commands:
+All content follows one of these three Tauri commands:
 
 - `memory_save_manual`: one user-authored candidate.
 - `memory_ingest`: 1–10 typed candidates from a read-only extractor or source
   connector. `source` must be namespaced, for example
   `outlook:<message-id>`, `slack:<thread-id>`, `meeting:<vault-path>`, or
   `confluence:<page-id>`.
+- `memory_import_document`: a complete pasted, uploaded, or remotely fetched
+  text document plus up to 10 locally extracted, typed candidates. The source
+  snapshot is saved before extraction; candidates never auto-apply.
 
 Both commands execute the same pure-Rust gate: domain validation, secret
 detection, injection heuristics, provenance, durability, attribution,
 sensitivity, deduplication, and approval policy. Connector code never writes
 Markdown directly.
+
+## Import document
+
+Use **Memory → Import document** when a source is too long for one atomic
+memory, for example API documentation, an email thread export, meeting notes,
+or a Confluence page snapshot.
+
+1. Choose the destination domain and a stable title.
+2. Paste text, select a UTF-8 text file, or provide the final public URL.
+3. The complete body is preserved under
+   `_sources/<domain>/<date>-<slug>-<id>.md`, including capture metadata and a
+   SHA-256 content hash. It is committed to the vault Git history and audited.
+4. A deterministic local extractor ranks self-contained claims and creates at
+   most 10 atomic fact/decision proposals. Every candidate links back to the
+   source snapshot with a wiki link.
+5. Review every proposed fact in Governance. Nothing extracted from a
+   document reaches searchable memory before approval.
+
+Limits and safety rules:
+
+- Maximum decoded source size: 2 MiB; no silent truncation.
+- Text/file imports must be UTF-8. Supported file picker formats include
+  Markdown/MDX, TXT, JSON, YAML, XML, and HTML.
+- Remote imports accept HTTP(S) text only, use a 20-second total timeout, do
+  not follow redirects, and reject loopback, private, link-local, reserved,
+  credential-bearing, or binary targets. Import the final redirect URL
+  explicitly.
+- Secret detection runs before the source is written. Documentation
+  placeholders such as `YOUR_API_TOKEN` are allowed; credential-shaped values
+  are rejected.
+- Source text remains untrusted data. Prompt-injection-like language is
+  recorded as a warning, and every extracted candidate still passes the normal
+  admission gate.
+- The source history is read with `memory_document_imports_list`; an exact
+  snapshot is retrieved with `memory_document_source_read`. Status is
+  `pending`, `partial`, `completed`, or `no_candidates` according to proposal
+  decisions.
 
 ## Persistence guarantee
 
@@ -61,6 +101,8 @@ instead of overwriting newer content.
 - Supersede: approval.
 - Distilled skill: approval.
 - Inferred preference: confidence capped at 0.5 and approval.
+- Every document-import candidate: approval, including normal `work` and
+  `research` facts.
 
 ## Retrieval and answers
 
@@ -106,4 +148,5 @@ The native suite covers FTS escaping, domain isolation, secret rejection,
 identity-preserving update, supersession, approvals, staleness, expiry/archive,
 reindex durability, context safety, run capture, bounded connector ingestion,
 grounded answers/abstention, optimistic approval conflicts, IPC serialization,
-and skill approval.
+document snapshot durability, forced import approval, secret rejection, SSRF
+address filtering, and skill approval.

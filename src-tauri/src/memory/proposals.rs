@@ -26,7 +26,7 @@ pub fn list(db: &Db, status_filter: Option<&str>) -> AppResult<Vec<MemoryWritePr
                 "SELECT id, task_id, vault_path, domain, kind, op, supersedes_id,
                         sensitivity, unified_diff, new_content, provenance,
                         gate_report, requires_approval, status, created_at, decided_at,
-                        base_content_hash
+                        base_content_hash, import_id
                  FROM memory_proposals WHERE status = ?1 ORDER BY created_at DESC"
                     .to_string(),
                 vec![s.to_string()],
@@ -35,7 +35,7 @@ pub fn list(db: &Db, status_filter: Option<&str>) -> AppResult<Vec<MemoryWritePr
                 "SELECT id, task_id, vault_path, domain, kind, op, supersedes_id,
                         sensitivity, unified_diff, new_content, provenance,
                         gate_report, requires_approval, status, created_at, decided_at,
-                        base_content_hash
+                        base_content_hash, import_id
                  FROM memory_proposals ORDER BY created_at DESC"
                     .to_string(),
                 vec![],
@@ -206,7 +206,12 @@ pub fn decide(db: &Db, id: &str, decision: &str) -> AppResult<MemoryWriteProposa
         }
     }
 
-    get_by_id(db, id)?.ok_or_else(|| AppError::Io(std::io::Error::other("proposal not found")))
+    let decided = get_by_id(db, id)?
+        .ok_or_else(|| AppError::Io(std::io::Error::other("proposal not found")))?;
+    if let Some(import_id) = decided.import_id.as_deref() {
+        super::importer::refresh_status(db, import_id)?;
+    }
+    Ok(decided)
 }
 
 /// Get a single proposal by ID.
@@ -216,7 +221,7 @@ pub fn get_by_id(db: &Db, id: &str) -> AppResult<Option<MemoryWriteProposal>> {
             "SELECT id, task_id, vault_path, domain, kind, op, supersedes_id,
                     sensitivity, unified_diff, new_content, provenance,
                     gate_report, requires_approval, status, created_at, decided_at,
-                    base_content_hash
+                    base_content_hash, import_id
              FROM memory_proposals WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_proposal)?;
@@ -246,5 +251,6 @@ fn row_to_proposal(row: &rusqlite::Row) -> rusqlite::Result<MemoryWriteProposal>
         created_at: row.get(14)?,
         decided_at: row.get(15)?,
         base_content_hash: row.get(16)?,
+        import_id: row.get(17)?,
     })
 }

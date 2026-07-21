@@ -87,22 +87,69 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL,
                 decided_at TEXT,
-                base_content_hash TEXT
+                base_content_hash TEXT,
+                import_id TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_proposals_status ON memory_proposals(status);
+
+            CREATE TABLE IF NOT EXISTS document_imports (
+                id TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                title TEXT NOT NULL,
+                input_kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                source_path TEXT NOT NULL UNIQUE,
+                content_hash TEXT NOT NULL,
+                byte_count INTEGER NOT NULL,
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                warning_count INTEGER NOT NULL DEFAULT 0,
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_imports_domain
+                ON document_imports(domain, created_at DESC);
             "#,
         )?;
 
-        let has_base_content_hash = {
+        let proposal_columns = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_proposals)")?;
             let columns = stmt
                 .query_map([], |row| row.get::<_, String>(1))?
                 .collect::<Result<Vec<_>, _>>()?;
-            columns.iter().any(|column| column == "base_content_hash")
+            columns
         };
-        if !has_base_content_hash {
+        if !proposal_columns
+            .iter()
+            .any(|column| column == "base_content_hash")
+        {
             conn.execute(
                 "ALTER TABLE memory_proposals ADD COLUMN base_content_hash TEXT",
+                [],
+            )?;
+        }
+        if !proposal_columns.iter().any(|column| column == "import_id") {
+            conn.execute("ALTER TABLE memory_proposals ADD COLUMN import_id TEXT", [])?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proposals_import ON memory_proposals(import_id)",
+            [],
+        )?;
+
+        let import_columns = {
+            let mut stmt = conn.prepare("PRAGMA table_info(document_imports)")?;
+            let columns = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            columns
+        };
+        if !import_columns
+            .iter()
+            .any(|column| column == "warnings_json")
+        {
+            conn.execute(
+                "ALTER TABLE document_imports ADD COLUMN warnings_json TEXT NOT NULL DEFAULT '[]'",
                 [],
             )?;
         }

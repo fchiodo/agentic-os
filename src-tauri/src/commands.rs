@@ -270,6 +270,7 @@ pub fn audit_verify_chain(db: State<'_, Db>) -> Result<AuditChainStatus, String>
 
 use crate::memory;
 use crate::memory::{
+    DocumentImportRecord, DocumentImportRequest, DocumentImportResult, DocumentSourceReadResult,
     MaintenanceResult, ManualSaveRequest, MemoryAnswer, MemoryAskRequest, MemoryIngestRequest,
     MemoryIngestResult, MemoryReadResult, MemorySearchOpts, MemoryWriteProposal,
     ProposalDecideRequest, ReindexResult, ScoredMemory, VaultNode,
@@ -365,6 +366,33 @@ pub fn memory_ingest(
     request: MemoryIngestRequest,
 ) -> Result<MemoryIngestResult, String> {
     memory::pipeline::process_ingest_batch(&db, &request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn memory_import_document(
+    db: State<'_, Db>,
+    request: DocumentImportRequest,
+) -> Result<DocumentImportResult, String> {
+    let db = db.inner().clone();
+    memory::importer::import_document(&db, &request)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_document_imports_list(
+    db: State<'_, Db>,
+    domain: Option<String>,
+) -> Result<Vec<DocumentImportRecord>, String> {
+    memory::importer::list(&db, domain.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_document_source_read(
+    db: State<'_, Db>,
+    id: String,
+) -> Result<DocumentSourceReadResult, String> {
+    memory::importer::read_source(&db, &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

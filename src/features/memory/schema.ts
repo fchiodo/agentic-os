@@ -124,6 +124,7 @@ export const memoryWriteProposalSchema = z.object({
   createdAt: z.string(),
   decidedAt: z.string().nullable(),
   baseContentHash: z.string().nullable(),
+  importId: z.string().nullable(),
 })
 
 export const reindexResultSchema = z.object({
@@ -198,6 +199,47 @@ export const memoryIngestResultSchema = z.object({
   rejected: z.array(memoryIngestFailureSchema),
 })
 
+export const documentInputKindSchema = z.enum(['text', 'file', 'url'])
+
+export const documentImportRequestSchema = z.object({
+  domain: z.string(),
+  inputKind: documentInputKindSchema,
+  title: z.string().min(1).max(200),
+  content: z.string().optional(),
+  sourceUrl: z.string().optional(),
+  fileName: z.string().optional(),
+})
+
+export const documentImportRecordSchema = z.object({
+  id: z.string(),
+  domain: z.string(),
+  title: z.string(),
+  inputKind: documentInputKindSchema,
+  sourceRef: z.string(),
+  sourcePath: z.string(),
+  contentHash: z.string(),
+  byteCount: z.number(),
+  candidateCount: z.number(),
+  warningCount: z.number(),
+  warnings: z.array(z.string()),
+  status: z.enum(['pending', 'partial', 'completed', 'no_candidates']),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+})
+
+export const documentImportResultSchema = z.object({
+  import: documentImportRecordSchema,
+  proposals: z.array(memoryWriteProposalSchema),
+  rejected: z.array(memoryIngestFailureSchema),
+  warnings: z.array(z.string()),
+})
+
+export const documentSourceReadResultSchema = z.object({
+  import: documentImportRecordSchema,
+  content: z.string(),
+  gitLastCommit: z.string().nullable(),
+})
+
 export const proposalDecideRequestSchema = z.object({
   id: z.string(),
   decision: z.string(),
@@ -230,5 +272,10 @@ export type ExtractedMemoryCandidate = z.infer<typeof extractedMemoryCandidateSc
 export type MemoryIngestRequest = z.infer<typeof memoryIngestRequestSchema>
 export type MemoryIngestFailure = z.infer<typeof memoryIngestFailureSchema>
 export type MemoryIngestResult = z.infer<typeof memoryIngestResultSchema>
+export type DocumentInputKind = z.infer<typeof documentInputKindSchema>
+export type DocumentImportRequest = z.infer<typeof documentImportRequestSchema>
+export type DocumentImportRecord = z.infer<typeof documentImportRecordSchema>
+export type DocumentImportResult = z.infer<typeof documentImportResultSchema>
+export type DocumentSourceReadResult = z.infer<typeof documentSourceReadResultSchema>
 export type ProposalDecideRequest = z.infer<typeof proposalDecideRequestSchema>
 export type MemorySearchOpts = z.infer<typeof memorySearchOptsSchema>

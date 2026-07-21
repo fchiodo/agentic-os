@@ -1,5 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  memoryDocumentImportsList,
+  memoryDocumentSourceRead,
+  memoryImportDocument,
   memoryAsk,
   memoryConfirm,
   memoryMaintenanceRun,
@@ -13,6 +16,7 @@ import {
   skillsDistill,
 } from '@/features/memory/api'
 import type {
+  DocumentImportRequest,
   ManualSaveRequest,
   MemoryAskRequest,
   ProposalDecideRequest,
@@ -21,6 +25,7 @@ import type {
 export const memoryTreeQueryKey = ['memory', 'tree'] as const
 export const memorySearchQueryKey = ['memory', 'search'] as const
 export const memoryProposalsQueryKey = ['memory', 'proposals'] as const
+export const memoryDocumentImportsQueryKey = ['memory', 'document-imports'] as const
 
 export function useMemoryTree(domain?: string) {
   return useQuery({
@@ -66,6 +71,32 @@ export function useMemoryAsk() {
   })
 }
 
+export function useMemoryDocumentImports(domain?: string) {
+  return useQuery({
+    queryKey: [...memoryDocumentImportsQueryKey, domain],
+    queryFn: () => memoryDocumentImportsList(domain),
+  })
+}
+
+export function useMemoryDocumentSourceRead(id: string | null) {
+  return useQuery({
+    queryKey: ['memory', 'document-source', id],
+    queryFn: () => memoryDocumentSourceRead(id!),
+    enabled: id !== null,
+  })
+}
+
+export function useMemoryImportDocument() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (request: DocumentImportRequest) => memoryImportDocument(request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: memoryDocumentImportsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
+    },
+  })
+}
+
 export function useMemorySaveManual() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -74,6 +105,7 @@ export function useMemorySaveManual() {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryDocumentImportsQueryKey })
     },
   })
 }
@@ -86,6 +118,7 @@ export function useMemoryProposalsDecide() {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryDocumentImportsQueryKey })
     },
   })
 }

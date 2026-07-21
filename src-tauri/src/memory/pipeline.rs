@@ -35,6 +35,36 @@ fn injection_patterns() -> Vec<Regex> {
     ]
 }
 
+pub(crate) fn contains_secrets(text: &str) -> bool {
+    // Documentation commonly contains obvious placeholders. Remove only
+    // exact, well-known placeholders before scanning; real values still hit
+    // the deterministic patterns below.
+    let sanitized = [
+        "YOUR_API_TOKEN",
+        "YOUR_SIGNED_JWT",
+        "YOUR_PASSWORD",
+        "__TOKEN__",
+        "<TOKEN>",
+        "<PASSWORD>",
+    ]
+    .iter()
+    .fold(text.to_string(), |value, placeholder| {
+        value.replace(placeholder, "<documentation-placeholder>")
+    });
+    let sanitized = Regex::new(r"(?i)\bbearer\s+(api\s+)?token\b")
+        .expect("static bearer prose regex")
+        .replace_all(&sanitized, "bearer <token-description>");
+    secrets_patterns()
+        .iter()
+        .any(|pattern| pattern.is_match(sanitized.as_ref()))
+}
+
+pub(crate) fn contains_prompt_injection(text: &str) -> bool {
+    injection_patterns()
+        .iter()
+        .any(|pattern| pattern.is_match(text))
+}
+
 // ---------------------------------------------------------------------------
 // Gate report
 // ---------------------------------------------------------------------------
@@ -176,6 +206,28 @@ pub fn process_manual_save(
     request: &ManualSaveRequest,
     source: &str,
 ) -> AppResult<super::MemoryWriteProposal> {
+    process_manual_save_with_context(db, request, source, false, None)
+}
+
+/// Imported document facts are untrusted extraction output. Even in domains
+/// where ordinary writes may auto-apply, import candidates always stop at the
+/// proposal boundary for explicit human review.
+pub(crate) fn process_import_candidate(
+    db: &Db,
+    request: &ManualSaveRequest,
+    source: &str,
+    import_id: &str,
+) -> AppResult<super::MemoryWriteProposal> {
+    process_manual_save_with_context(db, request, source, true, Some(import_id))
+}
+
+fn process_manual_save_with_context(
+    db: &Db,
+    request: &ManualSaveRequest,
+    source: &str,
+    force_approval: bool,
+    import_id: Option<&str>,
+) -> AppResult<super::MemoryWriteProposal> {
     super::index::ensure_tables(db)?;
     let mem_type = MemoryType::parse(&request.mem_type)
         .ok_or_else(|| AppError::Io(std::io::Error::other("invalid memory type")))?;
@@ -214,9 +266,7 @@ pub fn process_manual_save(
     let mut report = GateReport::new();
 
     let candidate_text = format!("{title}\n{body}");
-    let has_secrets = secrets_patterns()
-        .iter()
-        .any(|p| p.is_match(&candidate_text));
+    let has_secrets = contains_secrets(&candidate_text);
     report.check(
         "secrets",
         !has_secrets,
@@ -233,7 +283,7 @@ pub fn process_manual_save(
         )));
     }
 
-    let has_injection = injection_patterns().iter().any(|p| p.is_match(body));
+    let has_injection = contains_prompt_injection(body);
     report.check(
         "injection",
         !has_injection,
@@ -507,10 +557,12 @@ pub fn process_manual_save(
         .unwrap_or_default();
     let unified_diff = make_unified_diff(old_content, &content, &vault_path);
 
-    let requires_approval = !matches!(
-        domain,
-        crate::control_models::Domain::Work | crate::control_models::Domain::Research
-    ) || sensitivity == Sensitivity::Sensitive
+    let requires_approval = force_approval
+        || !matches!(
+            domain,
+            crate::control_models::Domain::Work | crate::control_models::Domain::Research
+        )
+        || sensitivity == Sensitivity::Sensitive
         || op == ProposalOp::Supersede
         || preference_is_inferred;
     let auto_apply = !requires_approval && matches!(op, ProposalOp::Create | ProposalOp::Update);
@@ -525,8 +577,8 @@ pub fn process_manual_save(
                 id, task_id, vault_path, domain, kind, op, supersedes_id,
                 sensitivity, unified_diff, new_content, provenance,
                 gate_report, requires_approval, status, created_at, decided_at,
-                base_content_hash
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending',?14,NULL,?15)",
+                base_content_hash, import_id
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'pending',?14,NULL,?15,?16)",
             params![
                 proposal_id,
                 task_id,
@@ -543,6 +595,7 @@ pub fn process_manual_save(
                 requires_approval as i64,
                 now,
                 base_content_hash,
+                import_id,
             ],
         )?;
         Ok(())

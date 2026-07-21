@@ -13,12 +13,14 @@ import {
   Shield,
   Tag,
   Trash2,
+  Upload,
   Wrench,
   X,
 } from 'lucide-react'
 import { type FormEvent, useCallback, useMemo, useState } from 'react'
 import { DiffView } from '@/components/ui/diff-view'
 import { StatusBadge } from '@/components/ui/status-badge'
+import { DocumentImportPanel } from '@/features/memory/document-import-panel'
 import {
   useMemoryAsk,
   useMemoryConfirm,
@@ -359,6 +361,7 @@ export function MemoryPage() {
   const [includeStale, setIncludeStale] = useState(false)
   const [mode, setMode] = useState<'search' | 'ask'>('search')
   const [showComposer, setShowComposer] = useState(false)
+  const [showImporter, setShowImporter] = useState(false)
   const [railTab, setRailTab] = useState<'pending' | 'activity'>('pending')
 
   const treeQuery = useMemoryTree(domainFilter)
@@ -371,7 +374,7 @@ export function MemoryPage() {
   const pending = useMemo(() => proposalsQuery.data?.filter((proposal) => proposal.status === 'pending') ?? [], [proposalsQuery.data])
   const activity = useMemo(() => proposalsQuery.data?.filter((proposal) => proposal.status !== 'pending') ?? [], [proposalsQuery.data])
   const visibleProposals = railTab === 'pending' ? pending : activity
-  const selectPath = useCallback((path: string) => { setSelectedPath(path); setShowComposer(false) }, [])
+  const selectPath = useCallback((path: string) => { setSelectedPath(path); setShowComposer(false); setShowImporter(false) }, [])
 
   return (
     <section className="page-section memory-page">
@@ -379,7 +382,10 @@ export function MemoryPage() {
         <aside className="memory-sidebar surface">
           <div className="panel-heading">
             <div><p className="eyebrow">Local vault</p><h2>Second Brain</h2></div>
-            <button aria-label="Save a memory" className="icon-button" onClick={() => { setShowComposer(true); setSelectedPath(null) }} type="button"><Plus aria-hidden="true" size={16} /></button>
+            <div className="panel-heading-actions">
+              <button aria-label="Import document" className="icon-button" onClick={() => { setShowImporter(true); setShowComposer(false); setSelectedPath(null) }} title="Import document" type="button"><Upload aria-hidden="true" size={16} /></button>
+              <button aria-label="Save a memory" className="icon-button" onClick={() => { setShowComposer(true); setShowImporter(false); setSelectedPath(null) }} type="button"><Plus aria-hidden="true" size={16} /></button>
+            </div>
           </div>
           <div className="memory-domain-strip">
             <button className={`segment-button ${!domainFilter ? 'is-active' : ''}`} onClick={() => setDomainFilter(undefined)} type="button">All</button>
@@ -401,12 +407,12 @@ export function MemoryPage() {
         </aside>
 
         <main className="memory-main">
-          {showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={() => setSelectedPath(null)} path={selectedPath} /> : (
+          {showImporter ? <DocumentImportPanel defaultDomain={domainFilter} onClose={() => setShowImporter(false)} /> : showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={() => setSelectedPath(null)} path={selectedPath} /> : (
             <>
               <div className="surface memory-mode-bar">
                 <div className="memory-mode-switch"><button className={mode === 'search' ? 'is-active' : ''} onClick={() => setMode('search')} type="button"><Search aria-hidden="true" size={15} />Search</button><button className={mode === 'ask' ? 'is-active' : ''} onClick={() => setMode('ask')} type="button"><MessageCircleQuestion aria-hidden="true" size={15} />Ask</button></div>
                 <label className="memory-toggle-label"><input checked={includeStale} onChange={(event) => setIncludeStale(event.target.checked)} type="checkbox" />Include stale</label>
-                <button className="primary-button" onClick={() => setShowComposer(true)} type="button"><Plus aria-hidden="true" size={15} />Save memory</button>
+                <div className="memory-mode-actions"><button className="secondary-button" onClick={() => { setShowImporter(true); setShowComposer(false) }} type="button"><Upload aria-hidden="true" size={15} />Import document</button><button className="primary-button" onClick={() => { setShowComposer(true); setShowImporter(false) }} type="button"><Plus aria-hidden="true" size={15} />Save memory</button></div>
               </div>
               {mode === 'search' ? (
                 <>
