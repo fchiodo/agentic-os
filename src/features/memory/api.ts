@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import {
   documentImportRecordSchema,
   documentImportResultSchema,
@@ -6,6 +6,8 @@ import {
   maintenanceResultSchema,
   memoryOperationRecordSchema,
   memoryAnswerSchema,
+  memoryLintReportSchema,
+  memoryAskProgressSchema,
   memoryIngestResultSchema,
   memoryReadResultSchema,
   memoryWriteProposalSchema,
@@ -23,10 +25,12 @@ import {
   type MaintenanceResult,
   type MemoryAnswer,
   type MemoryAnswerFeedbackRequest,
+  type MemoryAskProgress,
   type MemoryOperationRecord,
   type MemoryAskRequest,
   type MemoryIngestRequest,
   type MemoryIngestResult,
+  type MemoryLintReport,
   type MemoryReadResult,
   type MemorySearchOpts,
   type MemoryWriteProposal,
@@ -133,6 +137,7 @@ const mockReadResult: MemoryReadResult = {
     confirmations: 1,
     expires: null,
     tags: ['powerreviews', 'voc', 'sftp'],
+    related: ['work/meetings/2026-07-18-databricks-sync.md'],
   },
   markdown:
     'Delta feed daily instead of full: full files >2GB hit the SFTP timeout.\nDecided with the vendor on the 2026-06-12 call. Open point: retention of processed files.',
@@ -172,6 +177,114 @@ const mockSearchResults: ScoredMemory[] = [
   },
 ]
 
+function cloneMockValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function buildMockProposals(): MemoryWriteProposal[] {
+  const now = new Date().toISOString()
+  return [
+    {
+      id: 'proposal-mock-pending-powerreviews',
+      taskId: null,
+      vaultPath: 'work/memories/powerreviews-decision.md',
+      domain: 'work',
+      kind: 'memory',
+      op: 'supersede',
+      supersedesId: 'mem-001',
+      sensitivity: 'sensitive',
+      unifiedDiff: [
+        '--- a/work/memories/powerreviews-decision.md',
+        '+++ b/work/memories/powerreviews-decision.md',
+        '@@',
+        '- real-time sync',
+        '+ nightly sync, flagged for March',
+      ].join('\n'),
+      newContent: [
+        'id: mem-001',
+        'title: Update PowerReviews feed decision',
+        'domain: work',
+        'memType: decision',
+        '',
+        'Nightly sync, flagged for March.',
+      ].join('\n'),
+      provenance: '{"source":"manual","ts":"2026-07-21T10:00:00Z"}',
+      gateReport: JSON.stringify({
+        passed: true,
+        checks: [
+          {
+            name: 'truth change',
+            passed: true,
+            detail: 'This write changes an existing decision and must be reviewed.',
+          },
+          {
+            name: 'domain isolation',
+            passed: true,
+            detail: 'The proposed change stays inside the work domain.',
+          },
+        ],
+      }),
+      requiresApproval: true,
+      status: 'pending',
+      createdAt: now,
+      decidedAt: null,
+      baseContentHash: 'mock-base-hash-001',
+      importId: null,
+    },
+    {
+      id: 'proposal-mock-approved-audit-window',
+      taskId: null,
+      vaultPath: 'work/facts/audit-window.md',
+      domain: 'work',
+      kind: 'memory',
+      op: 'create',
+      supersedesId: null,
+      sensitivity: 'normal',
+      unifiedDiff: [
+        '--- /dev/null',
+        '+++ b/work/facts/audit-window.md',
+        '@@',
+        '+ retain 30 days of nominal audit events',
+      ].join('\n'),
+      newContent: [
+        'id: mem-003',
+        'title: Audit retention window',
+        'domain: work',
+        'memType: fact',
+        '',
+        'Retain 30 days of nominal audit events.',
+      ].join('\n'),
+      provenance: '{"source":"manual","ts":"2026-07-20T15:20:00Z"}',
+      gateReport: JSON.stringify({
+        passed: true,
+        checks: [
+          {
+            name: 'provenance',
+            passed: true,
+            detail: 'The source metadata is present and verifiable.',
+          },
+        ],
+      }),
+      requiresApproval: true,
+      status: 'approved',
+      createdAt: now,
+      decidedAt: now,
+      baseContentHash: null,
+      importId: null,
+    },
+  ]
+}
+
+let mockProposals = buildMockProposals()
+let mockDocumentImports: DocumentImportRecord[] = []
+const mockCancelledAsks = new Set<string>()
+
+export function resetMockMemoryState() {
+  mockProposals = buildMockProposals()
+  mockDocumentImports = []
+  mockCancelledAsks.clear()
+}
+
 // ---------------------------------------------------------------------------
 // API functions
 // ---------------------------------------------------------------------------
@@ -210,14 +323,47 @@ export async function memorySearch(
   return scoredMemorySchema.array().parse(payload)
 }
 
-export async function memoryAsk(request: MemoryAskRequest): Promise<MemoryAnswer> {
+/**
+ * Matches the backend's STOPPED_BY_USER constant in harness/structured.rs.
+ * A rejection carrying this message is a user action, not a failure.
+ */
+export const ASK_STOPPED_MESSAGE = 'Ask stopped by user'
+
+export function isAskStoppedError(error: unknown): boolean {
+  return error instanceof Error
+    ? error.message.includes(ASK_STOPPED_MESSAGE)
+    : String(error).includes(ASK_STOPPED_MESSAGE)
+}
+
+export async function memoryAsk(
+  request: MemoryAskRequest,
+  askId: string,
+  onProgress?: (event: MemoryAskProgress) => void,
+): Promise<MemoryAnswer> {
   if (!isTauriRuntime()) {
+    const mockStages: Array<[MemoryAskProgress['stage'], string]> = [
+      ['retrieval', 'Searching the vault for relevant passages'],
+      ['retrieval', '1 relevant passage found'],
+      ['synthesis', 'Starting the AI synthesis turn'],
+      ['synthesis', 'Model is reasoning over the evidence'],
+      ['verification', 'Verifying every claim against its citations'],
+    ]
+    for (const [stage, label] of mockStages) {
+      if (mockCancelledAsks.delete(askId)) {
+        throw new Error(ASK_STOPPED_MESSAGE)
+      }
+      onProgress?.({ stage, label, at: new Date().toISOString(), transient: false })
+      await new Promise((resolve) => setTimeout(resolve, 80))
+    }
+    if (mockCancelledAsks.delete(askId)) {
+      throw new Error(ASK_STOPPED_MESSAGE)
+    }
     return {
       id: '00000000-0000-4000-8000-000000000001',
       question: request.question,
       domain: request.domain,
       answer:
-        'Delta feed daily instead of full: full files over 2GB hit the SFTP timeout. [1]',
+        'Delta feed daily instead of full: full files over **2GB** hit the SFTP timeout. [1] The decision was made with the vendor on the 2026-06-12 call. [1] Retention of processed files is still an open point and was raised again in the Databricks sync. [2]',
       citations: [
         {
           id: 'mem-001',
@@ -227,6 +373,16 @@ export async function memoryAsk(request: MemoryAskRequest): Promise<MemoryAnswer
           status: 'active',
           excerpt: 'Delta feed daily instead of full: full files over 2GB hit the SFTP timeout.',
           score: 0.87,
+          sourceKind: 'memory',
+        },
+        {
+          id: 'mem-002',
+          number: 2,
+          title: 'Databricks sync notes',
+          vaultPath: 'work/meetings/2026-07-18-databricks-sync.md',
+          status: 'active',
+          excerpt: 'Open point: retention of processed files.',
+          score: 0.74,
           sourceKind: 'memory',
         },
       ],
@@ -239,8 +395,27 @@ export async function memoryAsk(request: MemoryAskRequest): Promise<MemoryAnswer
       generatedAt: new Date().toISOString(),
     }
   }
-  const payload = await invoke<MemoryAnswer>('memory_ask', { request })
+  const channel = new Channel<unknown>()
+  channel.onmessage = (message) => {
+    const parsed = memoryAskProgressSchema.safeParse(message)
+    if (parsed.success) {
+      onProgress?.(parsed.data)
+    }
+  }
+  const payload = await invoke<MemoryAnswer>('memory_ask', {
+    askId,
+    request,
+    onProgress: channel,
+  })
   return memoryAnswerSchema.parse(payload)
+}
+
+export async function memoryAskCancel(askId: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    mockCancelledAsks.add(askId)
+    return
+  }
+  await invoke('memory_ask_cancel', { askId })
 }
 
 export async function memoryAnswerFeedback(
@@ -264,7 +439,7 @@ export async function memorySaveManual(
   request: ManualSaveRequest,
 ): Promise<MemoryWriteProposal> {
   if (!isTauriRuntime()) {
-    return {
+    const proposal: MemoryWriteProposal = {
       id: `proposal-mock-${Date.now()}`,
       taskId: null,
       vaultPath: `memories/${Date.now()}.md`,
@@ -284,6 +459,8 @@ export async function memorySaveManual(
       baseContentHash: null,
       importId: null,
     }
+    mockProposals = [proposal, ...mockProposals]
+    return cloneMockValue(proposal)
   }
   const payload = await invoke<MemoryWriteProposal>('memory_save_manual', { request })
   return memoryWriteProposalSchema.parse(payload)
@@ -293,7 +470,11 @@ export async function memoryProposalsList(
   status?: string,
 ): Promise<MemoryWriteProposal[]> {
   if (!isTauriRuntime()) {
-    return []
+    return cloneMockValue(
+      status
+        ? mockProposals.filter((proposal) => proposal.status === status)
+        : mockProposals,
+    )
   }
   const payload = await invoke<MemoryWriteProposal[]>('memory_proposals_list', {
     status: status ?? null,
@@ -344,7 +525,13 @@ export async function memoryImportDocument(
       candidateCount: 1,
       warningCount: 0,
       warnings: [],
-      extractionEngine: request.mimeType === 'application/pdf' ? 'markitdown' : null,
+      extractionEngine: request.mimeType === 'application/pdf'
+        ? 'markitdown'
+        : request.mimeType === 'message/rfc822'
+          ? 'mail-parser'
+          : request.mimeType === 'application/vnd.ms-outlook'
+            ? 'msg-parser'
+            : null,
       extractionVersion: request.mimeType === 'application/pdf' ? '0.1.6' : null,
       extractionQualityScore: request.mimeType === 'application/pdf' ? 96 : null,
       extractionQualityStatus: request.mimeType === 'application/pdf' ? 'passed' : 'not_applicable',
@@ -353,7 +540,14 @@ export async function memoryImportDocument(
       createdAt: now,
       updatedAt: now,
     }
-    return { import: record, proposals: [proposal], rejected: [], warnings: [] }
+    mockProposals = [proposal, ...mockProposals]
+    mockDocumentImports = [record, ...mockDocumentImports]
+    return {
+      import: cloneMockValue(record),
+      proposals: [cloneMockValue(proposal)],
+      rejected: [],
+      warnings: [],
+    }
   }
   const payload = await invoke<DocumentImportResult>('memory_import_document', { request })
   return documentImportResultSchema.parse(payload)
@@ -362,7 +556,13 @@ export async function memoryImportDocument(
 export async function memoryDocumentImportsList(
   domain?: string,
 ): Promise<DocumentImportRecord[]> {
-  if (!isTauriRuntime()) return []
+  if (!isTauriRuntime()) {
+    return cloneMockValue(
+      domain
+        ? mockDocumentImports.filter((record) => record.domain === domain)
+        : mockDocumentImports,
+    )
+  }
   const payload = await invoke<DocumentImportRecord[]>('memory_document_imports_list', {
     domain: domain ?? null,
   })
@@ -382,12 +582,60 @@ export async function memoryDocumentSourceRead(
 export async function memoryProposalsDecide(
   request: ProposalDecideRequest,
 ): Promise<MemoryWriteProposal> {
+  if (!isTauriRuntime()) {
+    const nextStatus = request.decision === 'approve' ? 'approved' : 'discarded'
+    const updated = mockProposals.find((proposal) => proposal.id === request.id)
+    if (!updated) throw new Error(`Unknown proposal ${request.id}`)
+    updated.status = nextStatus
+    updated.decidedAt = new Date().toISOString()
+    return cloneMockValue(updated)
+  }
   const payload = await invoke<MemoryWriteProposal>('memory_proposals_decide', { request })
   return memoryWriteProposalSchema.parse(payload)
 }
 
 export async function memoryConfirm(id: string): Promise<void> {
+  if (!isTauriRuntime()) return
   await invoke('memory_confirm', { id })
+}
+
+export async function memoryLint(
+  domain?: string,
+  deep?: boolean,
+): Promise<MemoryLintReport> {
+  if (!isTauriRuntime()) {
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    return {
+      generatedAt: new Date().toISOString(),
+      scanned: 2,
+      findings: [
+        {
+          kind: 'orphan',
+          severity: 'info',
+          paths: ['work/meetings/2026-07-18-databricks-sync.md'],
+          detail: "'Databricks sync' has no links in either direction and has never been retrieved.",
+        },
+        ...(deep
+          ? [{
+              kind: 'contradiction' as const,
+              severity: 'warning' as const,
+              paths: [
+                'work/decisions/2026-07-20-powerreviews-feed-delta.md',
+                'work/meetings/2026-07-18-databricks-sync.md',
+              ],
+              detail: 'One note says the feed is delta-only while the other assumes full loads.',
+            }]
+          : []),
+      ],
+      deep: deep ?? false,
+      modelTokens: deep ? 812 : null,
+    }
+  }
+  const payload = await invoke<MemoryLintReport>('memory_lint', {
+    domain: domain ?? null,
+    deep: deep ?? false,
+  })
+  return memoryLintReportSchema.parse(payload)
 }
 
 export async function memoryReindex(): Promise<ReindexResult> {

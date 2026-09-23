@@ -74,6 +74,12 @@ pub fn serialize(fm: &MemoryFrontmatter, body: &str) -> String {
             out.push_str(&format!("  - \"{}\"\n", escape_yaml(tag)));
         }
     }
+    if !fm.related.is_empty() {
+        out.push_str("related:\n");
+        for path in &fm.related {
+            out.push_str(&format!("  - \"{}\"\n", escape_yaml(path)));
+        }
+    }
     out.push_str("---\n\n");
     out.push_str(body);
     out
@@ -167,6 +173,16 @@ fn yaml_to_frontmatter(yaml: &Value) -> Option<MemoryFrontmatter> {
         })
         .unwrap_or_default();
 
+    let related = obj
+        .get("related")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
     Some(MemoryFrontmatter {
         id,
         mem_type,
@@ -187,5 +203,6 @@ fn yaml_to_frontmatter(yaml: &Value) -> Option<MemoryFrontmatter> {
         confirmations,
         expires,
         tags,
+        related,
     })
 }

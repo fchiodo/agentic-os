@@ -1,8 +1,10 @@
 pub mod consolidation;
 pub mod context;
+pub mod email_extraction;
 pub mod frontmatter;
 pub mod importer;
 pub mod index;
+pub mod lint;
 pub mod maintenance;
 pub mod operations;
 pub mod pdf_extraction;
@@ -26,6 +28,10 @@ pub enum MemoryType {
     Preference,
     Entity,
     Episode,
+    /// A verified Ask answer promoted to a first-class note. Links back to
+    /// the memories it cited, so answered questions compound instead of
+    /// being re-derived from scratch on every query.
+    Synthesis,
 }
 
 impl MemoryType {
@@ -36,6 +42,7 @@ impl MemoryType {
             MemoryType::Preference => "preference",
             MemoryType::Entity => "entity",
             MemoryType::Episode => "episode",
+            MemoryType::Synthesis => "synthesis",
         }
     }
 
@@ -46,6 +53,7 @@ impl MemoryType {
             "preference" => Some(MemoryType::Preference),
             "entity" => Some(MemoryType::Entity),
             "episode" => Some(MemoryType::Episode),
+            "synthesis" => Some(MemoryType::Synthesis),
             _ => None,
         }
     }
@@ -58,6 +66,8 @@ impl MemoryType {
             MemoryType::Preference => Some(365),
             MemoryType::Entity => Some(365),
             MemoryType::Episode => Some(90),
+            // Derived knowledge decays with its sources: same horizon as facts.
+            MemoryType::Synthesis => Some(180),
         }
     }
 
@@ -163,6 +173,11 @@ pub struct MemoryFrontmatter {
     pub expires: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Vault-relative paths of related memories (the knowledge-graph edges
+    /// that make notes compound instead of staying isolated). Same-domain
+    /// only; validated against the index at write time.
+    #[serde(default)]
+    pub related: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +429,32 @@ pub struct RetrievalBenchmarkReport {
     pub notes: Vec<String>,
 }
 
+/// One issue surfaced by the lint pass. Lint never writes: findings are
+/// review material for the human, mirroring the wiki-pattern "lint
+/// operation" but routed through this app's read-only governance stance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryLintFinding {
+    /// `broken_link`, `orphan`, `stale`, or `contradiction`.
+    pub kind: String,
+    /// `info` or `warning`.
+    pub severity: String,
+    /// Vault-relative paths of the notes involved.
+    pub paths: Vec<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryLintReport {
+    pub generated_at: String,
+    pub scanned: i64,
+    pub findings: Vec<MemoryLintFinding>,
+    /// True when the model-assisted contradiction pass ran.
+    pub deep: bool,
+    pub model_tokens: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManualSaveRequest {
@@ -433,6 +474,10 @@ pub struct ManualSaveRequest {
     /// Explicit contradiction target. Unlike fuzzy dedup this always creates
     /// a new truth version and therefore always requires approval.
     pub supersedes_id: Option<String>,
+    /// Vault-relative paths this note should link to. Unresolvable or
+    /// cross-domain entries are dropped at the gate, never rejected.
+    #[serde(default)]
+    pub related: Vec<String>,
 }
 
 impl ManualSaveRequest {
@@ -452,6 +497,7 @@ impl ManualSaveRequest {
             stale_after_days: None,
             expires: None,
             supersedes_id: None,
+            related: Vec::new(),
         }
     }
 }
@@ -495,6 +541,21 @@ pub struct MemoryAnswer {
     pub source_count: usize,
     pub model: Option<String>,
     pub generated_at: String,
+}
+
+/// Live status emitted over a per-invocation Tauri channel while `ask` runs.
+/// Carries structural metadata only — never unverified model text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryAskProgress {
+    /// `retrieval`, `synthesis`, or `verification`.
+    pub stage: String,
+    pub label: String,
+    pub at: String,
+    /// Transient events (heartbeats, stderr diagnostics) replace the
+    /// previous transient line in the UI instead of stacking.
+    #[serde(default)]
+    pub transient: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -624,6 +685,7 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use base64::Engine as _;
+    use sha2::{Digest, Sha256};
 
     // Env vars are process-global and cargo runs tests in parallel threads:
     // every test that overrides AGENTIC_OS_VAULT_ROOT / AGENTIC_OS_SKILLS_ROOT
@@ -856,6 +918,218 @@ mod tests {
         assert!(absolute.is_err(), "absolute paths must be rejected");
         assert!(legal.is_ok(), "legal in-vault writes must still work");
         assert!(!roots.vault.parent().unwrap().join("escaped.md").exists());
+    }
+
+    #[test]
+    fn email_import_persists_images_and_rewrites_cid_markers() {
+        let roots = EnvRoots::new("eml-images");
+        let db = temp_db("eml-images");
+
+        let eml = email_extraction::sample_eml_with_image();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(importer::import_document(
+                &db,
+                &DocumentImportRequest {
+                    domain: "work".to_string(),
+                    input_kind: "file".to_string(),
+                    title: "Org chart mail".to_string(),
+                    content: Some(base64::engine::general_purpose::STANDARD.encode(eml)),
+                    content_encoding: Some("base64".to_string()),
+                    mime_type: Some("message/rfc822".to_string()),
+                    source_url: None,
+                    file_name: Some("orgchart.eml".to_string()),
+                },
+            ))
+            .unwrap();
+
+        let source = importer::read_source(&db, &result.import.id).unwrap();
+        assert!(
+            source.content.contains("![image002.png]("),
+            "cid marker must be rewritten to a real image link"
+        );
+        assert!(source.content.contains("## Embedded images"));
+        assert!(
+            !source.content.contains("[cid:image002.png"),
+            "no raw cid marker may survive"
+        );
+        let image_path = result.import.source_path.replace(".md", "-image002.png");
+        assert!(
+            vault::file_exists(&image_path).unwrap(),
+            "image bytes must be persisted beside the original: {image_path}"
+        );
+        assert!(
+            result.import.warnings.iter().any(|warning| warning.contains("desktop runtime")),
+            "headless import must record that AI description was skipped: {:?}",
+            result.import.warnings
+        );
+        drop(roots);
+    }
+
+    #[test]
+    fn multi_query_retrieval_unions_results_across_queries() {
+        let roots = EnvRoots::new("union");
+        let db = temp_db("union");
+
+        let first = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "PowerReviews feed is delta",
+            "Delta feed daily because full loads time out.",
+        );
+        pipeline::process_manual_save(&db, &first, "manual").unwrap();
+        let second = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Sierra rate limit promise",
+            "Sierra promised a rate limit fix by June.",
+        );
+        pipeline::process_manual_save(&db, &second, "manual").unwrap();
+
+        let request = MemoryAskRequest {
+            question: "unrelated question text".to_string(),
+            domain: "work".to_string(),
+            include_stale: true,
+        };
+        let single = retrieval::retrieve_evidence(
+            &db,
+            &request,
+            &["powerreviews delta".to_string()],
+            false,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(single.len(), 1, "one query hits one memory");
+
+        let union = retrieval::retrieve_evidence(
+            &db,
+            &request,
+            &[
+                "powerreviews delta".to_string(),
+                "sierra rate limit".to_string(),
+            ],
+            false,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(
+            union.len(),
+            2,
+            "the union of sub-queries must surface both memories"
+        );
+        drop(roots);
+    }
+
+    #[test]
+    fn related_links_roundtrip_through_frontmatter() {
+        let fm = MemoryFrontmatter {
+            id: "id-1".to_string(),
+            mem_type: MemoryType::Synthesis,
+            domain: "work".to_string(),
+            title: "Linked synthesis".to_string(),
+            created: "2026-07-21".to_string(),
+            updated: "2026-07-21".to_string(),
+            provenance: Provenance {
+                source: "memory-ask:a1".to_string(),
+                ts: "2026-07-21".to_string(),
+            },
+            sources: Vec::new(),
+            confidence: 0.8,
+            sensitivity: Sensitivity::Normal,
+            valid_from: None,
+            valid_until: None,
+            supersedes: None,
+            superseded_by: None,
+            stale_after_days: Some(180),
+            last_confirmed: None,
+            confirmations: None,
+            expires: None,
+            tags: vec!["ask".to_string()],
+            related: vec![
+                "work/decisions/feed.md".to_string(),
+                "work/memories/limits.md".to_string(),
+            ],
+        };
+        let serialized = frontmatter::serialize(&fm, "Body text.");
+        let (parsed, body) = frontmatter::parse(&serialized).expect("roundtrip parses");
+        assert_eq!(parsed.related, fm.related);
+        assert_eq!(parsed.mem_type, MemoryType::Synthesis);
+        assert_eq!(body, "Body text.");
+    }
+
+    #[test]
+    fn related_links_are_resolved_and_invalid_ones_dropped() {
+        let roots = EnvRoots::new("related");
+        let db = temp_db("related");
+
+        let first = ManualSaveRequest::basic("work", "fact", "Feed is delta", "Delta feed daily.");
+        let first_proposal = pipeline::process_manual_save(&db, &first, "manual").unwrap();
+        assert_eq!(first_proposal.status, "auto_applied");
+        let first_path = first_proposal.vault_path.clone();
+
+        let mut second = ManualSaveRequest::basic(
+            "work",
+            "synthesis",
+            "Feed decision summary",
+            "Nightly delta sync was chosen over full loads.",
+        );
+        second.related = vec![
+            first_path.clone(),
+            "work/memories/does-not-exist.md".to_string(),
+            "personal/memories/cross-domain.md".to_string(),
+            "../escape.md".to_string(),
+        ];
+        let second_proposal = pipeline::process_manual_save(&db, &second, "manual").unwrap();
+        assert_eq!(second_proposal.status, "auto_applied");
+
+        let (fm, _) = frontmatter::parse(&second_proposal.new_content).unwrap();
+        assert_eq!(
+            fm.related,
+            vec![first_path],
+            "only the resolvable same-domain link must survive the gate"
+        );
+        assert_eq!(fm.mem_type, MemoryType::Synthesis);
+        drop(roots);
+    }
+
+    #[tokio::test]
+    async fn lint_flags_orphans_but_not_linked_notes() {
+        let roots = EnvRoots::new("lint");
+        let db = temp_db("lint");
+
+        let orphan =
+            ManualSaveRequest::basic("work", "fact", "Isolated fact", "Nobody links here.");
+        pipeline::process_manual_save(&db, &orphan, "manual").unwrap();
+
+        let hub = ManualSaveRequest::basic("work", "fact", "Hub note", "Linked from below.");
+        let hub_proposal = pipeline::process_manual_save(&db, &hub, "manual").unwrap();
+        let mut spoke = ManualSaveRequest::basic("work", "fact", "Spoke note", "Points at hub.");
+        spoke.related = vec![hub_proposal.vault_path.clone()];
+        pipeline::process_manual_save(&db, &spoke, "manual").unwrap();
+
+        let report = lint::run_lint(&db, Some("work"), false).await.unwrap();
+        assert_eq!(report.scanned, 3);
+        assert!(!report.deep);
+        let orphan_findings: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == "orphan")
+            .collect();
+        assert_eq!(
+            orphan_findings.len(),
+            1,
+            "only the unlinked note is an orphan: {:?}",
+            report.findings
+        );
+        assert!(orphan_findings[0].paths[0].contains("isolated-fact"));
+        assert!(
+            !report.findings.iter().any(|f| f.kind == "broken_link"),
+            "gate-validated links must never lint as broken"
+        );
+        drop(roots);
     }
 
     #[test]
@@ -1181,6 +1455,7 @@ mod tests {
             confirmations: Some(1),
             expires: None,
             tags: vec![],
+            related: vec![],
         };
         let content = frontmatter::serialize(&fm, "A stale but retained fact.");
         vault::ensure_vault().unwrap();
@@ -1748,6 +2023,71 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
     }
 
     #[test]
+    fn startup_recovery_verifies_and_preserves_imported_images() {
+        let roots = EnvRoots::new("image-operation-recovery");
+        let db = temp_db("image-operation-recovery");
+        vault::ensure_vault().unwrap();
+        let import_id = uuid::Uuid::new_v4().to_string();
+        let source_path = format!("_sources/work/recovered-{import_id}.md");
+        let image_path = format!("_sources/work/recovered-{import_id}-diagram.png");
+        let snapshot = "# Recovered email\n\n![diagram](recovered-diagram.png)\n";
+        let image_bytes = b"test-image-bytes";
+        let operation_id = operations::begin(
+            &db,
+            "document_import",
+            &import_id,
+            &serde_json::json!({
+                "domain": "work",
+                "title": "Recovered email",
+                "inputKind": "file",
+                "sourceRef": "recovered.eml",
+                "sourcePath": source_path,
+                "originalPath": serde_json::Value::Null,
+                "contentHash": crate::audit::compute_content_hash(snapshot),
+                "snapshotHash": crate::audit::compute_content_hash(snapshot),
+                "byteCount": snapshot.len() as i64,
+                "createdAt": "2026-09-23T12:00:00Z",
+                "extractionEngine": "mail-parser",
+                "extractionVersion": "0.11.5",
+                "extractionQualityScore": 100,
+                "extractionQualityStatus": "passed",
+                "extractionQualityIssues": [],
+                "images": [{
+                    "path": image_path,
+                    "contentHash": format!("{:x}", Sha256::digest(image_bytes)),
+                }],
+            }),
+        )
+        .unwrap();
+
+        // Simulate a process kill after every governed file is durable but
+        // before Git, SQLite, and audit have been reconciled.
+        vault::write_file_atomic(&source_path, snapshot).unwrap();
+        vault::write_bytes_atomic(&image_path, image_bytes).unwrap();
+        operations::advance(&db, &operation_id, "files_written").unwrap();
+
+        let report = operations::recover(&db).unwrap();
+        assert_eq!(report.recovered, 1);
+        assert_eq!(report.needs_attention, 0);
+        assert_eq!(vault::read_bytes(&image_path).unwrap(), image_bytes);
+        assert!(importer::list(&db, Some("work"))
+            .unwrap()
+            .iter()
+            .any(|record| record.id == import_id));
+        assert_eq!(
+            operations::list(&db)
+                .unwrap()
+                .into_iter()
+                .find(|operation| operation.id == operation_id)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert!(crate::audit::verify_chain(&db).unwrap().ok);
+        drop(roots);
+    }
+
+    #[test]
     fn expiring_episode_creates_approval_proposals_and_defers_archive() {
         let roots = EnvRoots::new("episode-consolidation");
         let db = temp_db("episode-consolidation");
@@ -1775,6 +2115,8 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
             proposal.requires_approval
                 && proposal.provenance.contains("consolidation:")
                 && proposal.new_content.contains("sources:")
+                && proposal.new_content.contains("related:")
+                && proposal.new_content.contains(&episode.vault_path)
         }));
         let episode_id = frontmatter::parse(&episode.new_content).unwrap().0.id;
         assert_eq!(

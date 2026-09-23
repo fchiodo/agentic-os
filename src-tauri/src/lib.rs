@@ -53,6 +53,7 @@ pub fn run() {
             memory::index::reindex(&db)
                 .unwrap_or_else(|err| panic!("failed to rebuild memory index: {err}"));
             app.manage(db.clone());
+            app.manage(commands::AskCancellations::default());
 
             // Memory maintenance scheduler (MEMORY-SPEC §6): sweep on app
             // start, then every 24h while the app runs. Failures are logged,
@@ -102,6 +103,8 @@ pub fn run() {
             commands::memory_read,
             commands::memory_search,
             commands::memory_ask,
+            commands::memory_ask_cancel,
+            commands::memory_lint,
             commands::memory_answer_feedback,
             commands::memory_save_manual,
             commands::memory_ingest,

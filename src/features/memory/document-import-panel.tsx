@@ -108,6 +108,8 @@ export function DocumentImportPanel({
     try {
       const normalizedName = file.name.toLocaleLowerCase()
       const isPdf = file.type.toLocaleLowerCase() === 'application/pdf' || normalizedName.endsWith('.pdf')
+      const isEml = file.type.toLocaleLowerCase() === 'message/rfc822' || normalizedName.endsWith('.eml')
+      const isMsg = normalizedName.endsWith('.msg')
       if (isPdf) {
         const bytes = await file.arrayBuffer()
         const signature = new TextDecoder('ascii').decode(bytes.slice(0, 5))
@@ -118,10 +120,25 @@ export function DocumentImportPanel({
         setContent(arrayBufferToBase64(bytes))
         setContentEncoding('base64')
         setMimeType('application/pdf')
+      } else if (isEml || isMsg) {
+        // Emails travel as base64 so non-UTF-8 charsets and the OLE .msg
+        // container survive the IPC boundary intact.
+        const bytes = await file.arrayBuffer()
+        if (isMsg) {
+          const signature = new Uint8Array(bytes.slice(0, 4))
+          const isOle = signature[0] === 0xd0 && signature[1] === 0xcf && signature[2] === 0x11 && signature[3] === 0xe0
+          if (!isOle) {
+            setFileError('This .msg file does not contain a valid Outlook message container.')
+            return
+          }
+        }
+        setContent(arrayBufferToBase64(bytes))
+        setContentEncoding('base64')
+        setMimeType(isMsg ? 'application/vnd.ms-outlook' : 'message/rfc822')
       } else {
         const text = await file.text()
         if (text.includes('\0')) {
-          setFileError('This binary file type is not supported. Choose a PDF or a UTF-8 text document.')
+          setFileError('This binary file type is not supported. Choose a PDF, an email (.eml/.msg), or a UTF-8 text document.')
           return
         }
         if (byteLength(text) > MAX_DOCUMENT_BYTES) {
@@ -195,8 +212,8 @@ export function DocumentImportPanel({
 
             {inputKind === 'file' && (
               <label className="document-file-picker">
-                <span>PDF or text document</span>
-                <input accept=".pdf,.md,.mdx,.txt,.json,.yaml,.yml,.html,.htm,.xml,application/pdf,text/*,application/json,application/xml" onChange={(event) => { void selectFile(event.target.files?.[0]) }} type="file" />
+                <span>PDF, email (.eml/.msg), or text document</span>
+                <input accept=".pdf,.eml,.msg,.md,.mdx,.txt,.json,.yaml,.yml,.html,.htm,.xml,application/pdf,message/rfc822,application/vnd.ms-outlook,text/*,application/json,application/xml" onChange={(event) => { void selectFile(event.target.files?.[0]) }} type="file" />
                 <span className="document-file-drop"><Upload aria-hidden="true" size={20} />{fileName || 'Choose a PDF or UTF-8 text file up to 2 MiB'}</span>
               </label>
             )}

@@ -91,6 +91,7 @@ pub fn propose_due(db: &Db) -> AppResult<i64> {
                 stale_after_days: candidate.stale_after_days,
                 expires: None,
                 supersedes_id: candidate.supersedes_id,
+                related: vec![episode.vault_path.clone()],
             };
             match super::pipeline::process_consolidation_candidate(
                 db,

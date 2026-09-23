@@ -755,6 +755,27 @@ pub fn get_by_id(db: &Db, id: &str) -> AppResult<Option<MemoryRow>> {
     })
 }
 
+/// Full row lookup by vault path, used to resolve `related` frontmatter
+/// links during evidence expansion and lint.
+pub fn get_by_path(db: &Db, path: &str) -> AppResult<Option<MemoryRow>> {
+    ensure_tables(db)?;
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, vault_path, domain, mem_type, title, summary, sensitivity,
+                    confidence, created_at, updated_at, valid_from, valid_until,
+                    stale_after_days, last_confirmed_at, confirmation_count,
+                    last_accessed_at, access_count, expires_at, provenance,
+                    content_hash, status
+             FROM memories WHERE vault_path = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![path], row_to_memory)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    })
+}
+
 /// List all memories for a domain. Reserved for the Memory UI browse
 /// view (MEMORY-SPEC §9) which lists by domain without a search query.
 #[allow(dead_code)]

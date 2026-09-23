@@ -36,6 +36,9 @@ struct AcquiredDocument {
     extraction_quality_status: String,
     extraction_quality_issues: Vec<String>,
     warnings: Vec<String>,
+    /// Images embedded in the source (today: email attachments). Persisted
+    /// beside the original and described by the vision enrichment turn.
+    images: Vec<super::email_extraction::EmailImage>,
 }
 
 #[derive(Serialize)]
@@ -133,6 +136,7 @@ async fn import_document_inner(
         .original_extension
         .map(|extension| format!("{source_stem}.{extension}"));
     let content_hash = hash_bytes(&acquired.source_bytes);
+    let image_files = enrich_with_images(db, app, &mut acquired, &import_id, &source_stem).await;
     let snapshot = serialize_snapshot(
         &import_id,
         request,
@@ -166,6 +170,7 @@ async fn import_document_inner(
         acquired.extraction_quality_score,
         &acquired.extraction_quality_status,
         &acquired.extraction_quality_issues,
+        &image_files,
     )?;
 
     if acquired.extraction_quality_status != "failed" {
@@ -214,6 +219,7 @@ async fn import_document_inner(
             stale_after_days: candidate.stale_after_days,
             expires: candidate.expires.clone(),
             supersedes_id: candidate.supersedes_id.clone(),
+            related: Vec::new(),
         };
         match super::pipeline::process_import_candidate(db, &save, &provenance, &import_id) {
             Ok(proposal) => proposals.push(proposal),
@@ -376,6 +382,159 @@ pub(crate) fn refresh_status(db: &Db, import_id: &str) -> AppResult<()> {
     })
 }
 
+const VISION_TIMEOUT_SECS: u64 = 120;
+const MAX_VISION_CONTEXT_CHARS: usize = 16_000;
+
+/// Persist-prep for embedded images: rewrite inline `cid:` markers to real
+/// links, list the images in the snapshot, and — in the desktop runtime —
+/// run one bounded vision turn (same harness as Ask) that receives both the
+/// extracted text and the images, appending a clearly labeled AI-generated
+/// description. Never fatal: any failure degrades to a warning and the
+/// import completes with the images preserved.
+async fn enrich_with_images(
+    db: &Db,
+    app: Option<&AppHandle>,
+    acquired: &mut AcquiredDocument,
+    import_id: &str,
+    source_stem: &str,
+) -> Vec<(String, Vec<u8>)> {
+    if acquired.images.is_empty() {
+        return Vec::new();
+    }
+
+    let mut image_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut references = Vec::new();
+    for image in &acquired.images {
+        let relative = format!("{source_stem}-{}", image.file_name);
+        let basename = relative
+            .rsplit('/')
+            .next()
+            .unwrap_or(relative.as_str())
+            .to_string();
+        if let Some(content_id) = &image.content_id {
+            let marker = format!("[cid:{content_id}]");
+            let replacement = format!("![{}]({})", image.file_name, basename);
+            acquired.snapshot_body = acquired.snapshot_body.replace(&marker, &replacement);
+        }
+        references.push(format!("- ![{}]({})", image.file_name, basename));
+        image_files.push((relative, image.bytes.clone()));
+    }
+    acquired.snapshot_body.push_str("\n\n## Embedded images\n\n");
+    acquired.snapshot_body.push_str(&references.join("\n"));
+    acquired.snapshot_body.push('\n');
+
+    // The vision turn mirrors the Ask harness and is gated on the desktop
+    // runtime so tests and headless contexts never spawn a model process.
+    if app.is_none() {
+        acquired.warnings.push(format!(
+            "{} embedded image(s) were preserved; AI description requires the desktop runtime.",
+            image_files.len()
+        ));
+        return image_files;
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("agentic-os-import-{import_id}"));
+    let temp_result = (|| -> AppResult<Vec<std::path::PathBuf>> {
+        std::fs::create_dir_all(&temp_dir)?;
+        let mut paths = Vec::new();
+        for (relative, bytes) in &image_files {
+            let name = relative.rsplit('/').next().unwrap_or("image.png");
+            let path = temp_dir.join(name);
+            std::fs::write(&path, bytes)?;
+            paths.push(path);
+        }
+        Ok(paths)
+    })();
+    let image_paths = match temp_result {
+        Ok(paths) => paths,
+        Err(error) => {
+            acquired.warnings.push(format!(
+                "Embedded images were preserved, but could not be staged for AI description ({error})."
+            ));
+            return image_files;
+        }
+    };
+
+    let context: String = acquired
+        .extraction_text
+        .chars()
+        .take(MAX_VISION_CONTEXT_CHARS)
+        .collect();
+    let prompt = format!(
+        "You are enriching an imported email for a personal knowledge base.\n\
+         The email's extracted text is below. Attached are {} image(s) embedded in that email.\n\
+         Describe each image in complete, factual detail. If an image is an organization chart, \
+         list every person, their role or title, and every reporting line. If it is a diagram or \
+         table, transcribe its structure and content faithfully. Relate each image to the email \
+         where relevant. Reply in markdown with one '### <image file name>' section per image. \
+         Do not add commentary beyond the descriptions.\n\n\
+         EMAIL TEXT:\n{}",
+        image_paths.len(),
+        context
+    );
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(VISION_TIMEOUT_SECS),
+        crate::harness::structured::run_read_only_with_images(
+            &prompt,
+            &image_paths,
+            |_| {},
+            crate::harness::structured::no_cancel(),
+        ),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    match outcome {
+        Ok(Ok(output)) => {
+            let description = output.text.trim().to_string();
+            if description.is_empty() {
+                acquired
+                    .warnings
+                    .push("The model returned no image description; images were preserved without one.".to_string());
+            } else if super::pipeline::contains_secrets(&description)
+                || super::pipeline::contains_prompt_injection(&description)
+            {
+                acquired.warnings.push(
+                    "The AI image description was discarded by the security scanners; images were preserved without it."
+                        .to_string(),
+                );
+            } else {
+                let section = format!(
+                    "\n\n## Image analysis — AI-generated (verify before relying)\n\n{description}\n"
+                );
+                acquired.snapshot_body.push_str(&section);
+                acquired.extraction_text.push_str(&section);
+                let _ = crate::audit::append_row(
+                    db,
+                    &format!("document-import:{import_id}"),
+                    import_id,
+                    "model_call",
+                    "Embedded images described for imported email",
+                    &serde_json::json!({
+                        "importId": import_id,
+                        "imageCount": image_paths.len(),
+                    }),
+                    output.tokens,
+                    None,
+                );
+                acquired.warnings.push(format!(
+                    "{} embedded image(s) were analyzed by the model; the description is labeled AI-generated and extracted facts still require approval.",
+                    image_paths.len()
+                ));
+            }
+        }
+        Ok(Err(error)) => acquired.warnings.push(format!(
+            "AI image description failed ({error}); images were preserved without it."
+        )),
+        Err(_) => acquired.warnings.push(format!(
+            "AI image description exceeded the {VISION_TIMEOUT_SECS} second limit; images were preserved without it."
+        )),
+    }
+
+    image_files
+}
+
 async fn acquire(
     request: &DocumentImportRequest,
     app: Option<&AppHandle>,
@@ -400,6 +559,7 @@ async fn acquire(
                 extraction_quality_status: "not_applicable".to_string(),
                 extraction_quality_issues: Vec::new(),
                 warnings: Vec::new(),
+                images: Vec::new(),
             })
         }
         "file" => {
@@ -419,6 +579,14 @@ async fn acquire(
                 || mime_type.as_deref() == Some("application/pdf");
             if is_pdf {
                 return acquire_pdf(request, &file_name, mime_type, app).await;
+            }
+            let lowered_name = file_name.to_ascii_lowercase();
+            let is_eml = lowered_name.ends_with(".eml")
+                || mime_type.as_deref() == Some("message/rfc822");
+            let is_msg = lowered_name.ends_with(".msg")
+                || mime_type.as_deref() == Some("application/vnd.ms-outlook");
+            if is_eml || is_msg {
+                return acquire_email(request, &file_name, is_msg);
             }
 
             if request
@@ -458,6 +626,7 @@ async fn acquire(
                 } else {
                     Vec::new()
                 },
+                images: Vec::new(),
             })
         }
         "url" => {
@@ -471,6 +640,62 @@ async fn acquire(
         }
         _ => Err(io_error("inputKind must be text, file, or url")),
     }
+}
+
+/// Outlook/email files (.eml RFC 5322, .msg OLE) arrive base64-encoded so
+/// arbitrary charsets and binary containers survive the IPC boundary. The
+/// original bytes are preserved beside the snapshot exactly like PDFs.
+fn acquire_email(
+    request: &DocumentImportRequest,
+    file_name: &str,
+    is_msg: bool,
+) -> AppResult<AcquiredDocument> {
+    if request.content_encoding.as_deref() != Some("base64") {
+        return Err(io_error(
+            "email upload is not encoded correctly; select the file again after updating the app",
+        ));
+    }
+    let encoded = request
+        .content
+        .as_deref()
+        .ok_or_else(|| io_error("content is required for an email import"))?;
+    let max_encoded_len = MAX_DOCUMENT_BYTES.div_ceil(3) * 4;
+    if encoded.len() > max_encoded_len {
+        return Err(io_error("document exceeds the 2 MiB import limit"));
+    }
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| io_error("email upload contains invalid base64 data"))?;
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(io_error("document exceeds the 2 MiB import limit"));
+    }
+
+    let extraction = if is_msg {
+        super::email_extraction::extract_msg(&bytes)?
+    } else {
+        super::email_extraction::extract_eml(&bytes)?
+    };
+
+    Ok(AcquiredDocument {
+        source_bytes: bytes,
+        extraction_text: extraction.snapshot.clone(),
+        security_scan_text: extraction.snapshot.clone(),
+        snapshot_body: extraction.snapshot,
+        source_ref: format!("email:{file_name}"),
+        original_extension: Some(if is_msg { "msg" } else { "eml" }),
+        mime_type: Some(if is_msg {
+            "application/vnd.ms-outlook".to_string()
+        } else {
+            "message/rfc822".to_string()
+        }),
+        extraction_engine: Some(extraction.engine.to_string()),
+        extraction_version: Some(extraction.version.to_string()),
+        extraction_quality_score: None,
+        extraction_quality_status: "not_applicable".to_string(),
+        extraction_quality_issues: Vec::new(),
+        warnings: extraction.warnings,
+        images: extraction.images,
+    })
 }
 
 async fn acquire_pdf(
@@ -520,6 +745,7 @@ async fn acquire_pdf(
         extraction_quality_status: extraction.quality.status.to_string(),
         extraction_quality_issues: extraction.quality.issues,
         warnings: extraction.warnings,
+        images: Vec::new(),
     })
 }
 
@@ -660,6 +886,7 @@ async fn fetch_url(value: &str) -> AppResult<AcquiredDocument> {
         extraction_quality_status: "not_applicable".to_string(),
         extraction_quality_issues: Vec::new(),
         warnings,
+        images: Vec::new(),
     })
 }
 
@@ -740,6 +967,7 @@ fn persist_source(
     extraction_quality_score: Option<i64>,
     extraction_quality_status: &str,
     extraction_quality_issues: &[String],
+    image_files: &[(String, Vec<u8>)],
 ) -> AppResult<()> {
     let _guard = super::vault::lock_writes();
     super::vault::ensure_vault()?;
@@ -771,34 +999,50 @@ fn persist_source(
             "extractionQualityScore": extraction_quality_score,
             "extractionQualityStatus": extraction_quality_status,
             "extractionQualityIssues": extraction_quality_issues,
+            "images": image_files.iter().map(|(path, bytes)| serde_json::json!({
+                "path": path,
+                "contentHash": format!("{:x}", Sha256::digest(bytes)),
+            })).collect::<Vec<_>>(),
         }),
     )?;
+    let remove_written = |written_images: &[String]| {
+        let _ = super::vault::remove_file(source_path);
+        if let Some(path) = original_path {
+            let _ = super::vault::remove_file(path);
+        }
+        for path in written_images {
+            let _ = super::vault::remove_file(path);
+        }
+    };
     if let Err(error) = super::vault::write_file_atomic(source_path, snapshot) {
         let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
         return Err(error);
     }
     if let Some(path) = original_path {
         if let Err(error) = super::vault::write_bytes_atomic(path, source_bytes) {
-            let _ = super::vault::remove_file(source_path);
+            remove_written(&[]);
             let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
             return Err(error);
         }
     }
-    if let Err(error) = super::operations::advance(db, &operation_id, "files_written") {
-        let _ = super::vault::remove_file(source_path);
-        if let Some(path) = original_path {
-            let _ = super::vault::remove_file(path);
+    let mut written_images = Vec::new();
+    for (path, bytes) in image_files {
+        if let Err(error) = super::vault::write_bytes_atomic(path, bytes) {
+            remove_written(&written_images);
+            let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
+            return Err(error);
         }
+        written_images.push(path.clone());
+    }
+    if let Err(error) = super::operations::advance(db, &operation_id, "files_written") {
+        remove_written(&written_images);
         let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
         return Err(error);
     }
     if let Err(error) =
         super::vault::git_commit(&format!("mem({}): import source {}", request.domain, id))
     {
-        let _ = super::vault::remove_file(source_path);
-        if let Some(path) = original_path {
-            let _ = super::vault::remove_file(path);
-        }
+        remove_written(&written_images);
         let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
         return Err(error);
     }
@@ -849,6 +1093,7 @@ fn persist_source(
                 "sourceRef": source_ref,
                 "sourcePath": source_path,
                 "originalPath": original_path,
+                "imagePaths": written_images,
                 "contentHash": content_hash,
                 "byteCount": byte_count,
                 "extractionEngine": extraction_engine,
@@ -869,10 +1114,7 @@ fn persist_source(
             conn.execute("DELETE FROM document_imports WHERE id = ?1", params![id])?;
             Ok(())
         });
-        let _ = super::vault::remove_file(source_path);
-        if let Some(path) = original_path {
-            let _ = super::vault::remove_file(path);
-        }
+        remove_written(&written_images);
         let _ = super::vault::git_commit(&format!("mem({}): rollback import {id}", request.domain));
         let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
         return Err(error);
@@ -1249,7 +1491,7 @@ fn clean_markdown(value: &str) -> String {
         .to_string()
 }
 
-fn html_to_text(value: &str) -> String {
+pub(crate) fn html_to_text(value: &str) -> String {
     let without_scripts = regex::Regex::new(r"(?is)<(script|style)[^>]*>.*?</(script|style)>")
         .expect("static script regex")
         .replace_all(value, " ");
