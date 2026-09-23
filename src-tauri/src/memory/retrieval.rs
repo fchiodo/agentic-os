@@ -1146,8 +1146,9 @@ fn claim_supported(
 }
 
 /// Return only text that is safe to expose in the answer. A claim with a
-/// recognized relation can keep its verified wording. For relations outside
-/// the deterministic vocabulary, the model paraphrase is replaced with the
+/// recognized relation can keep its verified wording only when both sides of
+/// the relation match exactly. Otherwise, as with relations outside the
+/// deterministic vocabulary, the model paraphrase is replaced with the
 /// complete source sentence so attribution and modality cannot disappear.
 fn verified_claim_text(
     claim: &str,
@@ -1195,14 +1196,26 @@ fn verified_claim_text(
                     && sentence.chars().count() <= MAX_CLAIM_CHARS)
                     .then(|| sentence.trim().to_string())
             } else {
-                claim_frames
-                    .iter()
-                    .all(|claim_frame| {
-                        relation_frames(sentence)
-                            .iter()
-                            .any(|evidence_frame| evidence_frame.supports(claim_frame))
-                    })
-                    .then(|| claim.trim().to_string())
+                let evidence_frames = relation_frames(sentence);
+                let supported = claim_frames.iter().all(|claim_frame| {
+                    evidence_frames
+                        .iter()
+                        .any(|evidence_frame| evidence_frame.supports(claim_frame))
+                });
+                if !supported {
+                    return None;
+                }
+                let arguments_match_exactly = claim_frames.iter().all(|claim_frame| {
+                    evidence_frames
+                        .iter()
+                        .any(|evidence_frame| evidence_frame.supports_exactly(claim_frame))
+                });
+                if arguments_match_exactly {
+                    Some(claim.trim().to_string())
+                } else {
+                    (sentence.chars().count() <= MAX_CLAIM_CHARS)
+                        .then(|| sentence.trim().to_string())
+                }
             }
         })
 }
@@ -1221,6 +1234,10 @@ impl RelationFrame {
             && !claim.right.is_empty()
             && claim.left.is_subset(&self.left)
             && claim.right.is_subset(&self.right)
+    }
+
+    fn supports_exactly(&self, claim: &Self) -> bool {
+        self.relation == claim.relation && self.left == claim.left && self.right == claim.right
     }
 }
 
@@ -1242,14 +1259,24 @@ fn relation_frames(value: &str) -> Vec<RelationFrame> {
         .iter()
         .enumerate()
         .filter_map(|(anchor_index, (index, relation))| {
-            let left_start = anchor_index
+            let relation_window_start = anchor_index
                 .checked_sub(1)
                 .map(|previous| anchors[previous].0 + 1)
                 .unwrap_or(0);
-            let right_end = anchors
+            let relation_window_end = anchors
                 .get(anchor_index + 1)
                 .map(|next| next.0)
                 .unwrap_or(tokens.len());
+            let left_start = tokens[relation_window_start..*index]
+                .iter()
+                .rposition(|token| is_relation_clause_boundary(token))
+                .map(|boundary| relation_window_start + boundary + 1)
+                .unwrap_or(relation_window_start);
+            let right_end = tokens[index + 1..relation_window_end]
+                .iter()
+                .position(|token| is_relation_clause_boundary(token))
+                .map(|boundary| index + 1 + boundary)
+                .unwrap_or(relation_window_end);
             let left = frame_terms(&tokens[left_start..*index]);
             let right = frame_terms(&tokens[index + 1..right_end]);
             (!left.is_empty() && !right.is_empty()).then_some(RelationFrame {
@@ -1259,6 +1286,13 @@ fn relation_frames(value: &str) -> Vec<RelationFrame> {
             })
         })
         .collect()
+}
+
+fn is_relation_clause_boundary(token: &str) -> bool {
+    matches!(
+        token,
+        "and" | "but" | "e" | "ma" | "mentre" | "whereas" | "while"
+    )
 }
 
 fn relation_token(value: &str) -> Option<&'static str> {
@@ -1866,6 +1900,50 @@ mod tests {
                 format!("{} [1].", expected.trim_end_matches('.'))
             );
             assert!(!answer.answer.starts_with("Alice paid Bob ["));
+        }
+    }
+
+    #[test]
+    fn verifier_preserves_attribution_and_modality_for_recognized_relations() {
+        for (source, claim) in [
+            ("Alice said Carol manages Orion.", "Alice manages Orion."),
+            ("Alice might have managed Orion.", "Alice managed Orion."),
+        ] {
+            let evidence = vec![passage(
+                "source:1:10",
+                "_sources/work/ownership.md",
+                source,
+                0.91,
+            )];
+            let citations = BTreeSet::from([1]);
+            assert!(!claim_supported(claim, &citations, &evidence));
+            assert_eq!(
+                verified_claim_text(claim, &citations, &evidence).as_deref(),
+                Some(source),
+            );
+
+            let answer = verify_synthesis(
+                "00000000-0000-4000-8000-000000000100",
+                &request(),
+                "2026-09-23T12:00:00Z",
+                &evidence,
+                RawSynthesis {
+                    abstained: false,
+                    claims: vec![RawClaim {
+                        text: claim.to_string(),
+                        citations: vec![1],
+                    }],
+                },
+                &mut Vec::new(),
+            );
+            assert!(!answer.abstained);
+            assert_eq!(
+                answer.answer,
+                format!("{} [1].", source.trim_end_matches('.'))
+            );
+            assert!(!answer
+                .answer
+                .starts_with(claim.trim_end_matches('.')));
         }
     }
 

@@ -91,7 +91,10 @@ Node detail exposes declared/observed domain and capability facets with their
 source references, plus operational state and last real activity. Catalog
 registration, observed/inferred usage, and application connection health are
 separate fields: presence in the registry never implies that an item ran or
-that its connection works.
+that its connection works. Connector health is reduced from the newest valid
+RFC 3339 execution event per connector, independent of audit query order.
+Historical success/failure updates health and last activity; only a currently
+active task changes the node's operational state to `in_use`.
 
 The client uses Graphology as the graph model and Sigma.js 3 as a WebGL
 renderer. Positions are deterministic radial coordinates; no force layout or
@@ -159,11 +162,12 @@ The deterministic Ask suite separately covers citation presence, negation,
 number/date and named-subject substitutions, same-token role reversals, numbers
 attached to the wrong subject, and role reversal for predicates outside the
 small recognized relation vocabulary. For an unrecognized relation, ordered
-overlap only locates a candidate sentence: Ask exposes the complete source
-sentence or abstains, preserving attribution and modal uncertainty such as
-“said” and “might”. Progressive retrieval is excluded from
-the zero-outbound-cost benchmark and remains measurable from audited Ask runs
-because it may add model tokens.
+overlap only locates a candidate sentence. For a recognized relation, both
+argument sides must match exactly before a model paraphrase is accepted. In all
+other cases Ask exposes the complete source sentence or abstains, preserving
+attribution and modal uncertainty such as “said” and “might”. Progressive
+retrieval is excluded from the zero-outbound-cost benchmark and remains
+measurable from audited Ask runs because it may add model tokens.
 
 The candidate is promoted only if it improves coverage without reducing
 supported-claim precision, while keeping the agreed desktop p95 and cost

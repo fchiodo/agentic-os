@@ -43,8 +43,12 @@ The deterministic Ask suite additionally rejects uncited claims, polarity
 reversals, changed subjects/numbers/dates, same-token role reversals, a number
 attached to the wrong subject, and role reversal for predicates outside the
 recognized relation list. It also verifies that attribution and uncertainty are
-retained by returning the full source sentence for unknown predicates. The
+retained by returning the full source sentence for both known and unknown
+predicates when their arguments are not exact. The
 orbital suite proves that text-derived catalog references remain inferred and
 includes an execution-to-audit-to-observed-relation test for a completed MCP
-tool event. Full native and frontend verification for this run: 62 Rust tests
-and 8 Vitest tests passed; TypeScript build and ESLint also passed.
+tool event. Connector health tests cover both failure-to-success and
+success-to-failure histories in both input orders, while current task activity
+remains a separate state. Full native and frontend verification for this run:
+64 Rust tests and 8 Vitest tests passed; TypeScript build and ESLint also
+passed.

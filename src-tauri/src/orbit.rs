@@ -915,6 +915,38 @@ fn enrich_operational_state(
             .map(str::to_string);
     }
 
+    // Execution history owns usage, last activity, and connector health. It is
+    // reduced independently of task state so a completed/failed historical
+    // task cannot masquerade as current activity. Audit rows are currently
+    // loaded newest-first, but correctness must not depend on query order.
+    let mut latest_connection_at =
+        HashMap::<String, chrono::DateTime<chrono::FixedOffset>>::new();
+    for trace in traces {
+        for kind in ["skill", "application"] {
+            for reference in execution_refs(&trace.detail, kind) {
+                let node_id = format!("{kind}:{}", reference.catalog_id);
+                let Some(node) = nodes.iter_mut().find(|node| node.id == node_id) else {
+                    continue;
+                };
+                node.usage_state = "observed".to_string();
+                if timestamp_is_newer(&reference.occurred_at, node.last_activity_at.as_deref()) {
+                    node.last_activity_at = Some(reference.occurred_at.clone());
+                }
+                if kind == "application" {
+                    let occurred_at = chrono::DateTime::parse_from_rfc3339(&reference.occurred_at)
+                        .expect("execution_refs validates RFC 3339 timestamps");
+                    let is_latest = latest_connection_at
+                        .get(&node_id)
+                        .map_or(true, |latest| occurred_at > *latest);
+                    if is_latest {
+                        node.connection_state = connection_state(&reference.outcome).to_string();
+                        latest_connection_at.insert(node_id, occurred_at);
+                    }
+                }
+            }
+        }
+    }
+
     for task in tasks {
         let task_traces = traces
             .iter()
@@ -939,21 +971,8 @@ fn enrich_operational_state(
                         .iter_mut()
                         .find(|node| node.id == format!("{kind}:{}", reference.catalog_id))
                     {
-                        node.operational_state = match task.status.as_str() {
-                            status if task_is_active(status) => "in_use",
-                            "failed" => "attention",
-                            _ => "available",
-                        }
-                        .to_string();
-                        node.usage_state = "observed".to_string();
-                        if kind == "application" {
-                            node.connection_state =
-                                connection_state(&reference.outcome).to_string();
-                        }
-                        if node.last_activity_at.as_deref().unwrap_or("")
-                            < reference.occurred_at.as_str()
-                        {
-                            node.last_activity_at = Some(reference.occurred_at.clone());
+                        if task_is_active(&task.status) {
+                            node.operational_state = "in_use".to_string();
                         }
                         push_facet(
                             &mut node.domains,
@@ -1039,6 +1058,16 @@ fn task_is_active(status: &str) -> bool {
         status,
         "planned" | "running" | "waiting_for_tool" | "resuming" | "verifying"
     )
+}
+
+fn timestamp_is_newer(candidate: &str, current: Option<&str>) -> bool {
+    let Ok(candidate) = chrono::DateTime::parse_from_rfc3339(candidate) else {
+        return false;
+    };
+    match current.and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok()) {
+        Some(current) => candidate > current,
+        None => true,
+    }
 }
 
 fn apply_task_state(node: &mut OrbitNode, task: &TaskRecord, evidence: &str) {
@@ -1498,6 +1527,86 @@ mod tests {
             }]
         });
         assert!(execution_refs(&detail, "routine").is_empty());
+    }
+
+    fn application_execution_trace(outcome: &str, occurred_at: &str) -> TraceRecord {
+        TraceRecord {
+            run_id: format!("run-{outcome}-{occurred_at}"),
+            task_id: None,
+            ts: occurred_at.to_string(),
+            kind: "tool_call".to_string(),
+            summary: format!("connector {outcome}"),
+            detail: serde_json::json!({
+                "executionRefs": [{
+                    "catalogId": "research-mcp",
+                    "kind": "application",
+                    "operation": "mcp_tool:search",
+                    "outcome": outcome,
+                    "occurredAt": occurred_at
+                }]
+            }),
+        }
+    }
+
+    #[test]
+    fn connector_state_uses_latest_event_independent_of_trace_order() {
+        for (older_outcome, newer_outcome, expected_state) in [
+            ("failed", "succeeded", "working"),
+            ("succeeded", "failed", "failing"),
+        ] {
+            let chronological = vec![
+                application_execution_trace(older_outcome, "2026-09-23T11:00:00+00:00"),
+                application_execution_trace(newer_outcome, "2026-09-23T12:00:00+00:00"),
+            ];
+            for traces in [
+                chronological.clone(),
+                chronological.iter().rev().cloned().collect::<Vec<_>>(),
+            ] {
+                let application = application();
+                let mut nodes = vec![core_node()];
+                let mut edges = Vec::new();
+                add_catalog_ring(
+                    &mut nodes,
+                    &mut edges,
+                    std::slice::from_ref(&application),
+                    4,
+                    "application",
+                );
+
+                enrich_operational_state(&mut nodes, &[], &traces, &[]);
+
+                let node = nodes
+                    .iter()
+                    .find(|node| node.id == "application:research-mcp")
+                    .unwrap();
+                assert_eq!(node.connection_state, expected_state);
+                assert_eq!(node.operational_state, "available");
+                assert_eq!(node.usage_state, "observed");
+                assert_eq!(
+                    node.last_activity_at.as_deref(),
+                    Some("2026-09-23T12:00:00+00:00")
+                );
+
+                let mut active_traces = traces.clone();
+                for trace in &mut active_traces {
+                    trace.task_id = Some("task-1".to_string());
+                }
+                let mut active_task = task();
+                active_task.status = "running".to_string();
+                enrich_operational_state(
+                    &mut nodes,
+                    &[active_task],
+                    &active_traces,
+                    &[],
+                );
+                let active_node = nodes
+                    .iter()
+                    .find(|node| node.id == "application:research-mcp")
+                    .unwrap();
+                assert_eq!(active_node.operational_state, "in_use");
+                assert_eq!(active_node.connection_state, expected_state);
+            }
+        }
     }
 
     #[test]
