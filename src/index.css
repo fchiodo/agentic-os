@@ -3440,7 +3440,6 @@ button.catalog-row:hover {
   overflow: hidden;
   background:
     radial-gradient(circle at center, rgba(198, 97, 63, 0.07), transparent 15%),
-    repeating-radial-gradient(circle at center, transparent 0 14.6%, rgba(20, 20, 19, 0.055) 14.8% 15%, transparent 15.2% 24.7%),
     rgba(250, 249, 245, 0.94);
 }
 

@@ -33,7 +33,9 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("app data directory is unavailable");
-            let db_path = app_data_dir.join("agent-control.db");
+            let db_path = std::env::var_os("AGENTIC_OS_DB_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| app_data_dir.join("agent-control.db"));
             let db = Db::open(&db_path)
                 .unwrap_or_else(|err| panic!("failed to open app database at {db_path:?}: {err}"));
             memory::vault::ensure_vault()
@@ -113,6 +115,8 @@ pub fn run() {
             commands::memory_maintenance_run,
             commands::memory_operations_list,
             commands::memory_retrieval_benchmark,
+            commands::memory_retrieval_eval_cases_list,
+            commands::memory_retrieval_eval_case_save,
             commands::memory_orbit_map,
             commands::skills_distill,
         ])

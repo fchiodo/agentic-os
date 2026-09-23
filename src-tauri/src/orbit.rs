@@ -56,6 +56,10 @@ pub struct OrbitNode {
     pub domain: Option<String>,
     pub sensitivity: Option<String>,
     pub status: String,
+    pub operational_state: String,
+    pub domains: Vec<OrbitFacet>,
+    pub capabilities: Vec<OrbitFacet>,
+    pub last_activity_at: Option<String>,
     pub source_path: Option<String>,
     pub source_ref: String,
     pub group_id: Option<String>,
@@ -64,6 +68,14 @@ pub struct OrbitNode {
     pub updated_at: Option<String>,
     pub actions: Vec<String>,
     pub aggregate: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitFacet {
+    pub value: String,
+    pub evidence: String,
+    pub source_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +105,11 @@ struct TaskRecord {
     id: String,
     title: String,
     goal: String,
+    domain: String,
+    status: String,
+    origin_kind: String,
+    ontology_category_id: Option<String>,
+    updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +152,13 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
         domain: None,
         sensitivity: None,
         status: "active".to_string(),
+        operational_state: "ready".to_string(),
+        domains: Vec::new(),
+        capabilities: vec![
+            facet("local_control_plane", "declared", "runtime:agentic-os"),
+            facet("governed_execution", "declared", "runtime:agentic-os"),
+        ],
+        last_activity_at: None,
         source_path: None,
         source_ref: "runtime:agentic-os".to_string(),
         group_id: None,
@@ -149,11 +173,13 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
     let skill_items = catalog
         .iter()
         .filter(|item| item.kind == CatalogKind::Skill)
+        .filter(|item| catalog_visible_in_domain(item, domain))
         .cloned()
         .collect::<Vec<_>>();
     let routine_items = catalog
         .iter()
         .filter(|item| matches!(item.kind, CatalogKind::Routine | CatalogKind::Workflow))
+        .filter(|item| catalog_visible_in_domain(item, domain))
         .cloned()
         .collect::<Vec<_>>();
     let application_items = catalog
@@ -164,6 +190,7 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
                 CatalogKind::Plugin | CatalogKind::Mcp | CatalogKind::Automation
             )
         })
+        .filter(|item| catalog_visible_in_domain(item, domain))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -173,12 +200,16 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
     add_catalog_ring(&mut nodes, &mut edges, &application_items, 4, "application");
     add_temporal_relations(&nodes, &mut edges);
 
+    let tasks = load_tasks(db)?;
+    let traces = load_traces(db)?;
+    enrich_operational_state(&mut nodes, &tasks, &traces, &routine_items);
     let (tasks_scanned, traces_scanned) = add_observed_relations(
-        db,
         &nodes,
         &routine_items,
         &skill_items,
         &application_items,
+        &tasks,
+        &traces,
         &mut edges,
     )?;
 
@@ -291,6 +322,14 @@ fn add_catalog_ring(
             domain: None,
             sensitivity: None,
             status: "active".to_string(),
+            operational_state: "available".to_string(),
+            domains: aggregate_catalog_domains(&group_items),
+            capabilities: aggregate_catalog_capabilities(&group_items, kind),
+            last_activity_at: group_items
+                .iter()
+                .filter_map(|item| item.updated_at)
+                .max()
+                .and_then(catalog_timestamp),
             source_path: None,
             source_ref: format!("registry-group:{kind}:{group_label}"),
             group_id: None,
@@ -323,12 +362,16 @@ fn add_catalog_ring(
                 domain: None,
                 sensitivity: None,
                 status: "active".to_string(),
+                operational_state: "available".to_string(),
+                domains: catalog_domains(item),
+                capabilities: catalog_capabilities(item, kind),
+                last_activity_at: item.updated_at.and_then(catalog_timestamp),
                 source_path: Some(item.path.clone()),
                 source_ref: format!("catalog:{}", item.id),
                 group_id: Some(group_id.clone()),
                 count: 1,
                 preview: item.summary.clone(),
-                updated_at: item.updated_at.map(|value| value.to_string()),
+                updated_at: item.updated_at.and_then(catalog_timestamp),
                 actions: vec!["inspect_source".to_string()],
                 aggregate: false,
             });
@@ -367,6 +410,18 @@ fn add_memory_ring(
             domain: Some(domain.to_string()),
             sensitivity: None,
             status: "active".to_string(),
+            operational_state: if domain_memories.iter().any(|memory| memory.status == "stale") {
+                "attention".to_string()
+            } else {
+                "ready".to_string()
+            },
+            domains: vec![facet(domain, "declared", &format!("vault-domain:{domain}"))],
+            capabilities: vec![facet("governed_memory", "declared", &format!("vault-domain:{domain}"))],
+            last_activity_at: domain_memories
+                .iter()
+                .map(|memory| memory.updated_at.as_str())
+                .max()
+                .map(str::to_string),
             source_path: None,
             source_ref: format!("vault-domain:{domain}"),
             group_id: None,
@@ -402,6 +457,14 @@ fn add_memory_ring(
                 domain: Some(memory.domain.clone()),
                 sensitivity: Some(memory.sensitivity.clone()),
                 status: memory.status.clone(),
+                operational_state: memory.status.clone(),
+                domains: vec![facet(&memory.domain, "declared", &memory.vault_path)],
+                capabilities: vec![facet(
+                    &format!("memory:{}", memory.mem_type),
+                    "declared",
+                    &memory.vault_path,
+                )],
+                last_activity_at: Some(memory.updated_at.clone()),
                 source_path: Some(memory.vault_path.clone()),
                 source_ref: format!("memory:{}", memory.id),
                 group_id: Some(domain_id.clone()),
@@ -423,15 +486,14 @@ fn add_memory_ring(
 }
 
 fn add_observed_relations(
-    db: &Db,
     nodes: &[OrbitNode],
     routines: &[CatalogItem],
     skills: &[CatalogItem],
     applications: &[CatalogItem],
+    tasks: &[TaskRecord],
+    traces: &[TraceRecord],
     edges: &mut Vec<OrbitEdge>,
 ) -> AppResult<(usize, usize)> {
-    let tasks = load_tasks(db)?;
-    let traces = load_traces(db)?;
     let tasks_scanned = tasks.len();
     let traces_scanned = traces.len();
     let memory_by_path = nodes
@@ -470,6 +532,25 @@ fn add_observed_relations(
 
         for trace in task_traces {
             if trace.kind == "context" {
+                for memory_id in structured_memory_ids(&trace.detail) {
+                    let target = format!("memory:{memory_id}");
+                    if nodes.iter().any(|node| node.id == target) {
+                        merge_edge(
+                            edges,
+                            &mut edge_index,
+                            &routine_id,
+                            &target,
+                            "consulted",
+                            if routine_evidence == "observed" { "observed" } else { "inferred" },
+                            OrbitProvenance {
+                                kind: "structured_event".to_string(),
+                                reference: format!("audit:{}", trace.run_id),
+                                detail: format!("Memory id persisted in task {} context event", task.id),
+                                ts: Some(trace.ts.clone()),
+                            },
+                        );
+                    }
+                }
                 for path in trace
                     .detail
                     .get("injected")
@@ -479,13 +560,19 @@ fn add_observed_relations(
                     .filter_map(Value::as_str)
                 {
                     if let Some(memory_id) = memory_by_path.get(path) {
+                        if structured_memory_ids(&trace.detail)
+                            .iter()
+                            .any(|id| memory_id == &format!("memory:{id}"))
+                        {
+                            continue;
+                        }
                         merge_edge(
                             edges,
                             &mut edge_index,
                             &routine_id,
                             memory_id,
                             "consulted",
-                            routine_evidence,
+                            "inferred",
                             OrbitProvenance {
                                 kind: "trace".to_string(),
                                 reference: format!("audit:{}", trace.run_id),
@@ -497,7 +584,25 @@ fn add_observed_relations(
                 }
             }
 
-            if let Some(path) = trace.detail.get("vaultPath").and_then(Value::as_str) {
+            if let Some(memory_id) = trace.detail.get("memoryId").and_then(Value::as_str) {
+                let target = format!("memory:{memory_id}");
+                if nodes.iter().any(|node| node.id == target) {
+                    merge_edge(
+                        edges,
+                        &mut edge_index,
+                        &routine_id,
+                        &target,
+                        "produced",
+                        if routine_evidence == "observed" { "observed" } else { "inferred" },
+                        OrbitProvenance {
+                            kind: "structured_event".to_string(),
+                            reference: format!("audit:{}", trace.run_id),
+                            detail: trace.summary.clone(),
+                            ts: Some(trace.ts.clone()),
+                        },
+                    );
+                }
+            } else if let Some(path) = trace.detail.get("vaultPath").and_then(Value::as_str) {
                 if let Some(memory_id) = memory_by_path.get(path) {
                     merge_edge(
                         edges,
@@ -505,7 +610,7 @@ fn add_observed_relations(
                         &routine_id,
                         memory_id,
                         "produced",
-                        routine_evidence,
+                        "inferred",
                         OrbitProvenance {
                             kind: "trace".to_string(),
                             reference: format!("audit:{}", trace.run_id),
@@ -528,7 +633,11 @@ fn add_observed_relations(
                     ("used", "application", applications),
                 ] {
                     for item in items {
-                        if let Some(evidence) = catalog_trace_match(item, &trace_text) {
+                        let structured = structured_catalog_ids(&trace.detail, kind)
+                            .iter()
+                            .any(|id| id == &item.id);
+                        if structured || catalog_trace_match(item, &trace_text).is_some() {
+                            let evidence = if structured { "observed" } else { "inferred" };
                             let combined_evidence =
                                 if routine_evidence == "observed" && evidence == "observed" {
                                     "observed"
@@ -543,7 +652,7 @@ fn add_observed_relations(
                                 relation,
                                 combined_evidence,
                                 OrbitProvenance {
-                                    kind: "trace".to_string(),
+                                    kind: if structured { "structured_event" } else { "trace_inference" }.to_string(),
                                     reference: format!("audit:{}", trace.run_id),
                                     detail: trace.summary.clone(),
                                     ts: Some(trace.ts.clone()),
@@ -561,14 +670,21 @@ fn add_observed_relations(
 
 fn load_tasks(db: &Db) -> AppResult<Vec<TaskRecord>> {
     db.with_conn(|conn| {
-        let mut stmt =
-            conn.prepare("SELECT id, title, goal FROM tasks ORDER BY updated_at DESC LIMIT 500")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, goal, domain, status, origin_kind, ontology_category_id, updated_at
+             FROM tasks ORDER BY updated_at DESC LIMIT 500",
+        )?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(TaskRecord {
                     id: row.get(0)?,
                     title: row.get(1)?,
                     goal: row.get(2)?,
+                    domain: row.get(3)?,
+                    status: row.get(4)?,
+                    origin_kind: row.get(5)?,
+                    ontology_category_id: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -601,11 +717,134 @@ fn load_traces(db: &Db) -> AppResult<Vec<TraceRecord>> {
     })
 }
 
+fn structured_catalog_ids(detail: &Value, kind: &str) -> Vec<String> {
+    detail
+        .get("catalogRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|reference| reference.get("kind").and_then(Value::as_str) == Some(kind))
+        .filter_map(|reference| reference.get("catalogId").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn structured_memory_ids(detail: &Value) -> Vec<String> {
+    detail
+        .get("memoryRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|reference| reference.get("memoryId").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn enrich_operational_state(
+    nodes: &mut [OrbitNode],
+    tasks: &[TaskRecord],
+    traces: &[TraceRecord],
+    routines: &[CatalogItem],
+) {
+    if let Some(core) = nodes.iter_mut().find(|node| node.id == "core:agentic-os") {
+        core.operational_state = if tasks.iter().any(|task| task_is_active(&task.status)) {
+            "running"
+        } else if tasks
+            .iter()
+            .any(|task| matches!(task.status.as_str(), "failed" | "waiting_for_approval"))
+        {
+            "attention"
+        } else {
+            "ready"
+        }
+        .to_string();
+        core.last_activity_at = tasks.iter().map(|task| task.updated_at.as_str()).max().map(str::to_string);
+    }
+
+    for task in tasks {
+        let task_traces = traces
+            .iter()
+            .filter(|trace| trace.task_id.as_deref() == Some(task.id.as_str()) || trace.run_id == task.id)
+            .collect::<Vec<_>>();
+        if let Some((routine, evidence)) = match_task_to_routine(task, routines, &task_traces) {
+            if let Some(node) = nodes
+                .iter_mut()
+                .find(|node| node.id == format!("routine:{}", routine.id))
+            {
+                apply_task_state(node, task, evidence);
+            }
+        }
+
+        for trace in task_traces {
+            for kind in ["skill", "application"] {
+                for catalog_id in structured_catalog_ids(&trace.detail, kind) {
+                    if let Some(node) = nodes.iter_mut().find(|node| node.id == format!("{kind}:{catalog_id}")) {
+                        node.operational_state = match task.status.as_str() {
+                            status if task_is_active(status) => "in_use",
+                            "failed" => "attention",
+                            _ => "available",
+                        }
+                        .to_string();
+                        if node.last_activity_at.as_deref().unwrap_or("") < trace.ts.as_str() {
+                            node.last_activity_at = Some(trace.ts.clone());
+                        }
+                        push_facet(&mut node.domains, facet(&task.domain, "observed", &format!("task:{}", task.id)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn task_is_active(status: &str) -> bool {
+    matches!(
+        status,
+        "planned" | "running" | "waiting_for_tool" | "resuming" | "verifying"
+    )
+}
+
+fn apply_task_state(node: &mut OrbitNode, task: &TaskRecord, evidence: &str) {
+    if node.last_activity_at.as_deref().unwrap_or("") <= task.updated_at.as_str() {
+        node.operational_state = task.status.clone();
+        node.last_activity_at = Some(task.updated_at.clone());
+    }
+    push_facet(&mut node.domains, facet(&task.domain, evidence, &format!("task:{}", task.id)));
+    push_facet(
+        &mut node.capabilities,
+        facet(&format!("origin:{}", task.origin_kind), evidence, &format!("task:{}", task.id)),
+    );
+    if let Some(category) = task.ontology_category_id.as_deref() {
+        push_facet(
+            &mut node.capabilities,
+            facet(&format!("ontology:{category}"), evidence, &format!("task:{}", task.id)),
+        );
+    }
+}
+
+fn push_facet(facets: &mut Vec<OrbitFacet>, candidate: OrbitFacet) {
+    if !facets.iter().any(|existing| existing.value == candidate.value && existing.evidence == candidate.evidence) {
+        facets.push(candidate);
+    }
+}
+
 fn match_task_to_routine<'a>(
     task: &TaskRecord,
     routines: &'a [CatalogItem],
     traces: &[&TraceRecord],
 ) -> Option<(&'a CatalogItem, &'static str)> {
+    for trace in traces {
+        if let Some(id) = trace
+            .detail
+            .get("routineId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| structured_catalog_ids(&trace.detail, "routine").into_iter().next())
+        {
+            if let Some(routine) = routines.iter().find(|routine| routine.id == id) {
+                return Some((routine, "observed"));
+            }
+        }
+    }
     let trace_text = traces
         .iter()
         .map(|trace| {
@@ -627,7 +866,7 @@ fn match_task_to_routine<'a>(
         .filter(|candidate| candidate.chars().count() >= 4)
         .any(|candidate| trace_text.contains(&candidate.to_lowercase()))
     }) {
-        return Some((routine, "observed"));
+        return Some((routine, "inferred"));
     }
 
     let haystack = stable_key(&format!("{} {}", task.title, task.goal));
@@ -651,7 +890,7 @@ fn catalog_trace_match(item: &CatalogItem, trace_text: &str) -> Option<&'static 
         .filter(|candidate| candidate.chars().count() >= 4)
         .any(|candidate| trace_text.contains(&candidate.to_lowercase()))
     {
-        return Some("observed");
+        return Some("inferred");
     }
 
     let names = [stable_key(&item.name), stable_key(&item.display_name)];
@@ -728,6 +967,75 @@ fn edge_key(source: &str, target: &str, relation: &str, evidence: &str) -> Strin
     format!("{source}|{target}|{relation}|{evidence}")
 }
 
+fn facet(value: &str, evidence: &str, source_ref: &str) -> OrbitFacet {
+    OrbitFacet {
+        value: value.to_string(),
+        evidence: evidence.to_string(),
+        source_ref: source_ref.to_string(),
+    }
+}
+
+fn catalog_timestamp(value: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(value).map(|timestamp| timestamp.to_rfc3339())
+}
+
+fn catalog_domains(item: &CatalogItem) -> Vec<OrbitFacet> {
+    item.tags
+        .iter()
+        .filter_map(|tag| {
+            let value = tag.strip_prefix("domain:").unwrap_or(tag).to_lowercase();
+            DOMAINS
+                .contains(&value.as_str())
+                .then(|| facet(&value, "declared", &format!("catalog:{}", item.id)))
+        })
+        .collect()
+}
+
+fn catalog_visible_in_domain(item: &CatalogItem, domain: Option<&str>) -> bool {
+    let Some(domain) = domain else {
+        return true;
+    };
+    let declared = catalog_domains(item);
+    declared.is_empty() || declared.iter().any(|entry| entry.value == domain)
+}
+
+fn catalog_capabilities(item: &CatalogItem, kind: &str) -> Vec<OrbitFacet> {
+    let source = format!("catalog:{}", item.id);
+    let mut values = std::collections::BTreeSet::from([format!("{kind}:{}", item.name)]);
+    if let Some(category) = item.category.as_deref().filter(|value| !value.trim().is_empty()) {
+        values.insert(format!("category:{category}"));
+    }
+    for tag in &item.tags {
+        if let Some(value) = tag.strip_prefix("capability:") {
+            values.insert(value.to_string());
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| facet(&value, "declared", &source))
+        .collect()
+}
+
+fn aggregate_catalog_domains(items: &[&CatalogItem]) -> Vec<OrbitFacet> {
+    let mut values = BTreeMap::new();
+    for item in items {
+        for domain in catalog_domains(item) {
+            values.entry(domain.value.clone()).or_insert(domain);
+        }
+    }
+    values.into_values().collect()
+}
+
+fn aggregate_catalog_capabilities(items: &[&CatalogItem], kind: &str) -> Vec<OrbitFacet> {
+    let mut values = BTreeMap::new();
+    for item in items {
+        for capability in catalog_capabilities(item, kind) {
+            values.entry(capability.value.clone()).or_insert(capability);
+        }
+    }
+    values.into_values().collect()
+}
+
 fn stable_key(value: &str) -> String {
     let mut result = String::new();
     let mut previous_dash = false;
@@ -760,5 +1068,99 @@ fn domain_label(domain: &str) -> &'static str {
         "finance" => "Finance",
         "research" => "Research",
         _ => "Memory",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn routine() -> CatalogItem {
+        CatalogItem {
+            id: "daily-brief".to_string(),
+            kind: CatalogKind::Routine,
+            name: "daily-brief".to_string(),
+            display_name: "Daily Brief".to_string(),
+            summary: None,
+            path: "/vault/routines/daily-brief.toml".to_string(),
+            origin: "workspace".to_string(),
+            group: "Briefing".to_string(),
+            tags: vec!["domain:work".to_string()],
+            version: None,
+            category: Some("briefing".to_string()),
+            updated_at: None,
+            provider: "local".to_string(),
+            detector: "test".to_string(),
+            entrypoint: Some("run-daily-brief".to_string()),
+            confidence: 1.0,
+        }
+    }
+
+    fn task() -> TaskRecord {
+        TaskRecord {
+            id: "task-1".to_string(),
+            title: "Unrelated title".to_string(),
+            goal: "Unrelated goal".to_string(),
+            domain: "work".to_string(),
+            status: "completed".to_string(),
+            origin_kind: "manual".to_string(),
+            ontology_category_id: None,
+            updated_at: "2026-09-23T10:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn structured_catalog_reference_is_observed() {
+        let trace = TraceRecord {
+            run_id: "task-1".to_string(),
+            task_id: Some("task-1".to_string()),
+            ts: "2026-09-23T10:00:00Z".to_string(),
+            kind: "tool_call".to_string(),
+            summary: "called tool".to_string(),
+            detail: serde_json::json!({
+                "catalogRefs": [{"catalogId": "daily-brief", "kind": "routine"}]
+            }),
+        };
+        let routines = vec![routine()];
+        let matched = match_task_to_routine(&task(), &routines, &[&trace]).unwrap();
+        assert_eq!(matched.0.id, "daily-brief");
+        assert_eq!(matched.1, "observed");
+    }
+
+    #[test]
+    fn text_path_match_remains_inferred() {
+        let routine = routine();
+        let trace_text = format!("executed {}", routine.path);
+        assert_eq!(catalog_trace_match(&routine, &trace_text), Some("inferred"));
+    }
+
+    #[test]
+    fn map_composes_from_the_real_registry_without_preview_nodes() {
+        let db_path = std::env::temp_dir().join(format!(
+            "agentic-os-orbit-real-registry-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Db::open(&db_path).unwrap();
+        let map = build(&db, None, false).unwrap();
+        println!(
+            "MILESTONE2_ORBIT={{\"skills\":{},\"memories\":{},\"routines\":{},\"applications\":{},\"relations\":{},\"composeMs\":{:.3}}}",
+            map.counts.skills,
+            map.counts.memories,
+            map.counts.routines,
+            map.counts.applications,
+            map.counts.relations,
+            map.metrics.compose_ms,
+        );
+        assert!(map.nodes.iter().any(|node| node.id == "core:agentic-os"));
+        assert_eq!(
+            map.nodes
+                .iter()
+                .filter(|node| node.kind == "memory_domain")
+                .count(),
+            6
+        );
+        assert!(map.nodes.iter().all(|node| node.status != "preview"));
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
     }
 }

@@ -158,6 +158,8 @@ export const memoryOperationRecordSchema = z.object({
 export const retrievalBenchmarkMetricsSchema = z.object({
   topOneAccuracy: z.number().min(0).max(1),
   sourceHitRateAtFive: z.number().min(0).max(1),
+  sourceRecallAtFive: z.number().min(0).max(1),
+  meanReciprocalRank: z.number().min(0).max(1),
   latencyP50Ms: z.number().nonnegative(),
   latencyP95Ms: z.number().nonnegative(),
   outboundCostUsd: z.number().nonnegative(),
@@ -167,9 +169,30 @@ export const retrievalBenchmarkReportSchema = z.object({
   generatedAt: z.string(),
   corpusKind: z.string(),
   cases: z.number().int().nonnegative(),
+  corpusMemories: z.number().int().nonnegative(),
   baseline: retrievalBenchmarkMetricsSchema,
   candidate: retrievalBenchmarkMetricsSchema,
+  production: retrievalBenchmarkMetricsSchema,
+  fuzzyScanCount: z.number().int().nonnegative(),
+  semanticBackend: z.string(),
   notes: z.array(z.string()),
+})
+
+export const retrievalEvalCaseSchema = z.object({
+  id: z.string(),
+  domain: z.string(),
+  question: z.string(),
+  expectedSources: z.array(z.string()).min(1),
+  provenance: z.string(),
+  status: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+})
+
+export const retrievalEvalCaseRequestSchema = z.object({
+  domain: z.string(),
+  question: z.string().min(4).max(1000),
+  expectedSources: z.array(z.string()).min(1).max(20),
 })
 
 export const manualSaveRequestSchema = z.object({
@@ -308,6 +331,12 @@ export const memorySearchOptsSchema = z.object({
   limit: z.number().optional(),
 })
 
+export const orbitFacetSchema = z.object({
+  value: z.string(),
+  evidence: z.enum(['declared', 'observed', 'inferred']),
+  sourceRef: z.string(),
+})
+
 export const orbitNodeSchema = z.object({
   id: z.string(),
   kind: z.string(),
@@ -317,6 +346,10 @@ export const orbitNodeSchema = z.object({
   domain: z.string().nullable(),
   sensitivity: z.string().nullable(),
   status: z.string(),
+  operationalState: z.string(),
+  domains: z.array(orbitFacetSchema),
+  capabilities: z.array(orbitFacetSchema),
+  lastActivityAt: z.string().nullable(),
   sourcePath: z.string().nullable(),
   sourceRef: z.string(),
   groupId: z.string().nullable(),
@@ -379,6 +412,8 @@ export type ReindexResult = z.infer<typeof reindexResultSchema>
 export type MaintenanceResult = z.infer<typeof maintenanceResultSchema>
 export type MemoryOperationRecord = z.infer<typeof memoryOperationRecordSchema>
 export type RetrievalBenchmarkReport = z.infer<typeof retrievalBenchmarkReportSchema>
+export type RetrievalEvalCase = z.infer<typeof retrievalEvalCaseSchema>
+export type RetrievalEvalCaseRequest = z.infer<typeof retrievalEvalCaseRequestSchema>
 export type ManualSaveRequest = z.infer<typeof manualSaveRequestSchema>
 export type MemoryAskRequest = z.infer<typeof memoryAskRequestSchema>
 export type MemoryCitation = z.infer<typeof memoryCitationSchema>
@@ -396,5 +431,6 @@ export type DocumentSourceReadResult = z.infer<typeof documentSourceReadResultSc
 export type ProposalDecideRequest = z.infer<typeof proposalDecideRequestSchema>
 export type MemorySearchOpts = z.infer<typeof memorySearchOptsSchema>
 export type OrbitNode = z.infer<typeof orbitNodeSchema>
+export type OrbitFacet = z.infer<typeof orbitFacetSchema>
 export type OrbitEdge = z.infer<typeof orbitEdgeSchema>
 export type OrbitMap = z.infer<typeof orbitMapSchema>

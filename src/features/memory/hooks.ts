@@ -14,6 +14,8 @@ import {
   memoryRead,
   memoryReindex,
   memoryRetrievalBenchmark,
+  memoryRetrievalEvalCaseSave,
+  memoryRetrievalEvalCasesList,
   memorySaveManual,
   memorySearch,
   memoryTree,
@@ -24,6 +26,7 @@ import type {
   ManualSaveRequest,
   MemoryAnswerFeedbackRequest,
   MemoryAskRequest,
+  RetrievalEvalCaseRequest,
   ProposalDecideRequest,
 } from '@/features/memory/schema'
 
@@ -33,6 +36,7 @@ export const memoryProposalsQueryKey = ['memory', 'proposals'] as const
 export const memoryDocumentImportsQueryKey = ['memory', 'document-imports'] as const
 export const memoryOrbitQueryKey = ['memory', 'orbit'] as const
 export const memoryOperationsQueryKey = ['memory', 'operations'] as const
+export const memoryRetrievalEvalCasesQueryKey = ['memory', 'retrieval-eval-cases'] as const
 
 export function useMemoryTree(domain?: string) {
   return useQuery({
@@ -186,6 +190,23 @@ export function useMemoryOperations() {
 
 export function useMemoryRetrievalBenchmark() {
   return useMutation({ mutationFn: memoryRetrievalBenchmark })
+}
+
+export function useMemoryRetrievalEvalCases() {
+  return useQuery({
+    queryKey: memoryRetrievalEvalCasesQueryKey,
+    queryFn: memoryRetrievalEvalCasesList,
+  })
+}
+
+export function useMemoryRetrievalEvalCaseSave() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (request: RetrievalEvalCaseRequest) => memoryRetrievalEvalCaseSave(request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: memoryRetrievalEvalCasesQueryKey })
+    },
+  })
 }
 
 export function useMemoryOrbitMap(domain?: string, includeSensitive = false) {

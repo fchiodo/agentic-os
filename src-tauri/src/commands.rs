@@ -274,7 +274,7 @@ use crate::memory::{
     MaintenanceResult, ManualSaveRequest, MemoryAnswer, MemoryAnswerFeedbackRequest,
     MemoryAskRequest, MemoryIngestRequest, MemoryIngestResult, MemoryOperationRecord,
     MemoryReadResult, MemorySearchOpts, MemoryWriteProposal, ProposalDecideRequest, ReindexResult,
-    RetrievalBenchmarkReport, ScoredMemory, VaultNode,
+    RetrievalBenchmarkReport, RetrievalEvalCase, RetrievalEvalCaseRequest, ScoredMemory, VaultNode,
 };
 
 #[tauri::command]
@@ -459,6 +459,21 @@ pub fn memory_operations_list(db: State<'_, Db>) -> Result<Vec<MemoryOperationRe
 #[tauri::command]
 pub fn memory_retrieval_benchmark(db: State<'_, Db>) -> Result<RetrievalBenchmarkReport, String> {
     memory::retrieval::benchmark(&db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_retrieval_eval_cases_list(
+    db: State<'_, Db>,
+) -> Result<Vec<RetrievalEvalCase>, String> {
+    memory::retrieval::list_eval_cases(&db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_retrieval_eval_case_save(
+    db: State<'_, Db>,
+    request: RetrievalEvalCaseRequest,
+) -> Result<RetrievalEvalCase, String> {
+    memory::retrieval::save_eval_case(&db, &request).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

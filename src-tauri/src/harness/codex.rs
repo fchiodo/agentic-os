@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -12,6 +13,7 @@ use crate::error::AppResult;
 use crate::orchestrator;
 
 pub const TASK_EVENT_CHANNEL: &str = "agent-control://task-event";
+static EVENT_CATALOG: OnceLock<Vec<crate::models::CatalogItem>> = OnceLock::new();
 
 /// Spawns `codex exec --json` for the given task and streams its output
 /// into the events table (live UI) and the audit table (permanent trace),
@@ -106,6 +108,7 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                 &format!("Injected {} memories into context", context.injected_paths.len()),
                 json!({
                     "injected": context.injected_paths,
+                    "memoryRefs": context.memory_refs,
                     "unverified": context.unverified_paths,
                 }),
                 None,
@@ -413,6 +416,8 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
             &outcome,
         ) {
             Ok(Some(proposal)) => {
+                let memory_id = crate::memory::frontmatter::parse(&proposal.new_content)
+                    .map(|(frontmatter, _)| frontmatter.id);
                 record(
                     app,
                     db,
@@ -420,7 +425,12 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                     "memory_captured",
                     "output",
                     "Run captured to memory",
-                    json!({ "proposalId": proposal.id, "vaultPath": proposal.vault_path, "status": proposal.status }),
+                    json!({
+                        "proposalId": proposal.id,
+                        "memoryId": memory_id,
+                        "vaultPath": proposal.vault_path,
+                        "status": proposal.status,
+                    }),
                     None,
                     None,
                 );
@@ -505,6 +515,7 @@ fn record(
     tokens: Option<i64>,
     cost_usd: Option<f64>,
 ) {
+    let detail = enrich_structured_refs(detail, audit_kind);
     let seq = match orchestrator::append_event(db, task_id, event_kind, detail.clone()) {
         Ok(seq) => seq,
         Err(err) => {
@@ -530,6 +541,77 @@ fn record(
     if let Err(err) = app.emit(TASK_EVENT_CHANNEL, &event) {
         log::error!("failed to emit task event: {err}");
     }
+}
+
+fn enrich_structured_refs(mut detail: Value, audit_kind: &str) -> Value {
+    if audit_kind != "tool_call" {
+        return detail;
+    }
+    let Some(object) = detail.as_object_mut() else {
+        return detail;
+    };
+    let structured_values = [
+        ("command", detail_pointer_string(object, "/command")),
+        ("command", detail_pointer_string(object, "/item/command")),
+        ("path", detail_pointer_string(object, "/path")),
+        ("path", detail_pointer_string(object, "/item/path")),
+        ("tool", detail_pointer_string(object, "/tool")),
+        ("tool", detail_pointer_string(object, "/toolName")),
+        ("tool", detail_pointer_string(object, "/item/name")),
+    ];
+    let catalog = EVENT_CATALOG.get_or_init(|| {
+        crate::discovery::discover()
+            .map(|discovery| discovery.catalog.items)
+            .unwrap_or_default()
+    });
+    let mut refs = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for item in catalog {
+        let kind = match item.kind {
+            crate::models::CatalogKind::Skill => "skill",
+            crate::models::CatalogKind::Routine | crate::models::CatalogKind::Workflow => "routine",
+            crate::models::CatalogKind::Plugin
+            | crate::models::CatalogKind::Mcp
+            | crate::models::CatalogKind::Automation => "application",
+            _ => continue,
+        };
+        let matched_field = structured_values.iter().find_map(|(field, value)| {
+            let value = value.as_deref()?;
+            let exact_name = matches!(*field, "tool")
+                && (value.eq_ignore_ascii_case(&item.name)
+                    || value.eq_ignore_ascii_case(&item.display_name));
+            let exact_path = matches!(*field, "path") && value == item.path;
+            let command_target = matches!(*field, "command")
+                && [item.entrypoint.as_deref().unwrap_or(""), item.path.as_str()]
+                    .iter()
+                    .filter(|candidate| candidate.chars().count() >= 4)
+                    .any(|candidate| value.contains(candidate));
+            (exact_name || exact_path || command_target).then_some(*field)
+        });
+        if let Some(field) = matched_field {
+            if seen.insert(item.id.clone()) {
+                refs.push(json!({
+                    "catalogId": item.id.clone(),
+                    "kind": kind,
+                    "matchField": field,
+                }));
+            }
+        }
+    }
+    if !refs.is_empty() {
+        object.insert("catalogRefs".to_string(), Value::Array(refs));
+    }
+    detail
+}
+
+fn detail_pointer_string(
+    object: &serde_json::Map<String, Value>,
+    pointer: &str,
+) -> Option<String> {
+    Value::Object(object.clone())
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn emit_status(app: &AppHandle, task_id: &str, status: TaskStatus) {

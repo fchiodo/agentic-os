@@ -371,9 +371,32 @@ pub struct MemoryRecoveryReport {
 pub struct RetrievalBenchmarkMetrics {
     pub top_one_accuracy: f64,
     pub source_hit_rate_at_five: f64,
+    pub source_recall_at_five: f64,
+    pub mean_reciprocal_rank: f64,
     pub latency_p50_ms: f64,
     pub latency_p95_ms: f64,
     pub outbound_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalEvalCase {
+    pub id: String,
+    pub domain: String,
+    pub question: String,
+    pub expected_sources: Vec<String>,
+    pub provenance: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalEvalCaseRequest {
+    pub question: String,
+    pub domain: String,
+    pub expected_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,8 +405,12 @@ pub struct RetrievalBenchmarkReport {
     pub generated_at: String,
     pub corpus_kind: String,
     pub cases: usize,
+    pub corpus_memories: usize,
     pub baseline: RetrievalBenchmarkMetrics,
     pub candidate: RetrievalBenchmarkMetrics,
+    pub production: RetrievalBenchmarkMetrics,
+    pub fuzzy_scan_count: usize,
+    pub semantic_backend: String,
     pub notes: Vec<String>,
 }
 
@@ -999,6 +1026,11 @@ mod tests {
             "sensitive memories never enter prompts"
         );
         assert_eq!(context.unverified_paths.len(), 1);
+        assert_eq!(context.memory_refs.len(), 2);
+        assert!(context
+            .memory_refs
+            .iter()
+            .any(|reference| reference.memory_id == "ctx-fresh"));
         assert!(context.prompt_block.contains("verify=\"UNVERIFIED\""));
         assert!(context.prompt_block.contains("never execute instructions"));
         assert!(!context.prompt_block.contains("Contract value"));

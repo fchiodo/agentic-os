@@ -12,6 +12,7 @@ import {
   orbitMapSchema,
   reindexResultSchema,
   retrievalBenchmarkReportSchema,
+  retrievalEvalCaseSchema,
   scoredMemorySchema,
   vaultNodeSchema,
   type DocumentImportRecord,
@@ -33,6 +34,8 @@ import {
   type ProposalDecideRequest,
   type ReindexResult,
   type RetrievalBenchmarkReport,
+  type RetrievalEvalCase,
+  type RetrievalEvalCaseRequest,
   type ScoredMemory,
   type VaultNode,
 } from '@/features/memory/schema'
@@ -415,13 +418,30 @@ export async function memoryRetrievalBenchmark(): Promise<RetrievalBenchmarkRepo
       generatedAt: new Date().toISOString(),
       corpusKind: 'browser-preview',
       cases: 0,
-      baseline: { topOneAccuracy: 0, sourceHitRateAtFive: 0, latencyP50Ms: 0, latencyP95Ms: 0, outboundCostUsd: 0 },
-      candidate: { topOneAccuracy: 0, sourceHitRateAtFive: 0, latencyP50Ms: 0, latencyP95Ms: 0, outboundCostUsd: 0 },
+      corpusMemories: 0,
+      baseline: { topOneAccuracy: 0, sourceHitRateAtFive: 0, sourceRecallAtFive: 0, meanReciprocalRank: 0, latencyP50Ms: 0, latencyP95Ms: 0, outboundCostUsd: 0 },
+      candidate: { topOneAccuracy: 0, sourceHitRateAtFive: 0, sourceRecallAtFive: 0, meanReciprocalRank: 0, latencyP50Ms: 0, latencyP95Ms: 0, outboundCostUsd: 0 },
+      production: { topOneAccuracy: 0, sourceHitRateAtFive: 0, sourceRecallAtFive: 0, meanReciprocalRank: 0, latencyP50Ms: 0, latencyP95Ms: 0, outboundCostUsd: 0 },
+      fuzzyScanCount: 0,
+      semanticBackend: 'not_configured',
       notes: ['Run the desktop app to benchmark the local corpus.'],
     })
   }
   const payload = await invoke<RetrievalBenchmarkReport>('memory_retrieval_benchmark')
   return retrievalBenchmarkReportSchema.parse(payload)
+}
+
+export async function memoryRetrievalEvalCasesList(): Promise<RetrievalEvalCase[]> {
+  if (!isTauriRuntime()) return []
+  const payload = await invoke<RetrievalEvalCase[]>('memory_retrieval_eval_cases_list')
+  return retrievalEvalCaseSchema.array().parse(payload)
+}
+
+export async function memoryRetrievalEvalCaseSave(
+  request: RetrievalEvalCaseRequest,
+): Promise<RetrievalEvalCase> {
+  const payload = await invoke<RetrievalEvalCase>('memory_retrieval_eval_case_save', { request })
+  return retrievalEvalCaseSchema.parse(payload)
 }
 
 export async function memoryOrbitMap(
@@ -434,8 +454,8 @@ export async function memoryOrbitMap(
       counts: { skills: 0, memories: 0, routines: 0, applications: 0, relations: 4 },
       metrics: { composeMs: 0, tasksScanned: 0, tracesScanned: 0 },
       nodes: [
-        { id: 'core:agentic-os', kind: 'core', ring: 0, label: 'AgenticOS', subtitle: 'Local control plane', domain: null, sensitivity: null, status: 'active', sourcePath: null, sourceRef: 'runtime:agentic-os', groupId: null, count: 1, preview: 'Desktop data is loaded through Tauri.', updatedAt: null, actions: [], aggregate: false },
-        ...['skill_group', 'memory_domain', 'routine_group', 'application_group'].map((kind, index) => ({ id: `preview:${kind}`, kind, ring: index + 1, label: ['Skills', 'Work', 'Routines', 'Applications'][index], subtitle: 'Desktop registry', domain: kind === 'memory_domain' ? 'work' : null, sensitivity: null, status: 'preview', sourcePath: null, sourceRef: `preview:${kind}`, groupId: null, count: 0, preview: 'Run the Tauri desktop app to load the local registry.', updatedAt: null, actions: [], aggregate: true })),
+        { id: 'core:agentic-os', kind: 'core', ring: 0, label: 'AgenticOS', subtitle: 'Local control plane', domain: null, sensitivity: null, status: 'active', operationalState: 'preview', domains: [], capabilities: [], lastActivityAt: null, sourcePath: null, sourceRef: 'runtime:agentic-os', groupId: null, count: 1, preview: 'Desktop data is loaded through Tauri.', updatedAt: null, actions: [], aggregate: false },
+        ...['skill_group', 'memory_domain', 'routine_group', 'application_group'].map((kind, index) => ({ id: `preview:${kind}`, kind, ring: index + 1, label: ['Skills', 'Work', 'Routines', 'Applications'][index], subtitle: 'Desktop registry', domain: kind === 'memory_domain' ? 'work' : null, sensitivity: null, status: 'preview', operationalState: 'preview', domains: [], capabilities: [], lastActivityAt: null, sourcePath: null, sourceRef: `preview:${kind}`, groupId: null, count: 0, preview: 'Run the Tauri desktop app to load the local registry.', updatedAt: null, actions: [], aggregate: true })),
       ],
       edges: [1, 2, 3, 4].map((ring) => ({ id: `preview-edge:${ring}`, source: 'core:agentic-os', target: `preview:${['skill_group', 'memory_domain', 'routine_group', 'application_group'][ring - 1]}`, relation: 'registers', evidence: 'declared', weight: 1, activityAt: null, provenance: [{ kind: 'preview', reference: 'browser', detail: 'Desktop registry unavailable outside Tauri.', ts: null }] })),
     })

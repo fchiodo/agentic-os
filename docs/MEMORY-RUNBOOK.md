@@ -8,6 +8,8 @@ and the vault is an independent Git repository.
 
 - Default vault: `~/AgenticOS/vault`.
 - Override for managed installations: `AGENTIC_OS_VAULT_ROOT`.
+- The app database defaults to the Tauri app-data directory. Development and
+  isolated demos may override it with `AGENTIC_OS_DB_PATH`.
 - Distilled skills default to `~/.codex/skills`; override with
   `AGENTIC_OS_SKILLS_ROOT`.
 - Startup creates all six domain roots, initializes the vault Git repository,
@@ -139,6 +141,9 @@ instead of overwriting newer content.
 
 Search applies the domain/status filter in SQL, checks exact titles first,
 then ranks FTS candidates by relevance, recency, trust, and stale penalty.
+`AGENTIC_OS_MEMORY_FUZZY=1` adds lexical trigram matching; it is not semantic
+search. `AGENTIC_OS_MEMORY_ALIASES=1` adds the versioned Italian/English alias
+set. A real embedding backend is not configured.
 `memory_ask` is a bounded retrieval-augmented generation flow:
 
 1. retrieve governed memories and relevant passages from imported sources;
@@ -155,11 +160,15 @@ operational error and is never misrepresented as insufficient evidence.
 
 `Save memory` sends the answer through the normal admission gate. `Flag` writes
 an append-only audit event. Both the synthesis and its source paths are audited.
+`Use as benchmark case` records an explicit, human-confirmed question and the
+cited source paths. Benchmark compares FTS, candidate, and actual production
+flags through the same retrieval/scoring path; it never substitutes memory
+titles for real questions.
 
 Task context loads full bodies up to the 4,000-token-equivalent character
 budget, compresses overflow entries, excludes sensitive memories, escapes data
-block delimiters, and labels stale entries `UNVERIFIED`. Every injected path is
-recorded in the task trace.
+block delimiters, and labels stale entries `UNVERIFIED`. Every injected path
+and stable memory ID is recorded in the task trace.
 
 ## Lifecycle and recovery
 

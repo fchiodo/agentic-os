@@ -14,7 +14,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { useMemoryConfirm, useMemoryOrbitMap } from '@/features/memory/hooks'
 import type { OrbitEdge, OrbitNode } from '@/features/memory/schema'
-import { formatCompactNumber } from '@/lib/format'
+import { formatCompactNumber, formatRelativeTime } from '@/lib/format'
 import { useTaskEventsStore } from '@/store/task-events'
 
 const DOMAINS = ['work', 'planphysique', 'personal', 'family', 'finance', 'research'] as const
@@ -131,6 +131,30 @@ function makeGraph(
     color: '#ffffff00',
     hidden: true,
   }))
+  RING_META.slice(1).forEach((ring, ringIndex) => {
+    const points = 72
+    for (let index = 0; index < points; index += 1) {
+      const angle = (Math.PI * 2 * index) / points
+      const id = `__ring:${ringIndex + 1}:${index}`
+      graph.addNode(id, {
+        x: Math.cos(angle) * ring.radius,
+        y: Math.sin(angle) * ring.radius,
+        size: 0.01,
+        label: '',
+        color: `${ring.color}55`,
+        ringGuide: true,
+        zIndex: 0,
+      })
+    }
+    for (let index = 0; index < points; index += 1) {
+      graph.addEdgeWithKey(
+        `__ring-edge:${ringIndex + 1}:${index}`,
+        `__ring:${ringIndex + 1}:${index}`,
+        `__ring:${ringIndex + 1}:${(index + 1) % points}`,
+        { color: `${ring.color}42`, size: 0.35, ringGuide: true, zIndex: 0 },
+      )
+    }
+  })
   for (const node of nodes) {
     if (!visibleIds.has(node.id)) continue
     const position = positions.get(node.id) ?? { x: 0, y: 0 }
@@ -208,6 +232,9 @@ function relationLabel(edge: OrbitEdge, selectedId: string): string {
 export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) => void }) {
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const rendererRef = useRef<Sigma | null>(null)
+  const graphRef = useRef<Graph | null>(null)
+  const nodeByIdRef = useRef<Map<string, OrbitNode>>(new Map())
+  const transitionRef = useRef<number | null>(null)
   const [domain, setDomain] = useState<string | undefined>()
   const [includeSensitive, setIncludeSensitive] = useState(false)
   const [search, setSearch] = useState('')
@@ -226,6 +253,10 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
   )
   const selectedNode = nodeById.get(selectedId) ?? null
   const query = search.trim().toLocaleLowerCase()
+
+  useEffect(() => {
+    nodeByIdRef.current = nodeById
+  }, [nodeById])
 
   const visibleIds = useMemo(() => {
     const visible = new Set<string>()
@@ -251,7 +282,7 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
   )
   const selectedEdge = visibleEdges.find((edge) => edge.id === selectedEdgeId) ?? null
 
-  const graph = useMemo(
+  const nextGraph = useMemo(
     () => makeGraph(orbitQuery.data?.nodes ?? [], visibleEdges, visibleIds),
     [orbitQuery.data?.nodes, visibleEdges, visibleIds],
   )
@@ -270,7 +301,9 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
 
   useEffect(() => {
     const container = canvasRef.current
-    if (!container || graph.order === 0) return
+    if (!container || rendererRef.current) return
+    const graph = new Graph({ multi: true, type: 'directed' })
+    graphRef.current = graph
     const renderer = new Sigma(graph, container, {
       allowInvalidContainer: true,
       defaultEdgeColor: '#b0aea5',
@@ -286,7 +319,8 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
     })
     rendererRef.current = renderer
     renderer.on('clickNode', ({ node }) => {
-      const selected = nodeById.get(node)
+      if (node.startsWith('__')) return
+      const selected = nodeByIdRef.current.get(node)
       setSelectedId(node)
       setSelectedEdgeId(null)
       if (selected?.aggregate) {
@@ -299,6 +333,7 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
       }
     })
     renderer.on('clickEdge', ({ edge }) => {
+      if (edge.startsWith('__')) return
       setSelectedEdgeId(edge)
     })
     renderer.on('clickStage', () => {
@@ -307,26 +342,118 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
     return () => {
       renderer.kill()
       rendererRef.current = null
+      graphRef.current = null
     }
-  }, [graph, nodeById])
+  }, [])
+
+  useEffect(() => {
+    const graph = graphRef.current
+    const renderer = rendererRef.current
+    if (!graph || !renderer) return
+    if (transitionRef.current !== null) window.cancelAnimationFrame(transitionRef.current)
+    const cameraState = renderer.getCamera().getState()
+    const desiredIds = new Set(nextGraph.nodes())
+    const departingIds = new Set(graph.nodes().filter((node) => !desiredIds.has(node)))
+    const starts = new Map<string, { x: number; y: number }>()
+    const targets = new Map<string, { x: number; y: number }>()
+
+    for (const node of nextGraph.nodes()) {
+      const attributes = nextGraph.getNodeAttributes(node)
+      const target = { x: Number(attributes.x), y: Number(attributes.y) }
+      targets.set(node, target)
+      if (graph.hasNode(node)) {
+        const current = graph.getNodeAttributes(node)
+        starts.set(node, { x: Number(current.x), y: Number(current.y) })
+        graph.replaceNodeAttributes(node, { ...attributes, x: Number(current.x), y: Number(current.y) })
+      } else {
+        const model = nodeByIdRef.current.get(node)
+        const parent = model?.groupId && graph.hasNode(model.groupId)
+          ? graph.getNodeAttributes(model.groupId)
+          : null
+        const start = parent ? { x: Number(parent.x), y: Number(parent.y) } : target
+        starts.set(node, start)
+        graph.addNode(node, { ...attributes, ...start })
+      }
+    }
+    for (const node of departingIds) {
+      const current = graph.getNodeAttributes(node)
+      starts.set(node, { x: Number(current.x), y: Number(current.y) })
+      const model = nodeByIdRef.current.get(node)
+      const parent = model?.groupId && graph.hasNode(model.groupId)
+        ? graph.getNodeAttributes(model.groupId)
+        : current
+      targets.set(node, { x: Number(parent.x), y: Number(parent.y) })
+    }
+    graph.clearEdges()
+    nextGraph.forEachEdge((edge, attributes, source, target) => {
+      if (graph.hasNode(source) && graph.hasNode(target)) {
+        graph.addEdgeWithKey(edge, source, target, { ...attributes })
+      }
+    })
+    renderer.getCamera().setState(cameraState)
+
+    const started = performance.now()
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - started) / 220)
+      const eased = 1 - (1 - progress) ** 3
+      for (const [node, target] of targets) {
+        if (!graph.hasNode(node)) continue
+        const start = starts.get(node) ?? target
+        graph.mergeNodeAttributes(node, {
+          x: start.x + (target.x - start.x) * eased,
+          y: start.y + (target.y - start.y) * eased,
+          ...(departingIds.has(node) ? { size: Math.max(0.01, Number(graph.getNodeAttribute(node, 'size')) * (1 - progress)) } : {}),
+        })
+      }
+      renderer.refresh()
+      if (progress < 1) transitionRef.current = window.requestAnimationFrame(animate)
+      else {
+        for (const node of departingIds) {
+          if (graph.hasNode(node)) graph.dropNode(node)
+        }
+        transitionRef.current = null
+        renderer.refresh()
+      }
+    }
+    transitionRef.current = window.requestAnimationFrame(animate)
+    return () => {
+      if (transitionRef.current !== null) window.cancelAnimationFrame(transitionRef.current)
+      transitionRef.current = null
+    }
+  }, [nextGraph])
 
   useEffect(() => {
     const renderer = rendererRef.current
-    if (!renderer || !graph.hasNode(selectedId)) return
+    const graph = graphRef.current
+    if (!renderer || !graph || !graph.hasNode(selectedId)) return
     const neighbors = new Set(graph.neighbors(selectedId))
     renderer.setSetting('nodeReducer', (node, data) => {
+      if (data.ringGuide) return data
       if (node === selectedId) return { ...data, highlighted: true, forceLabel: true, size: data.size * 1.2 }
       if (selectedId && !neighbors.has(node)) return { ...data, color: '#d1cfc5', label: '' }
       return data
     })
     renderer.setSetting('edgeReducer', (edge, data) => {
+      if (data.ringGuide) return data
       if (graph.source(edge) === selectedId || graph.target(edge) === selectedId) {
         return { ...data, color: data.recentActivity && livePulse ? '#c6613f' : '#141413', size: Math.max(data.recentActivity && livePulse ? 3.4 : 1.4, data.size), zIndex: 4 }
       }
       return { ...data, color: '#e0ded6', hidden: Boolean(selectedId) }
     })
     renderer.refresh()
-  }, [graph, livePulse, selectedId])
+  }, [livePulse, selectedId])
+
+  useEffect(() => {
+    const renderer = rendererRef.current
+    const graph = graphRef.current
+    if (!renderer || !graph || !graph.hasNode(selectedId)) return
+    const display = renderer.getNodeDisplayData(selectedId)
+    if (!display) return
+    renderer.getCamera().animate(
+      { x: display.x, y: display.y, ratio: selectedNode?.aggregate ? 0.72 : 0.55 },
+      { duration: 260 },
+    )
+  }, [selectedId, selectedNode?.aggregate])
 
   const relations = useMemo(() => {
     if (!orbitQuery.data || !selectedNode) return []
@@ -380,11 +507,8 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
               <span key={ring.label}><i style={{ background: ring.color }} />{ring.label}<strong>{formatCompactNumber([orbitQuery.data?.counts.skills ?? 0, orbitQuery.data?.counts.memories ?? 0, orbitQuery.data?.counts.routines ?? 0, orbitQuery.data?.counts.applications ?? 0][index])}</strong></span>
             ))}
           </div>
-          {orbitQuery.isLoading ? (
-            <div className="orbit-loading"><Network aria-hidden="true" size={34} /><p>Composing local registries…</p></div>
-          ) : (
-            <div className="orbit-canvas" ref={canvasRef} />
-          )}
+          <div className="orbit-canvas" ref={canvasRef} />
+          {orbitQuery.isLoading && <div className="orbit-loading"><Network aria-hidden="true" size={34} /><p>Composing local registries…</p></div>}
           <div className="orbit-evidence-legend">
             {(['declared', 'observed', 'inferred'] as const).map((evidence) => <span key={evidence}><i style={{ background: EVIDENCE_COLOR[evidence] }} />{evidence}</span>)}
             {orbitQuery.data && <span>{orbitQuery.data.metrics.composeMs.toFixed(1)} ms · {orbitQuery.data.metrics.tracesScanned} traces</span>}
@@ -403,9 +527,9 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
           ) : selectedNode ? (
             <>
               <div className="orbit-detail-heading"><Layers3 aria-hidden="true" size={18} /><div><p className="eyebrow">{RING_META[selectedNode.ring].label}</p><h2>{selectedNode.label}</h2></div></div>
-              <div className="orbit-detail-badges"><StatusBadge label={selectedNode.status} tone={selectedNode.status === 'stale' ? 'warning' : 'neutral'} />{selectedNode.domain && <span>{DOMAIN_LABELS[selectedNode.domain] ?? selectedNode.domain}</span>}{selectedNode.sensitivity && <span><ShieldCheck aria-hidden="true" size={13} />{selectedNode.sensitivity}</span>}</div>
+              <div className="orbit-detail-badges"><StatusBadge label={selectedNode.operationalState} tone={selectedNode.operationalState === 'attention' || selectedNode.status === 'stale' ? 'warning' : selectedNode.operationalState === 'running' || selectedNode.operationalState === 'in_use' ? 'success' : 'neutral'} />{selectedNode.domain && <span>{DOMAIN_LABELS[selectedNode.domain] ?? selectedNode.domain}</span>}{selectedNode.sensitivity && <span><ShieldCheck aria-hidden="true" size={13} />{selectedNode.sensitivity}</span>}</div>
               {selectedNode.preview && <p className="orbit-preview">{selectedNode.preview}</p>}
-              <dl className="orbit-detail-meta"><dt>Source</dt><dd><code>{selectedNode.sourceRef}</code></dd>{selectedNode.sourcePath && <><dt>Path</dt><dd><code>{selectedNode.sourcePath}</code></dd></>}<dt>Visible items</dt><dd>{selectedNode.count}</dd></dl>
+              <dl className="orbit-detail-meta"><dt>Source</dt><dd><code>{selectedNode.sourceRef}</code></dd>{selectedNode.sourcePath && <><dt>Path</dt><dd><code>{selectedNode.sourcePath}</code></dd></>}<dt>Visible items</dt><dd>{selectedNode.count}</dd>{selectedNode.lastActivityAt && <><dt>Last activity</dt><dd>{formatRelativeTime(Date.parse(selectedNode.lastActivityAt))}</dd></>}<dt>Domains</dt><dd>{selectedNode.domains.length > 0 ? selectedNode.domains.map((item) => `${item.value} (${item.evidence})`).join(', ') : 'Global'}</dd><dt>Capabilities</dt><dd>{selectedNode.capabilities.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd></dl>
               <div className="orbit-detail-actions">
                 {selectedNode.aggregate && <button className="secondary-button" onClick={toggleSelectedGroup} type="button">{expandedGroups.has(selectedNode.id) ? 'Collapse group' : 'Expand group'}</button>}
                 {selectedNode.actions.includes('open_memory') && selectedNode.sourcePath && <button className="primary-button" onClick={() => onOpenMemory(selectedNode.sourcePath!)} type="button"><ExternalLink aria-hidden="true" size={14} />Open in Memory</button>}

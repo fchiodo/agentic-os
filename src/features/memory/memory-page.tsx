@@ -37,6 +37,7 @@ import {
   useMemoryRead,
   useMemoryReindex,
   useMemoryRetrievalBenchmark,
+  useMemoryRetrievalEvalCaseSave,
   useMemorySaveManual,
   useMemorySearch,
   useMemoryTree,
@@ -314,6 +315,7 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
   const askMutation = useMemoryAsk()
   const saveMutation = useMemorySaveManual()
   const feedbackMutation = useMemoryAnswerFeedback()
+  const evalCaseMutation = useMemoryRetrievalEvalCaseSave()
   const [question, setQuestion] = useState('')
   const [askDomain, setAskDomain] = useState(domain ?? 'work')
   const [copiedAnswerId, setCopiedAnswerId] = useState<string | null>(null)
@@ -325,6 +327,7 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
     setCopyError(null)
     saveMutation.reset()
     feedbackMutation.reset()
+    evalCaseMutation.reset()
     askMutation.mutate({ question: question.trim(), domain: askDomain, includeStale })
   }
 
@@ -358,6 +361,14 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
       question: answer.question,
       domain: answer.domain,
       feedback: 'flagged',
+    })
+  }
+
+  const addBenchmarkCase = (answer: MemoryAnswer) => {
+    evalCaseMutation.mutate({
+      question: answer.question,
+      domain: answer.domain,
+      expectedSources: [...new Set(answer.citations.map((citation) => citation.vaultPath))],
     })
   }
 
@@ -414,10 +425,15 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
                 <Flag aria-hidden="true" size={14} />
                 {feedbackMutation.isPending ? 'Flagging…' : feedbackMutation.isSuccess ? 'Flagged' : 'Flag'}
               </button>
+              <button className="secondary-button" disabled={askMutation.data.abstained || askMutation.data.citations.length === 0 || evalCaseMutation.isPending || evalCaseMutation.isSuccess} onClick={() => addBenchmarkCase(askMutation.data)} type="button">
+                <Gauge aria-hidden="true" size={14} />
+                {evalCaseMutation.isPending ? 'Adding…' : evalCaseMutation.isSuccess ? 'Benchmark case added' : 'Use as benchmark case'}
+              </button>
             </div>
             <span>AI-synthesized · citation verified · abstains without evidence</span>
           </div>
           {saveMutation.data && <div className="memory-operation-result" role="status"><CheckCircle2 aria-hidden="true" size={16} />{saveMutation.data.status === 'auto_applied' ? 'Answer saved, indexed, and audited.' : 'Memory proposal created and waiting for approval.'}</div>}
+          {evalCaseMutation.error && <div className="inline-error" role="alert">{errorMessage(evalCaseMutation.error)}</div>}
           {saveMutation.error && <div className="inline-error" role="alert">{errorMessage(saveMutation.error)}</div>}
           {copyError && <div className="inline-error" role="alert">{copyError}</div>}
           {feedbackMutation.error && <div className="inline-error" role="alert">{errorMessage(feedbackMutation.error)}</div>}
@@ -537,7 +553,7 @@ export function MemoryPage() {
           </div>
           {(reindexMutation.data || maintenanceMutation.data) && <div className="memory-maintenance-result" role="status">{reindexMutation.data && `${reindexMutation.data.indexed} indexed · ${reindexMutation.data.drifted} drifted · ${reindexMutation.data.orphaned} orphaned`}{maintenanceMutation.data && `${maintenanceMutation.data.expired} archived · ${maintenanceMutation.data.markedStale} stale · ${maintenanceMutation.data.consolidationProposals} consolidation proposals · ${maintenanceMutation.data.deferredExpirations} deferred`}</div>}
           {(reindexMutation.error || maintenanceMutation.error) && <div className="inline-error" role="alert">{errorMessage(reindexMutation.error ?? maintenanceMutation.error)}</div>}
-          {benchmarkMutation.data && <div className="memory-maintenance-result" role="status">{benchmarkMutation.data.cases} cases · FTS hit@5 {(benchmarkMutation.data.baseline.sourceHitRateAtFive * 100).toFixed(0)}% → candidate {(benchmarkMutation.data.candidate.sourceHitRateAtFive * 100).toFixed(0)}% · p95 {benchmarkMutation.data.baseline.latencyP95Ms.toFixed(1)} → {benchmarkMutation.data.candidate.latencyP95Ms.toFixed(1)} ms</div>}
+          {benchmarkMutation.data && <div className="memory-maintenance-result" role="status">{benchmarkMutation.data.cases === 0 ? 'No confirmed benchmark cases yet. Use a verified Ask answer to add one.' : `${benchmarkMutation.data.cases} realistic cases · hit@5 FTS ${(benchmarkMutation.data.baseline.sourceHitRateAtFive * 100).toFixed(0)}% · candidate ${(benchmarkMutation.data.candidate.sourceHitRateAtFive * 100).toFixed(0)}% · production ${(benchmarkMutation.data.production.sourceHitRateAtFive * 100).toFixed(0)}% · p95 ${benchmarkMutation.data.production.latencyP95Ms.toFixed(1)} ms`}<small>Corpus {benchmarkMutation.data.corpusMemories} · fuzzy scan {benchmarkMutation.data.fuzzyScanCount} · semantic {benchmarkMutation.data.semanticBackend}</small></div>}
           {benchmarkMutation.error && <div className="inline-error" role="alert">{errorMessage(benchmarkMutation.error)}</div>}
           <div className="memory-sidebar-footer"><span className="row-subtle">{formatCompactNumber(proposalsQuery.data?.length ?? 0)} writes</span>{pending.length > 0 && <StatusBadge label={`${pending.length} pending`} tone="warning" />}</div>
         </aside>

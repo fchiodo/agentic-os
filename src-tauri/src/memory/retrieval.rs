@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use regex::Regex;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -18,6 +18,21 @@ const MAX_EVIDENCE_PASSAGES: usize = 8;
 const MAX_EVIDENCE_CHARS: usize = 1_800;
 const MAX_CLAIMS: usize = 8;
 const MAX_CLAIM_CHARS: usize = 600;
+
+#[derive(Debug, Clone, Copy)]
+struct RetrievalProfile {
+    aliases: bool,
+    fuzzy_trigrams: bool,
+}
+
+impl RetrievalProfile {
+    fn production() -> Self {
+        Self {
+            aliases: feature_enabled("AGENTIC_OS_MEMORY_ALIASES"),
+            fuzzy_trigrams: feature_enabled("AGENTIC_OS_MEMORY_FUZZY"),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct EvidencePassage {
@@ -65,6 +80,17 @@ pub fn search(
     domain: Option<&str>,
     opts: &MemorySearchOpts,
 ) -> AppResult<Vec<ScoredMemory>> {
+    search_with_profile(db, query, domain, opts, RetrievalProfile::production(), true)
+}
+
+fn search_with_profile(
+    db: &Db,
+    query: &str,
+    domain: Option<&str>,
+    opts: &MemorySearchOpts,
+    profile: RetrievalProfile,
+    touch_results: bool,
+) -> AppResult<Vec<ScoredMemory>> {
     super::index::ensure_tables(db)?;
 
     if domain.is_some_and(|value| {
@@ -88,7 +114,7 @@ pub fn search(
         return Ok(Vec::new());
     }
 
-    let retrieval_query = prepare_query(query);
+    let retrieval_query = prepare_query_with_aliases(query, profile.aliases);
 
     // Permission and lifecycle filters happen inside SQL, before candidates
     // leave storage. Exact-title matches form a separate high-confidence lane.
@@ -100,7 +126,7 @@ pub fn search(
             candidates.push(candidate);
         }
     }
-    if feature_enabled("AGENTIC_OS_MEMORY_SEMANTIC") {
+    if profile.fuzzy_trigrams {
         for candidate in
             search_local_similarity(db, &retrieval_query, domain, opts.include_stale, limit * 3)?
         {
@@ -128,8 +154,10 @@ pub fn search(
 
     // 4. Take top K and update access stats
     let result: Vec<ScoredMemory> = scored.into_iter().take(limit as usize).collect();
-    for m in &result {
-        super::index::touch(db, &m.row.id)?;
+    if touch_results {
+        for m in &result {
+            super::index::touch(db, &m.row.id)?;
+        }
     }
 
     Ok(result)
@@ -192,100 +220,277 @@ fn prepare_query_with_aliases(query: &str, aliases_enabled: bool) -> String {
     }
 }
 
-/// Runs a deterministic, zero-outbound-cost comparison on the actual local
-/// corpus. Each active memory contributes a title query and its own id is the
-/// expected source. This measures retrieval coverage and latency, not model
-/// prose quality; the notes make that boundary explicit.
-pub fn benchmark(db: &Db) -> AppResult<super::RetrievalBenchmarkReport> {
+pub fn list_eval_cases(db: &Db) -> AppResult<Vec<super::RetrievalEvalCase>> {
     super::index::ensure_tables(db)?;
-    let cases = db.with_conn(|conn| {
+    db.with_conn(|conn| {
         let mut statement = conn.prepare(
-            "SELECT id, domain, title FROM memories
-             WHERE status = 'active' AND sensitivity = 'normal'
-             ORDER BY domain, updated_at DESC LIMIT 180",
+            "SELECT id, domain, question, expected_sources_json, provenance, status,
+                    created_at, updated_at
+             FROM memory_eval_cases WHERE status = 'active'
+             ORDER BY domain, updated_at DESC",
         )?;
         let rows = statement
             .query_map([], |row| {
+                let expected: String = row.get(3)?;
+                Ok(super::RetrievalEvalCase {
+                    id: row.get(0)?,
+                    domain: row.get(1)?,
+                    question: row.get(2)?,
+                    expected_sources: serde_json::from_str(&expected).unwrap_or_default(),
+                    provenance: row.get(4)?,
+                    status: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
+pub fn save_eval_case(
+    db: &Db,
+    request: &super::RetrievalEvalCaseRequest,
+) -> AppResult<super::RetrievalEvalCase> {
+    super::index::ensure_tables(db)?;
+    validate_domain(Some(&request.domain))?;
+    let question = request.question.trim();
+    if question.chars().count() < 4 || question.chars().count() > 1_000 {
+        return Err(crate::error::AppError::Io(std::io::Error::other(
+            "benchmark question must contain 4 to 1000 characters",
+        )));
+    }
+    let expected_sources = request
+        .expected_sources
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if expected_sources.is_empty() || expected_sources.len() > 20 {
+        return Err(crate::error::AppError::Io(std::io::Error::other(
+            "benchmark case requires 1 to 20 expected sources",
+        )));
+    }
+    let valid_sources = db.with_conn(|conn| {
+        let mut valid = BTreeSet::new();
+        for source in &expected_sources {
+            let memory_exists = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE vault_path = ?1 AND domain = ?2
+                    AND status != 'expired' AND sensitivity = 'normal')",
+                params![source, request.domain],
+                |row| row.get::<_, bool>(0),
+            )?;
+            let import_exists = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM document_imports WHERE source_path = ?1
+                    AND domain = ?2 AND status != 'pending')",
+                params![source, request.domain],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if memory_exists || import_exists {
+                valid.insert(source.clone());
+            }
+        }
+        Ok(valid)
+    })?;
+    if valid_sources.len() != expected_sources.len() {
+        return Err(crate::error::AppError::Io(std::io::Error::other(
+            "every expected source must be a visible normal-sensitivity source in the selected domain",
+        )));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let expected_json = serde_json::to_string(&expected_sources)?;
+    let existing = db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT id, provenance, created_at, updated_at FROM memory_eval_cases
+             WHERE domain = ?1 AND question = ?2 AND expected_sources_json = ?3 AND status = 'active'
+             LIMIT 1",
+            params![request.domain, question, expected_json],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     })?;
-
-    let mut baseline_hits_one = 0usize;
-    let mut baseline_hits_five = 0usize;
-    let mut candidate_hits_one = 0usize;
-    let mut candidate_hits_five = 0usize;
-    let mut baseline_latencies = Vec::new();
-    let mut candidate_latencies = Vec::new();
-
-    for (expected_id, domain, query) in &cases {
-        let started = std::time::Instant::now();
-        let baseline = search_fts(db, query, Some(domain), false, 5)?;
-        baseline_latencies.push(started.elapsed().as_secs_f64() * 1000.0);
-        baseline_hits_one += baseline.first().is_some_and(|(id, _)| id == expected_id) as usize;
-        baseline_hits_five += baseline.iter().any(|(id, _)| id == expected_id) as usize;
-
-        let started = std::time::Instant::now();
-        let expanded = prepare_query_with_aliases(query, true);
-        let mut fused = BTreeMap::<String, f64>::new();
-        for (id, score) in search_fts(db, &expanded, Some(domain), false, 25)? {
-            fused
-                .entry(id)
-                .and_modify(|existing| *existing = existing.max(score))
-                .or_insert(score);
-        }
-        for (id, score) in search_local_similarity(db, &expanded, Some(domain), false, 15)? {
-            fused
-                .entry(id)
-                .and_modify(|existing| *existing = existing.max(score))
-                .or_insert(score);
-        }
-        let mut candidate = fused.into_iter().collect::<Vec<_>>();
-        candidate.sort_by(|left, right| {
-            right
-                .1
-                .partial_cmp(&left.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
+    if let Some((id, provenance, created_at, updated_at)) = existing {
+        return Ok(super::RetrievalEvalCase {
+            id,
+            domain: request.domain.clone(),
+            question: question.to_string(),
+            expected_sources,
+            provenance,
+            status: "active".to_string(),
+            created_at,
+            updated_at,
         });
-        candidate.truncate(5);
-        candidate_latencies.push(started.elapsed().as_secs_f64() * 1000.0);
-        candidate_hits_one += candidate.first().is_some_and(|(id, _)| id == expected_id) as usize;
-        candidate_hits_five += candidate.iter().any(|(id, _)| id == expected_id) as usize;
     }
+    let id = Uuid::new_v4().to_string();
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO memory_eval_cases
+             (id, domain, question, expected_sources_json, provenance, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'human_confirmed_ask_citations', 'active', ?5, ?5)",
+            params![id, request.domain, question, expected_json, now],
+        )?;
+        Ok(())
+    })?;
+    Ok(super::RetrievalEvalCase {
+        id,
+        domain: request.domain.clone(),
+        question: question.to_string(),
+        expected_sources,
+        provenance: "human_confirmed_ask_citations".to_string(),
+        status: "active".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
 
-    let denominator = cases.len().max(1) as f64;
+fn validate_domain(domain: Option<&str>) -> AppResult<()> {
+    if domain.is_some_and(|value| {
+        !matches!(
+            value,
+            "work" | "planphysique" | "personal" | "family" | "finance" | "research"
+        )
+    }) {
+        return Err(crate::error::AppError::Io(std::io::Error::other(
+            "invalid memory domain",
+        )));
+    }
+    Ok(())
+}
+
+/// Compare the same candidate generation and scoring path used by Search/Ask
+/// against human-confirmed questions and expected vault sources.
+pub fn benchmark(db: &Db) -> AppResult<super::RetrievalBenchmarkReport> {
+    super::index::ensure_tables(db)?;
+    let backfill_warnings = super::importer::ensure_search_chunks(db);
+    let cases = list_eval_cases(db)?;
+    let corpus_memories = db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE status != 'expired' AND sensitivity = 'normal'",
+            [],
+            |row| row.get::<_, usize>(0),
+        )
+        .map_err(Into::into)
+    })?;
+    let fuzzy_scan_count = db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE status = 'active'",
+            [],
+            |row| row.get::<_, usize>(0),
+        )
+        .map_err(Into::into)
+    })?;
+    let mut baseline = BenchmarkAccumulator::default();
+    let mut candidate = BenchmarkAccumulator::default();
+    let mut production = BenchmarkAccumulator::default();
+    for case in &cases {
+        evaluate_case(db, case, RetrievalProfile { aliases: false, fuzzy_trigrams: false }, &mut baseline)?;
+        evaluate_case(db, case, RetrievalProfile { aliases: true, fuzzy_trigrams: true }, &mut candidate)?;
+        evaluate_case(db, case, RetrievalProfile::production(), &mut production)?;
+    }
+    let mut notes = vec![
+        "Candidate = production scoring with Italian/English aliases and local fuzzy trigram similarity forced on.".to_string(),
+        "Fuzzy trigram similarity is lexical, not semantic search; no embedding backend is configured.".to_string(),
+        "The fuzzy lane scans every eligible memory; the former 2,000-row recency cap has been removed.".to_string(),
+        "Ask claim precision is measured by the deterministic contradiction and role-reversal suite.".to_string(),
+    ];
+    notes.extend(backfill_warnings);
     Ok(super::RetrievalBenchmarkReport {
         generated_at: chrono::Utc::now().to_rfc3339(),
-        corpus_kind: "active-local-memory-title-source".to_string(),
+        corpus_kind: "human-confirmed-realistic-questions-and-expected-sources".to_string(),
         cases: cases.len(),
-        baseline: super::RetrievalBenchmarkMetrics {
-            top_one_accuracy: baseline_hits_one as f64 / denominator,
-            source_hit_rate_at_five: baseline_hits_five as f64 / denominator,
-            latency_p50_ms: percentile(&mut baseline_latencies, 0.50),
-            latency_p95_ms: percentile(&mut baseline_latencies, 0.95),
-            outbound_cost_usd: 0.0,
-        },
-        candidate: super::RetrievalBenchmarkMetrics {
-            top_one_accuracy: candidate_hits_one as f64 / denominator,
-            source_hit_rate_at_five: candidate_hits_five as f64 / denominator,
-            latency_p50_ms: percentile(&mut candidate_latencies, 0.50),
-            latency_p95_ms: percentile(&mut candidate_latencies, 0.95),
-            outbound_cost_usd: 0.0,
-        },
-        notes: vec![
-            "Candidate = FTS5 + versioned Italian/English aliases + local trigram similarity."
-                .to_string(),
-            "This benchmark measures expected-source retrieval on the current normal-sensitivity corpus; Ask claim precision requires the separate curated contradiction suite."
-                .to_string(),
-            "Progressive retrieval is excluded because it can add a model turn and must be measured from audited Ask runs."
-                .to_string(),
-        ],
+        corpus_memories,
+        baseline: baseline.finish(cases.len()),
+        candidate: candidate.finish(cases.len()),
+        production: production.finish(cases.len()),
+        fuzzy_scan_count,
+        semantic_backend: "not_configured".to_string(),
+        notes,
     })
+}
+
+#[derive(Default)]
+struct BenchmarkAccumulator {
+    top_one: f64,
+    hit_five: f64,
+    recall_five: f64,
+    reciprocal_rank: f64,
+    latencies: Vec<f64>,
+}
+
+impl BenchmarkAccumulator {
+    fn finish(mut self, cases: usize) -> super::RetrievalBenchmarkMetrics {
+        let denominator = cases.max(1) as f64;
+        super::RetrievalBenchmarkMetrics {
+            top_one_accuracy: self.top_one / denominator,
+            source_hit_rate_at_five: self.hit_five / denominator,
+            source_recall_at_five: self.recall_five / denominator,
+            mean_reciprocal_rank: self.reciprocal_rank / denominator,
+            latency_p50_ms: percentile(&mut self.latencies, 0.50),
+            latency_p95_ms: percentile(&mut self.latencies, 0.95),
+            outbound_cost_usd: 0.0,
+        }
+    }
+}
+
+fn evaluate_case(
+    db: &Db,
+    case: &super::RetrievalEvalCase,
+    profile: RetrievalProfile,
+    metrics: &mut BenchmarkAccumulator,
+) -> AppResult<()> {
+    let started = std::time::Instant::now();
+    let paths = retrieval_source_paths(db, &case.question, &case.domain, profile, 5)?;
+    metrics.latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+    let expected = case.expected_sources.iter().collect::<BTreeSet<_>>();
+    metrics.top_one += paths.first().is_some_and(|path| expected.contains(path)) as usize as f64;
+    metrics.hit_five += paths.iter().any(|path| expected.contains(path)) as usize as f64;
+    metrics.recall_five += paths.iter().filter(|path| expected.contains(path)).count() as f64
+        / expected.len().max(1) as f64;
+    if let Some(index) = paths.iter().position(|path| expected.contains(path)) {
+        metrics.reciprocal_rank += 1.0 / (index + 1) as f64;
+    }
+    Ok(())
+}
+
+fn retrieval_source_paths(
+    db: &Db,
+    query: &str,
+    domain: &str,
+    profile: RetrievalProfile,
+    limit: usize,
+) -> AppResult<Vec<String>> {
+    let memories = search_with_profile(
+        db,
+        query,
+        Some(domain),
+        &MemorySearchOpts { include_stale: false, limit: Some(limit * 3) },
+        profile,
+        false,
+    )?;
+    let expanded = prepare_query_with_aliases(query, profile.aliases);
+    let chunks = super::index::search_document_chunks(db, &expanded, domain, limit * 3)?;
+    let mut ranked = memories
+        .into_iter()
+        .map(|memory| (memory.row.vault_path, memory.score))
+        .chain(chunks.into_iter().map(|chunk| (chunk.source_path, chunk.score)))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut seen = BTreeSet::new();
+    Ok(ranked
+        .into_iter()
+        .filter_map(|(path, _)| seen.insert(path.clone()).then_some(path))
+        .take(limit)
+        .collect())
 }
 
 fn percentile(values: &mut [f64], percentile: f64) -> f64 {
@@ -297,11 +502,10 @@ fn percentile(values: &mut [f64], percentile: f64) -> f64 {
     values[index]
 }
 
-/// Experimental local similarity lane. It uses character trigrams over
+/// Experimental local fuzzy lane. It uses character trigrams over
 /// title/summary, so it improves morphology and typo recall without outbound
 /// calls or embedding storage. It is intentionally not promoted as an
-/// embedding model; the semantic feature flag remains off by default until
-/// benchmark results justify a real local embedding backend.
+/// embedding model and is controlled by `AGENTIC_OS_MEMORY_FUZZY`.
 fn search_local_similarity(
     db: &Db,
     query: &str,
@@ -315,7 +519,7 @@ fn search_local_similarity(
              WHERE (?1 IS NULL OR domain = ?1)
                AND status != 'expired'
                AND (?2 = 1 OR status != 'stale')
-             ORDER BY updated_at DESC LIMIT 2000",
+             ORDER BY updated_at DESC",
         )?;
         let rows = statement
             .query_map(params![domain, include_stale as i64], |row| {
@@ -909,6 +1113,7 @@ fn claim_supported(
     let claim_numbers = numeric_tokens(claim);
     let claim_subjects = subject_tokens(claim);
     let claim_is_negative = has_negation(claim);
+    let claim_frames = relation_frames(claim);
     citation_ids
         .iter()
         .filter_map(|id| evidence.get(id - 1))
@@ -921,7 +1126,104 @@ fn claim_supported(
                 && claim_numbers.is_subset(&numeric_tokens(sentence))
                 && claim_subjects.is_subset(&subject_tokens(sentence))
                 && claim_is_negative == has_negation(sentence)
+                && (claim_frames.is_empty()
+                    || claim_frames.iter().all(|claim_frame| {
+                        relation_frames(sentence)
+                            .iter()
+                            .any(|evidence_frame| evidence_frame.supports(claim_frame))
+                    }))
         })
+}
+
+#[derive(Debug, Clone)]
+struct RelationFrame {
+    relation: String,
+    left: BTreeSet<String>,
+    right: BTreeSet<String>,
+}
+
+impl RelationFrame {
+    fn supports(&self, claim: &Self) -> bool {
+        self.relation == claim.relation
+            && !claim.left.is_empty()
+            && !claim.right.is_empty()
+            && claim.left.is_subset(&self.left)
+            && claim.right.is_subset(&self.right)
+    }
+}
+
+/// Keep predicate arguments on their original side of the relation. Lexical
+/// overlap alone cannot distinguish “Alice manages Orion” from “Orion manages
+/// Alice”, or bind the right number when two subjects occur in one sentence.
+fn relation_frames(value: &str) -> Vec<RelationFrame> {
+    let tokens = Regex::new(r"[\p{L}\p{N}][\p{L}\p{N}_:/.-]*")
+        .expect("static relation token regex")
+        .find_iter(value)
+        .map(|capture| capture.as_str().trim_matches(['.', ',']).to_lowercase())
+        .collect::<Vec<_>>();
+    let anchors = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| relation_token(token).map(|relation| (index, relation)))
+        .collect::<Vec<_>>();
+    anchors
+        .iter()
+        .enumerate()
+        .filter_map(|(anchor_index, (index, relation))| {
+            let left_start = anchor_index
+                .checked_sub(1)
+                .map(|previous| anchors[previous].0 + 1)
+                .unwrap_or(0);
+            let right_end = anchors
+                .get(anchor_index + 1)
+                .map(|next| next.0)
+                .unwrap_or(tokens.len());
+            let left = frame_terms(&tokens[left_start..*index]);
+            let right = frame_terms(&tokens[index + 1..right_end]);
+            (!left.is_empty() && !right.is_empty()).then_some(RelationFrame {
+                relation: (*relation).to_string(),
+                left,
+                right,
+            })
+        })
+        .collect()
+}
+
+fn relation_token(value: &str) -> Option<&'static str> {
+    match value {
+        "manage" | "manages" | "managed" | "managing" | "gestisce" | "gestiscono"
+        | "gestito" => Some("manage"),
+        "own" | "owns" | "owned" | "possiede" | "possiedono" => Some("own"),
+        "use" | "uses" | "used" | "usa" | "usano" | "utilizza" | "utilizzano" => {
+            Some("use")
+        }
+        "depend" | "depends" | "depended" | "dipende" | "dipendono" => Some("depend"),
+        "replace" | "replaces" | "replaced" | "sostituisce" | "sostituito" => {
+            Some("replace")
+        }
+        "require" | "requires" | "required" | "richiede" | "richiedono" => {
+            Some("require")
+        }
+        "approve" | "approves" | "approved" | "approva" | "approvato" => {
+            Some("approve")
+        }
+        "launch" | "launches" | "launched" | "lancia" | "lanciato" => Some("launch"),
+        "precede" | "precedes" | "preceded" | "precedevo" => Some("precede"),
+        "follow" | "follows" | "followed" | "segue" | "seguito" => Some("follow"),
+        _ => None,
+    }
+}
+
+fn frame_terms(tokens: &[String]) -> BTreeSet<String> {
+    const FRAME_STOPWORDS: [&str; 23] = [
+        "a", "an", "and", "by", "che", "con", "da", "dei", "del", "della", "di", "e",
+        "for", "gli", "il", "in", "la", "le", "of", "on", "per", "the", "un",
+    ];
+    tokens
+        .iter()
+        .filter(|token| !FRAME_STOPWORDS.contains(&token.as_str()))
+        .map(|token| normalize_support_term(token))
+        .collect()
 }
 
 fn evidence_sentences(value: &str) -> impl Iterator<Item = &str> {
@@ -1122,7 +1424,8 @@ fn audit_answer(
             "latencyMs": latency_ms,
             "retrievalFeatures": {
                 "aliases": feature_enabled("AGENTIC_OS_MEMORY_ALIASES"),
-                "semanticLocalSimilarity": feature_enabled("AGENTIC_OS_MEMORY_SEMANTIC"),
+                "fuzzyTrigrams": feature_enabled("AGENTIC_OS_MEMORY_FUZZY"),
+                "semanticBackend": "not_configured",
                 "progressive": feature_enabled("AGENTIC_OS_MEMORY_PROGRESSIVE"),
             },
             "citations": answer.citations.iter().map(|citation| json!({
@@ -1388,6 +1691,184 @@ mod tests {
             &BTreeSet::from([1]),
             &evidence,
         ));
+    }
+
+    #[test]
+    fn verifier_rejects_role_reversal_with_the_same_words() {
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/ownership.md",
+            "Alice manages Project Orion.",
+            0.91,
+        )];
+        assert!(claim_supported(
+            "Alice manages Project Orion.",
+            &BTreeSet::from([1]),
+            &evidence,
+        ));
+        assert!(!claim_supported(
+            "Project Orion manages Alice.",
+            &BTreeSet::from([1]),
+            &evidence,
+        ));
+    }
+
+    #[test]
+    fn verifier_binds_numbers_to_the_correct_relation_frame() {
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/licenses.md",
+            "Alice owns 3 licenses, while Bob owns 7 licenses.",
+            0.91,
+        )];
+        assert!(claim_supported(
+            "Alice owns 3 licenses.",
+            &BTreeSet::from([1]),
+            &evidence,
+        ));
+        assert!(!claim_supported(
+            "Alice owns 7 licenses.",
+            &BTreeSet::from([1]),
+            &evidence,
+        ));
+    }
+
+    #[test]
+    fn fuzzy_retrieval_scans_beyond_two_thousand_recent_memories() {
+        let db_path = std::env::temp_dir().join(format!(
+            "agentic-os-fuzzy-corpus-{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Db::open(&db_path).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO memories
+                 (id, vault_path, domain, mem_type, title, summary, sensitivity, confidence,
+                  created_at, updated_at, provenance, content_hash, status)
+                 VALUES ('target', 'work/facts/target.md', 'work', 'fact',
+                  'Orchestrazione affidabile', 'recupero semantico locale', 'normal', 0.9,
+                  '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', '{}', 'target', 'active')",
+                [],
+            )?;
+            for index in 0..2_005 {
+                conn.execute(
+                    "INSERT INTO memories
+                     (id, vault_path, domain, mem_type, title, summary, sensitivity, confidence,
+                      created_at, updated_at, provenance, content_hash, status)
+                     VALUES (?1, ?2, 'work', 'fact', ?3, 'unrelated archive row', 'normal', 0.7,
+                      '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '{}', ?1, 'active')",
+                    params![
+                        format!("distractor-{index}"),
+                        format!("work/facts/distractor-{index}.md"),
+                        format!("Unrelated record {index}"),
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let hits = search_local_similarity(
+            &db,
+            "orcestrazione affidabile",
+            Some("work"),
+            false,
+            5,
+        )
+        .unwrap();
+        assert!(hits.iter().any(|(id, _)| id == "target"));
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn benchmark_uses_confirmed_questions_and_the_production_pipeline() {
+        let db_path = std::env::temp_dir().join(format!(
+            "agentic-os-retrieval-eval-{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Db::open(&db_path).unwrap();
+        let fixtures = [
+            ("work", "feed", "work/decisions/feed.md", "Decisione integrazione", "Feed delta per evitare timeout SFTP", "Il feed PowerReviews usa file delta per evitare i timeout SFTP.", "Quale modalità del feed evita i timeout SFTP?"),
+            ("planphysique", "deload", "planphysique/decisions/deload.md", "Ciclo di scarico", "Deload ogni sei settimane", "Il programma prevede una settimana di deload ogni sei settimane.", "Ogni quante settimane è previsto il deload?"),
+            ("personal", "passport", "personal/facts/passport.md", "Rinnovo documento", "Passaporto il 14 ottobre 2026", "L'appuntamento per il rinnovo del passaporto è il 14 ottobre 2026.", "Quando è l'appuntamento per il rinnovo del passaporto?"),
+            ("family", "school", "family/facts/school.md", "Riunione scolastica", "Colloquio aula 3", "Il colloquio scolastico si tiene in aula 3 alle 17:30.", "In quale aula si tiene il colloquio scolastico?"),
+            ("finance", "tax", "finance/decisions/tax.md", "Accantonamento imposte", "Accantonare il 28 percento", "La decisione è accantonare il 28 percento di ogni incasso per le imposte.", "Quale percentuale degli incassi va accantonata per le imposte?"),
+            ("research", "embedding", "research/facts/embedding.md", "Modello embeddings locale", "e5-small per prototipo locale", "Il prototipo di ricerca semantica usa il modello e5-small in locale.", "Quale modello usa il prototipo di ricerca semantica locale?"),
+        ];
+        for (domain, id, path, title, summary, body, question) in fixtures {
+            let row = super::super::MemoryRow {
+                id: id.to_string(),
+                vault_path: path.to_string(),
+                domain: domain.to_string(),
+                mem_type: "decision".to_string(),
+                title: title.to_string(),
+                summary: Some(summary.to_string()),
+                sensitivity: "normal".to_string(),
+                confidence: 0.9,
+                created_at: "2026-09-23T10:00:00Z".to_string(),
+                updated_at: "2026-09-23T10:00:00Z".to_string(),
+                valid_from: None,
+                valid_until: None,
+                stale_after_days: None,
+                last_confirmed_at: None,
+                confirmation_count: 0,
+                last_accessed_at: None,
+                access_count: 0,
+                expires_at: None,
+                provenance: "{\"source\":\"manual\"}".to_string(),
+                content_hash: format!("hash-{id}"),
+                status: "active".to_string(),
+            };
+            super::super::index::upsert(&db, &row, body, &[]).unwrap();
+            let saved = save_eval_case(
+                &db,
+                &super::super::RetrievalEvalCaseRequest {
+                    question: question.to_string(),
+                    domain: domain.to_string(),
+                    expected_sources: vec![path.to_string()],
+                },
+            )
+            .unwrap();
+            assert_eq!(saved.provenance, "human_confirmed_ask_citations");
+        }
+
+        db.with_conn(|conn| {
+            for domain in ["work", "planphysique", "personal", "family", "finance", "research"] {
+                for index in 0..200 {
+                    let id = format!("{domain}-archive-{index}");
+                    conn.execute(
+                        "INSERT INTO memories
+                         (id, vault_path, domain, mem_type, title, summary, sensitivity, confidence,
+                          created_at, updated_at, provenance, content_hash, status)
+                         VALUES (?1, ?2, ?3, 'fact', ?4, 'generic unrelated archive record',
+                          'normal', 0.7, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z',
+                          '{}', ?1, 'active')",
+                        params![id, format!("{domain}/facts/archive-{index}.md"), domain, format!("Archive {index}")],
+                    )?;
+                    let rowid = conn.last_insert_rowid();
+                    conn.execute(
+                        "INSERT INTO memories_fts(rowid, title, summary, body, tags)
+                         VALUES (?1, ?2, 'generic unrelated archive record', '', '')",
+                        params![rowid, format!("Archive {index}")],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let report = benchmark(&db).unwrap();
+        println!(
+            "MILESTONE2_BENCHMARK={}",
+            serde_json::to_string(&report).unwrap()
+        );
+        assert_eq!(report.cases, 6);
+        assert_eq!(report.corpus_memories, 1_206);
+        assert_eq!(report.fuzzy_scan_count, 1_206);
+        assert_eq!(report.production.source_hit_rate_at_five, 1.0);
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]

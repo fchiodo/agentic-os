@@ -14,7 +14,7 @@ the requirements supplied in the task itself.
 | Process crash | The previous implementation had no durable intent spanning filesystem, Git, SQLite and audit. | Fixed. `memory_operations` records intent and stage before mutation. Startup recovery rolls an untouched base back, rolls an exact journaled file forward through Git/index/state/audit, and marks a third/conflicting state `needs_attention` instead of guessing. Import source snapshots use the same journal. |
 | Retrieval normalization | FTS candidates are normalized inside the result set and blended with reciprocal rank. Recency and trust are in `[0,1]`; stale has an explicit penalty. | Present, but corpus-level BM25 calibration is still unmeasured. |
 | Valid decisions | Previously, every decision decayed with a 730-day half-life even if still active. | Fixed: an active decision whose validity has not ended gets full recency. |
-| Ask verification | Previously, verification checked citations and a bag-of-terms subset only. A positive claim could therefore be accepted from a negative sentence, and entity/number/date substitutions were not modeled explicitly. | Fixed with sentence-level polarity, number/date and named-subject constraints. Benchmark coverage remains required. |
+| Ask verification | Previously, verification checked citations and a bag-of-terms subset only. A positive claim could therefore be accepted from a negative sentence, and entity/number/date substitutions were not modeled explicitly. | Fixed with sentence-level polarity, number/date and named-subject constraints. Milestone 2 also binds predicate arguments to their original side of a relation, covering role reversal and number-to-subject association. |
 | Saving Ask answers | Previously, source paths survived only as prose in the body and the multi-source confidence bonus could be persisted as fact confidence. | Fixed: original paths are written to frontmatter `sources`, and saved confidence is capped by the weakest cited evidence score. |
 
 ## Temporal model delivered
@@ -68,17 +68,18 @@ Sources:
 - Routines: real catalog items with kind `routine` or `workflow`.
 - Applications: real catalog items with kind `plugin`, `mcp`, or `automation`.
 - Relations: registry membership and Markdown temporal/source links are
-  `declared`; context injection, memory output and tool use become `observed`
-  only when the trace also identifies the routine path/entrypoint exactly;
-  name-only task or tool matches are `inferred`.
+  `declared`; context injection now persists `memoryId`, and tool events persist
+  resolved catalog IDs. A relation becomes `observed` only from those structured
+  identifiers. Path/name matching is retained as an explicitly `inferred`
+  fallback.
 
 Domain and sensitivity filtering happens in Rust before memory nodes, edges,
 previews and memory counts are returned. Sensitive memory is hidden by default.
 Relations are retained only when both endpoints survive the filter. Catalog
-items are currently domain-global because the discovery registry has no domain
-field; silently inferring one from a path or title would violate the evidence
-model. Adding governed domain metadata to catalog items is therefore a
-confirmed follow-up gap.
+items without governed domain tags remain global. Tags of the form
+`domain:<domain>` are enforced before nodes, edges and counts are composed.
+Node detail exposes declared/observed domain and capability facets with their
+source references, plus operational state and last real activity.
 
 The client uses Graphology as the graph model and Sigma.js 3 as a WebGL
 renderer. Positions are deterministic radial coordinates; no force layout or
@@ -94,6 +95,13 @@ no idle or decorative loop runs. Composition time and scanned task/trace counts
 are shown in the map legend. The renderer is code-split so it is not paid for
 by users who remain in the library view.
 
+Milestone 2 keeps a single Graphology graph and Sigma renderer alive across
+query refreshes. Camera state is restored after data synchronization, focus is
+animated over 260 ms, and newly expanded children move from their aggregate to
+their stable radial coordinate over 220 ms. Ring guides are graph geometry, so
+they pan and zoom with the nodes instead of being an unrelated CSS background.
+No continuous animation was added.
+
 ## Promotion gates for retrieval experiments
 
 Retrieval experiments are implemented behind process-level feature flags and
@@ -101,10 +109,9 @@ do not replace the baseline by default.
 
 Flags:
 
-- `AGENTIC_OS_MEMORY_SEMANTIC=1`: local character-trigram similarity lane
-  fused with FTS candidates. This is a zero-network morphology/typo experiment,
-  not an embedding model; it avoids a model download before measurements
-  justify one;
+- `AGENTIC_OS_MEMORY_FUZZY=1`: local character-trigram similarity lane fused
+  with FTS candidates. This is explicitly lexical typo/morphology matching,
+  not semantic search;
 - `AGENTIC_OS_MEMORY_ALIASES=1`: versioned Italian/English query aliases;
 - `AGENTIC_OS_MEMORY_PROGRESSIVE=1`: broader second retrieval and synthesis
   pass only after grounded verification abstains or finds no evidence.
@@ -118,13 +125,24 @@ measurements:
 4. total cost: model tokens, local embedding time/storage, and extra synthesis
    turns per answered question.
 
-The Memory sidebar exposes **Benchmark**, which compares baseline FTS5 with the
-candidate fusion on up to 180 active, normal-sensitivity memories from the
-actual local corpus. It reports top-1 accuracy, expected-source hit@5, p50/p95
-latency and outbound cost. The contradiction suite separately covers citation,
-negation, number/date and subject substitutions. Progressive retrieval is
-excluded from this zero-cost benchmark and must be assessed from audited Ask
-runs because it may add model tokens.
+`AGENTIC_OS_MEMORY_SEMANTIC` no longer aliases the trigram lane. The report says
+`semanticBackend: not_configured` until a real embedding backend is implemented
+and evaluated. The fuzzy query no longer has a 2,000-row recency cap; a
+regression test places the expected memory behind 2,005 newer rows.
+
+The Memory sidebar exposes **Benchmark**, which compares baseline FTS5,
+candidate FTS5+aliases+fuzzy, and the actual production flags through the same
+scoring code used by Search/Ask. Its gold cases are realistic questions plus
+human-confirmed expected source paths; a verified Ask answer can be added with
+**Use as benchmark case**. It reports top-1, hit@5, recall@5, MRR, p50/p95,
+corpus size, fuzzy scan count and outbound cost. With no confirmed cases it
+reports that state rather than fabricating title-as-query examples.
+
+The deterministic Ask suite separately covers citation presence, negation,
+number/date and named-subject substitutions, same-token role reversals, and
+numbers attached to the wrong subject. Progressive retrieval is excluded from
+the zero-outbound-cost benchmark and remains measurable from audited Ask runs
+because it may add model tokens.
 
 The candidate is promoted only if it improves coverage without reducing
 supported-claim precision, while keeping the agreed desktop p95 and cost
@@ -138,10 +156,13 @@ budgets. No flag is enabled automatically by this change.
    exceptions: delivered for memory proposals and document imports.
 3. Explicit temporal links and governed pre-expiry episode consolidation:
    delivered.
-4. Alias, local-similarity and progressive retrieval experiments: delivered
+4. Alias, explicitly fuzzy trigram and progressive retrieval experiments: delivered
    behind flags; promotion intentionally pending corpus results.
 5. Real event-driven activity, collapsed relation rollups and map composition
    telemetry: delivered.
-6. Local-corpus baseline/candidate benchmark and deterministic Ask verifier
-   regression suite: delivered. A curated organization-specific gold-answer
-   corpus remains data work, not something the implementation can fabricate.
+6. Production-aligned baseline/candidate/production benchmark and deterministic
+   Ask verifier regression suite: delivered. Gold cases are governed local
+   records populated only by explicit human confirmation.
+7. Structured observed-event identifiers, real node operational facets,
+   persistent renderer/camera and short radial focus/expansion transitions:
+   delivered in milestone 2.

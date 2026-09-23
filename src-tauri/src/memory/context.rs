@@ -1,10 +1,19 @@
 use crate::db::Db;
 use crate::error::AppResult;
+use serde::Serialize;
 
 use super::MemorySearchOpts;
 
 /// Character budget for injected memory (≈4 000 tokens, MEMORY-SPEC §7.6).
 const CONTEXT_CHAR_BUDGET: usize = 16_000;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContextRef {
+    pub memory_id: String,
+    pub vault_path: String,
+    pub status: String,
+}
 
 pub struct MemoryContext {
     /// Prompt-ready block. Empty string when nothing relevant was found.
@@ -12,6 +21,8 @@ pub struct MemoryContext {
     /// Vault paths of every injected memory — recorded in the run trace
     /// so "what did the agent believe" stays auditable.
     pub injected_paths: Vec<String>,
+    /// Stable identifiers used by event consumers such as the orbital map.
+    pub memory_refs: Vec<MemoryContextRef>,
     /// Paths that were injected while stale (side-effectful tasks must
     /// treat these as UNVERIFIED).
     pub unverified_paths: Vec<String>,
@@ -38,6 +49,7 @@ pub fn build_memory_context(db: &Db, query: &str, domain: &str) -> AppResult<Mem
 
     let mut prompt_block = String::new();
     let mut injected_paths = Vec::new();
+    let mut memory_refs = Vec::new();
     let mut unverified_paths = Vec::new();
     let mut used_chars = 0usize;
 
@@ -88,6 +100,11 @@ pub fn build_memory_context(db: &Db, query: &str, domain: &str) -> AppResult<Mem
         prompt_block.push_str(&entry);
 
         injected_paths.push(memory.row.vault_path.clone());
+        memory_refs.push(MemoryContextRef {
+            memory_id: memory.row.id.clone(),
+            vault_path: memory.row.vault_path.clone(),
+            status: memory.row.status.clone(),
+        });
         if is_stale {
             unverified_paths.push(memory.row.vault_path.clone());
         }
@@ -109,6 +126,7 @@ pub fn build_memory_context(db: &Db, query: &str, domain: &str) -> AppResult<Mem
     Ok(MemoryContext {
         prompt_block,
         injected_paths,
+        memory_refs,
         unverified_paths,
     })
 }

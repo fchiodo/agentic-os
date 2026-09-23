@@ -170,6 +170,19 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
                 ON document_chunks(import_id, chunk_index);
             CREATE INDEX IF NOT EXISTS idx_document_chunks_domain
                 ON document_chunks(domain);
+
+            CREATE TABLE IF NOT EXISTS memory_eval_cases (
+                id TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                question TEXT NOT NULL,
+                expected_sources_json TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_eval_cases_status
+                ON memory_eval_cases(status, domain, updated_at DESC);
             "#,
         )?;
 
