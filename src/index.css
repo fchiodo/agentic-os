@@ -3452,6 +3452,12 @@ button.catalog-row:hover {
   transition: opacity 160ms ease;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .orbit-canvas canvas {
+    transition: none;
+  }
+}
+
 .orbit-loading {
   position: absolute;
   inset: 0;

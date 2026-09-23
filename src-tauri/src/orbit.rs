@@ -57,6 +57,9 @@ pub struct OrbitNode {
     pub sensitivity: Option<String>,
     pub status: String,
     pub operational_state: String,
+    pub catalog_state: String,
+    pub usage_state: String,
+    pub connection_state: String,
     pub domains: Vec<OrbitFacet>,
     pub capabilities: Vec<OrbitFacet>,
     pub last_activity_at: Option<String>,
@@ -122,6 +125,14 @@ struct TraceRecord {
     detail: Value,
 }
 
+#[derive(Debug, Clone)]
+struct ExecutionRef {
+    catalog_id: String,
+    operation: String,
+    outcome: String,
+    occurred_at: String,
+}
+
 /// Compose the operational map from the authoritative local registries.
 /// Filtering happens here, before node counts, previews, and trace relations
 /// are produced, so hidden domains or sensitive memories cannot leak through
@@ -153,6 +164,9 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
         sensitivity: None,
         status: "active".to_string(),
         operational_state: "ready".to_string(),
+        catalog_state: "not_applicable".to_string(),
+        usage_state: "not_applicable".to_string(),
+        connection_state: "not_applicable".to_string(),
         domains: Vec::new(),
         capabilities: vec![
             facet("local_control_plane", "declared", "runtime:agentic-os"),
@@ -323,6 +337,14 @@ fn add_catalog_ring(
             sensitivity: None,
             status: "active".to_string(),
             operational_state: "available".to_string(),
+            catalog_state: "registered".to_string(),
+            usage_state: "not_observed".to_string(),
+            connection_state: if kind == "application" {
+                "unknown"
+            } else {
+                "not_applicable"
+            }
+            .to_string(),
             domains: aggregate_catalog_domains(&group_items),
             capabilities: aggregate_catalog_capabilities(&group_items, kind),
             last_activity_at: group_items
@@ -363,6 +385,14 @@ fn add_catalog_ring(
                 sensitivity: None,
                 status: "active".to_string(),
                 operational_state: "available".to_string(),
+                catalog_state: "registered".to_string(),
+                usage_state: "not_observed".to_string(),
+                connection_state: if kind == "application" {
+                    "unknown"
+                } else {
+                    "not_applicable"
+                }
+                .to_string(),
                 domains: catalog_domains(item),
                 capabilities: catalog_capabilities(item, kind),
                 last_activity_at: item.updated_at.and_then(catalog_timestamp),
@@ -410,13 +440,23 @@ fn add_memory_ring(
             domain: Some(domain.to_string()),
             sensitivity: None,
             status: "active".to_string(),
-            operational_state: if domain_memories.iter().any(|memory| memory.status == "stale") {
+            operational_state: if domain_memories
+                .iter()
+                .any(|memory| memory.status == "stale")
+            {
                 "attention".to_string()
             } else {
                 "ready".to_string()
             },
+            catalog_state: "not_applicable".to_string(),
+            usage_state: "not_applicable".to_string(),
+            connection_state: "not_applicable".to_string(),
             domains: vec![facet(domain, "declared", &format!("vault-domain:{domain}"))],
-            capabilities: vec![facet("governed_memory", "declared", &format!("vault-domain:{domain}"))],
+            capabilities: vec![facet(
+                "governed_memory",
+                "declared",
+                &format!("vault-domain:{domain}"),
+            )],
             last_activity_at: domain_memories
                 .iter()
                 .map(|memory| memory.updated_at.as_str())
@@ -458,6 +498,9 @@ fn add_memory_ring(
                 sensitivity: Some(memory.sensitivity.clone()),
                 status: memory.status.clone(),
                 operational_state: memory.status.clone(),
+                catalog_state: "not_applicable".to_string(),
+                usage_state: "not_applicable".to_string(),
+                connection_state: "not_applicable".to_string(),
                 domains: vec![facet(&memory.domain, "declared", &memory.vault_path)],
                 capabilities: vec![facet(
                     &format!("memory:{}", memory.mem_type),
@@ -541,11 +584,18 @@ fn add_observed_relations(
                             &routine_id,
                             &target,
                             "consulted",
-                            if routine_evidence == "observed" { "observed" } else { "inferred" },
+                            if routine_evidence == "observed" {
+                                "observed"
+                            } else {
+                                "inferred"
+                            },
                             OrbitProvenance {
                                 kind: "structured_event".to_string(),
                                 reference: format!("audit:{}", trace.run_id),
-                                detail: format!("Memory id persisted in task {} context event", task.id),
+                                detail: format!(
+                                    "Memory id persisted in task {} context event",
+                                    task.id
+                                ),
                                 ts: Some(trace.ts.clone()),
                             },
                         );
@@ -593,7 +643,11 @@ fn add_observed_relations(
                         &routine_id,
                         &target,
                         "produced",
-                        if routine_evidence == "observed" { "observed" } else { "inferred" },
+                        if routine_evidence == "observed" {
+                            "observed"
+                        } else {
+                            "inferred"
+                        },
                         OrbitProvenance {
                             kind: "structured_event".to_string(),
                             reference: format!("audit:{}", trace.run_id),
@@ -632,12 +686,20 @@ fn add_observed_relations(
                     ("executed", "skill", skills),
                     ("used", "application", applications),
                 ] {
+                    let execution_refs = execution_refs(&trace.detail, kind);
+                    let inferred_ids = inferred_catalog_ids(&trace.detail, kind);
                     for item in items {
-                        let structured = structured_catalog_ids(&trace.detail, kind)
+                        let execution = execution_refs
                             .iter()
-                            .any(|id| id == &item.id);
-                        if structured || catalog_trace_match(item, &trace_text).is_some() {
-                            let evidence = if structured { "observed" } else { "inferred" };
+                            .find(|reference| reference.catalog_id == item.id);
+                        let inferred = inferred_ids.iter().any(|id| id == &item.id)
+                            || catalog_trace_match(item, &trace_text).is_some();
+                        if execution.is_some() || inferred {
+                            let evidence = if execution.is_some() {
+                                "observed"
+                            } else {
+                                "inferred"
+                            };
                             let combined_evidence =
                                 if routine_evidence == "observed" && evidence == "observed" {
                                     "observed"
@@ -652,10 +714,27 @@ fn add_observed_relations(
                                 relation,
                                 combined_evidence,
                                 OrbitProvenance {
-                                    kind: if structured { "structured_event" } else { "trace_inference" }.to_string(),
+                                    kind: if execution.is_some() {
+                                        "execution_event"
+                                    } else {
+                                        "trace_inference"
+                                    }
+                                    .to_string(),
                                     reference: format!("audit:{}", trace.run_id),
-                                    detail: trace.summary.clone(),
-                                    ts: Some(trace.ts.clone()),
+                                    detail: execution.map_or_else(
+                                        || trace.summary.clone(),
+                                        |reference| {
+                                            format!(
+                                                "{}: {} ({})",
+                                                reference.operation,
+                                                item.display_name,
+                                                reference.outcome
+                                            )
+                                        },
+                                    ),
+                                    ts: execution
+                                        .map(|reference| reference.occurred_at.clone())
+                                        .or_else(|| Some(trace.ts.clone())),
                                 },
                             );
                         }
@@ -717,7 +796,7 @@ fn load_traces(db: &Db) -> AppResult<Vec<TraceRecord>> {
     })
 }
 
-fn structured_catalog_ids(detail: &Value, kind: &str) -> Vec<String> {
+fn inferred_catalog_ids(detail: &Value, kind: &str) -> Vec<String> {
     detail
         .get("catalogRefs")
         .and_then(Value::as_array)
@@ -726,6 +805,38 @@ fn structured_catalog_ids(detail: &Value, kind: &str) -> Vec<String> {
         .filter(|reference| reference.get("kind").and_then(Value::as_str) == Some(kind))
         .filter_map(|reference| reference.get("catalogId").and_then(Value::as_str))
         .map(str::to_string)
+        .collect()
+}
+
+/// Only executor-emitted references with the complete observation envelope
+/// may become `observed` graph evidence. `catalogRefs` are deliberately not
+/// accepted here: they are lookup hints derived from names, paths or commands.
+fn execution_refs(detail: &Value, kind: &str) -> Vec<ExecutionRef> {
+    detail
+        .get("executionRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|reference| reference.get("kind").and_then(Value::as_str) == Some(kind))
+        .filter_map(|reference| {
+            let catalog_id = reference.get("catalogId")?.as_str()?.trim();
+            let operation = reference.get("operation")?.as_str()?.trim();
+            let outcome = reference.get("outcome")?.as_str()?.trim();
+            let occurred_at = reference.get("occurredAt")?.as_str()?.trim();
+            if catalog_id.is_empty()
+                || operation.is_empty()
+                || outcome.is_empty()
+                || chrono::DateTime::parse_from_rfc3339(occurred_at).is_err()
+            {
+                return None;
+            }
+            Some(ExecutionRef {
+                catalog_id: catalog_id.to_string(),
+                operation: operation.to_string(),
+                outcome: outcome.to_string(),
+                occurred_at: occurred_at.to_string(),
+            })
+        })
         .collect()
 }
 
@@ -758,13 +869,19 @@ fn enrich_operational_state(
             "ready"
         }
         .to_string();
-        core.last_activity_at = tasks.iter().map(|task| task.updated_at.as_str()).max().map(str::to_string);
+        core.last_activity_at = tasks
+            .iter()
+            .map(|task| task.updated_at.as_str())
+            .max()
+            .map(str::to_string);
     }
 
     for task in tasks {
         let task_traces = traces
             .iter()
-            .filter(|trace| trace.task_id.as_deref() == Some(task.id.as_str()) || trace.run_id == task.id)
+            .filter(|trace| {
+                trace.task_id.as_deref() == Some(task.id.as_str()) || trace.run_id == task.id
+            })
             .collect::<Vec<_>>();
         if let Some((routine, evidence)) = match_task_to_routine(task, routines, &task_traces) {
             if let Some(node) = nodes
@@ -777,21 +894,103 @@ fn enrich_operational_state(
 
         for trace in task_traces {
             for kind in ["skill", "application"] {
-                for catalog_id in structured_catalog_ids(&trace.detail, kind) {
-                    if let Some(node) = nodes.iter_mut().find(|node| node.id == format!("{kind}:{catalog_id}")) {
+                let observed_refs = execution_refs(&trace.detail, kind);
+                for reference in &observed_refs {
+                    if let Some(node) = nodes
+                        .iter_mut()
+                        .find(|node| node.id == format!("{kind}:{}", reference.catalog_id))
+                    {
                         node.operational_state = match task.status.as_str() {
                             status if task_is_active(status) => "in_use",
                             "failed" => "attention",
                             _ => "available",
                         }
                         .to_string();
-                        if node.last_activity_at.as_deref().unwrap_or("") < trace.ts.as_str() {
-                            node.last_activity_at = Some(trace.ts.clone());
+                        node.usage_state = "observed".to_string();
+                        if kind == "application" {
+                            node.connection_state =
+                                connection_state(&reference.outcome).to_string();
                         }
-                        push_facet(&mut node.domains, facet(&task.domain, "observed", &format!("task:{}", task.id)));
+                        if node.last_activity_at.as_deref().unwrap_or("")
+                            < reference.occurred_at.as_str()
+                        {
+                            node.last_activity_at = Some(reference.occurred_at.clone());
+                        }
+                        push_facet(
+                            &mut node.domains,
+                            facet(&task.domain, "observed", &format!("task:{}", task.id)),
+                        );
+                    }
+                }
+                for catalog_id in inferred_catalog_ids(&trace.detail, kind) {
+                    if observed_refs
+                        .iter()
+                        .any(|reference| reference.catalog_id == catalog_id)
+                    {
+                        continue;
+                    }
+                    if let Some(node) = nodes
+                        .iter_mut()
+                        .find(|node| node.id == format!("{kind}:{catalog_id}"))
+                    {
+                        if node.usage_state != "observed" {
+                            node.usage_state = "inferred".to_string();
+                        }
+                        push_facet(
+                            &mut node.domains,
+                            facet(&task.domain, "inferred", &format!("task:{}", task.id)),
+                        );
                     }
                 }
             }
+        }
+    }
+    roll_up_catalog_states(nodes);
+}
+
+fn roll_up_catalog_states(nodes: &mut [OrbitNode]) {
+    let mut child_states: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+    for node in nodes.iter().filter(|node| !node.aggregate) {
+        if let Some(group_id) = &node.group_id {
+            child_states.entry(group_id.clone()).or_default().push((
+                node.operational_state.clone(),
+                node.usage_state.clone(),
+                node.connection_state.clone(),
+            ));
+        }
+    }
+    for node in nodes
+        .iter_mut()
+        .filter(|node| node.aggregate && node.catalog_state == "registered")
+    {
+        let Some(states) = child_states.get(&node.id) else {
+            continue;
+        };
+        node.usage_state = if states.iter().any(|state| state.1 == "observed") {
+            "observed"
+        } else if states.iter().any(|state| state.1 == "inferred") {
+            "inferred"
+        } else {
+            "not_observed"
+        }
+        .to_string();
+        if node.kind == "application_group" {
+            node.connection_state = if states.iter().any(|state| state.2 == "failing") {
+                "failing"
+            } else if states.iter().any(|state| state.2 == "working") {
+                "working"
+            } else {
+                "unknown"
+            }
+            .to_string();
+        }
+        if states.iter().any(|state| state.0 == "attention") {
+            node.operational_state = "attention".to_string();
+        } else if states
+            .iter()
+            .any(|state| matches!(state.0.as_str(), "running" | "in_use"))
+        {
+            node.operational_state = "in_use".to_string();
         }
     }
 }
@@ -804,25 +1003,43 @@ fn task_is_active(status: &str) -> bool {
 }
 
 fn apply_task_state(node: &mut OrbitNode, task: &TaskRecord, evidence: &str) {
-    if node.last_activity_at.as_deref().unwrap_or("") <= task.updated_at.as_str() {
+    if node.usage_state != "observed" || evidence == "observed" {
+        node.usage_state = evidence.to_string();
+    }
+    if evidence == "observed"
+        && node.last_activity_at.as_deref().unwrap_or("") <= task.updated_at.as_str()
+    {
         node.operational_state = task.status.clone();
         node.last_activity_at = Some(task.updated_at.clone());
     }
-    push_facet(&mut node.domains, facet(&task.domain, evidence, &format!("task:{}", task.id)));
+    push_facet(
+        &mut node.domains,
+        facet(&task.domain, evidence, &format!("task:{}", task.id)),
+    );
     push_facet(
         &mut node.capabilities,
-        facet(&format!("origin:{}", task.origin_kind), evidence, &format!("task:{}", task.id)),
+        facet(
+            &format!("origin:{}", task.origin_kind),
+            evidence,
+            &format!("task:{}", task.id),
+        ),
     );
     if let Some(category) = task.ontology_category_id.as_deref() {
         push_facet(
             &mut node.capabilities,
-            facet(&format!("ontology:{category}"), evidence, &format!("task:{}", task.id)),
+            facet(
+                &format!("ontology:{category}"),
+                evidence,
+                &format!("task:{}", task.id),
+            ),
         );
     }
 }
 
 fn push_facet(facets: &mut Vec<OrbitFacet>, candidate: OrbitFacet) {
-    if !facets.iter().any(|existing| existing.value == candidate.value && existing.evidence == candidate.evidence) {
+    if !facets.iter().any(|existing| {
+        existing.value == candidate.value && existing.evidence == candidate.evidence
+    }) {
         facets.push(candidate);
     }
 }
@@ -833,15 +1050,29 @@ fn match_task_to_routine<'a>(
     traces: &[&TraceRecord],
 ) -> Option<(&'a CatalogItem, &'static str)> {
     for trace in traces {
+        for reference in execution_refs(&trace.detail, "routine") {
+            if let Some(routine) = routines
+                .iter()
+                .find(|routine| routine.id == reference.catalog_id)
+            {
+                return Some((routine, "observed"));
+            }
+        }
+    }
+    for trace in traces {
         if let Some(id) = trace
             .detail
             .get("routineId")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .or_else(|| structured_catalog_ids(&trace.detail, "routine").into_iter().next())
+            .or_else(|| {
+                inferred_catalog_ids(&trace.detail, "routine")
+                    .into_iter()
+                    .next()
+            })
         {
             if let Some(routine) = routines.iter().find(|routine| routine.id == id) {
-                return Some((routine, "observed"));
+                return Some((routine, "inferred"));
             }
         }
     }
@@ -881,6 +1112,14 @@ fn match_task_to_routine<'a>(
         })
         .max_by_key(|(_, score)| *score)
         .map(|(routine, _)| (routine, "inferred"))
+}
+
+fn connection_state(outcome: &str) -> &'static str {
+    match outcome.to_ascii_lowercase().as_str() {
+        "success" | "succeeded" | "completed" | "ok" => "working",
+        "failure" | "failed" | "error" => "failing",
+        _ => "unknown",
+    }
 }
 
 fn catalog_trace_match(item: &CatalogItem, trace_text: &str) -> Option<&'static str> {
@@ -1002,7 +1241,11 @@ fn catalog_visible_in_domain(item: &CatalogItem, domain: Option<&str>) -> bool {
 fn catalog_capabilities(item: &CatalogItem, kind: &str) -> Vec<OrbitFacet> {
     let source = format!("catalog:{}", item.id);
     let mut values = std::collections::BTreeSet::from([format!("{kind}:{}", item.name)]);
-    if let Some(category) = item.category.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(category) = item
+        .category
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         values.insert(format!("category:{category}"));
     }
     for tag in &item.tags {
@@ -1110,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_catalog_reference_is_observed() {
+    fn text_derived_catalog_reference_remains_inferred() {
         let trace = TraceRecord {
             run_id: "task-1".to_string(),
             task_id: Some("task-1".to_string()),
@@ -1118,13 +1361,55 @@ mod tests {
             kind: "tool_call".to_string(),
             summary: "called tool".to_string(),
             detail: serde_json::json!({
-                "catalogRefs": [{"catalogId": "daily-brief", "kind": "routine"}]
+                "catalogRefs": [{
+                    "catalogId": "daily-brief",
+                    "kind": "routine",
+                    "evidence": "inferred",
+                    "derivation": "command_text"
+                }]
+            }),
+        };
+        let routines = vec![routine()];
+        let matched = match_task_to_routine(&task(), &routines, &[&trace]).unwrap();
+        assert_eq!(matched.0.id, "daily-brief");
+        assert_eq!(matched.1, "inferred");
+    }
+
+    #[test]
+    fn complete_executor_reference_is_observed() {
+        let trace = TraceRecord {
+            run_id: "task-1".to_string(),
+            task_id: Some("task-1".to_string()),
+            ts: "2026-09-23T10:00:01Z".to_string(),
+            kind: "tool_call".to_string(),
+            summary: "executed routine".to_string(),
+            detail: serde_json::json!({
+                "executionRefs": [{
+                    "catalogId": "daily-brief",
+                    "kind": "routine",
+                    "operation": "execute",
+                    "outcome": "succeeded",
+                    "occurredAt": "2026-09-23T10:00:00Z"
+                }]
             }),
         };
         let routines = vec![routine()];
         let matched = match_task_to_routine(&task(), &routines, &[&trace]).unwrap();
         assert_eq!(matched.0.id, "daily-brief");
         assert_eq!(matched.1, "observed");
+    }
+
+    #[test]
+    fn incomplete_executor_reference_is_not_observed() {
+        let detail = serde_json::json!({
+            "executionRefs": [{
+                "catalogId": "daily-brief",
+                "kind": "routine",
+                "outcome": "succeeded",
+                "occurredAt": "not-a-timestamp"
+            }]
+        });
+        assert!(execution_refs(&detail, "routine").is_empty());
     }
 
     #[test]

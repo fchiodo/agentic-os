@@ -80,7 +80,14 @@ pub fn search(
     domain: Option<&str>,
     opts: &MemorySearchOpts,
 ) -> AppResult<Vec<ScoredMemory>> {
-    search_with_profile(db, query, domain, opts, RetrievalProfile::production(), true)
+    search_with_profile(
+        db,
+        query,
+        domain,
+        opts,
+        RetrievalProfile::production(),
+        true,
+    )
 }
 
 fn search_with_profile(
@@ -393,8 +400,24 @@ pub fn benchmark(db: &Db) -> AppResult<super::RetrievalBenchmarkReport> {
     let mut candidate = BenchmarkAccumulator::default();
     let mut production = BenchmarkAccumulator::default();
     for case in &cases {
-        evaluate_case(db, case, RetrievalProfile { aliases: false, fuzzy_trigrams: false }, &mut baseline)?;
-        evaluate_case(db, case, RetrievalProfile { aliases: true, fuzzy_trigrams: true }, &mut candidate)?;
+        evaluate_case(
+            db,
+            case,
+            RetrievalProfile {
+                aliases: false,
+                fuzzy_trigrams: false,
+            },
+            &mut baseline,
+        )?;
+        evaluate_case(
+            db,
+            case,
+            RetrievalProfile {
+                aliases: true,
+                fuzzy_trigrams: true,
+            },
+            &mut candidate,
+        )?;
         evaluate_case(db, case, RetrievalProfile::production(), &mut production)?;
     }
     let mut notes = vec![
@@ -450,7 +473,9 @@ fn evaluate_case(
 ) -> AppResult<()> {
     let started = std::time::Instant::now();
     let paths = retrieval_source_paths(db, &case.question, &case.domain, profile, 5)?;
-    metrics.latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+    metrics
+        .latencies
+        .push(started.elapsed().as_secs_f64() * 1000.0);
     let expected = case.expected_sources.iter().collect::<BTreeSet<_>>();
     metrics.top_one += paths.first().is_some_and(|path| expected.contains(path)) as usize as f64;
     metrics.hit_five += paths.iter().any(|path| expected.contains(path)) as usize as f64;
@@ -473,7 +498,10 @@ fn retrieval_source_paths(
         db,
         query,
         Some(domain),
-        &MemorySearchOpts { include_stale: false, limit: Some(limit * 3) },
+        &MemorySearchOpts {
+            include_stale: false,
+            limit: Some(limit * 3),
+        },
         profile,
         false,
     )?;
@@ -482,9 +510,18 @@ fn retrieval_source_paths(
     let mut ranked = memories
         .into_iter()
         .map(|memory| (memory.row.vault_path, memory.score))
-        .chain(chunks.into_iter().map(|chunk| (chunk.source_path, chunk.score)))
+        .chain(
+            chunks
+                .into_iter()
+                .map(|chunk| (chunk.source_path, chunk.score)),
+        )
         .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut seen = BTreeSet::new();
     Ok(ranked
         .into_iter()
@@ -1114,6 +1151,7 @@ fn claim_supported(
     let claim_subjects = subject_tokens(claim);
     let claim_is_negative = has_negation(claim);
     let claim_frames = relation_frames(claim);
+    let claim_sequence = support_sequence(claim);
     citation_ids
         .iter()
         .filter_map(|id| evidence.get(id - 1))
@@ -1126,12 +1164,18 @@ fn claim_supported(
                 && claim_numbers.is_subset(&numeric_tokens(sentence))
                 && claim_subjects.is_subset(&subject_tokens(sentence))
                 && claim_is_negative == has_negation(sentence)
-                && (claim_frames.is_empty()
-                    || claim_frames.iter().all(|claim_frame| {
+                && (if claim_frames.is_empty() {
+                    // An unknown predicate is not evidence-free. Require the
+                    // meaningful claim tokens to occur in source order so a
+                    // lexical bag-of-words match cannot reverse its roles.
+                    is_ordered_subsequence(&claim_sequence, &support_sequence(sentence))
+                } else {
+                    claim_frames.iter().all(|claim_frame| {
                         relation_frames(sentence)
                             .iter()
                             .any(|evidence_frame| evidence_frame.supports(claim_frame))
-                    }))
+                    })
+                })
         })
 }
 
@@ -1191,22 +1235,15 @@ fn relation_frames(value: &str) -> Vec<RelationFrame> {
 
 fn relation_token(value: &str) -> Option<&'static str> {
     match value {
-        "manage" | "manages" | "managed" | "managing" | "gestisce" | "gestiscono"
-        | "gestito" => Some("manage"),
+        "manage" | "manages" | "managed" | "managing" | "gestisce" | "gestiscono" | "gestito" => {
+            Some("manage")
+        }
         "own" | "owns" | "owned" | "possiede" | "possiedono" => Some("own"),
-        "use" | "uses" | "used" | "usa" | "usano" | "utilizza" | "utilizzano" => {
-            Some("use")
-        }
+        "use" | "uses" | "used" | "usa" | "usano" | "utilizza" | "utilizzano" => Some("use"),
         "depend" | "depends" | "depended" | "dipende" | "dipendono" => Some("depend"),
-        "replace" | "replaces" | "replaced" | "sostituisce" | "sostituito" => {
-            Some("replace")
-        }
-        "require" | "requires" | "required" | "richiede" | "richiedono" => {
-            Some("require")
-        }
-        "approve" | "approves" | "approved" | "approva" | "approvato" => {
-            Some("approve")
-        }
+        "replace" | "replaces" | "replaced" | "sostituisce" | "sostituito" => Some("replace"),
+        "require" | "requires" | "required" | "richiede" | "richiedono" => Some("require"),
+        "approve" | "approves" | "approved" | "approva" | "approvato" => Some("approve"),
         "launch" | "launches" | "launched" | "lancia" | "lanciato" => Some("launch"),
         "precede" | "precedes" | "preceded" | "precedevo" => Some("precede"),
         "follow" | "follows" | "followed" | "segue" | "seguito" => Some("follow"),
@@ -1216,8 +1253,8 @@ fn relation_token(value: &str) -> Option<&'static str> {
 
 fn frame_terms(tokens: &[String]) -> BTreeSet<String> {
     const FRAME_STOPWORDS: [&str; 23] = [
-        "a", "an", "and", "by", "che", "con", "da", "dei", "del", "della", "di", "e",
-        "for", "gli", "il", "in", "la", "le", "of", "on", "per", "the", "un",
+        "a", "an", "and", "by", "che", "con", "da", "dei", "del", "della", "di", "e", "for", "gli",
+        "il", "in", "la", "le", "of", "on", "per", "the", "un",
     ];
     tokens
         .iter()
@@ -1284,66 +1321,90 @@ fn has_negation(value: &str) -> bool {
 }
 
 fn support_terms(value: &str) -> BTreeSet<String> {
-    const STOPWORDS: [&str; 52] = [
-        "about",
-        "also",
-        "and",
-        "are",
-        "che",
-        "come",
-        "con",
-        "cosa",
-        "dei",
-        "del",
-        "della",
-        "delle",
-        "enable",
-        "enables",
-        "for",
-        "from",
-        "gli",
-        "has",
-        "have",
-        "include",
-        "includes",
-        "including",
-        "into",
-        "its",
-        "nel",
-        "nella",
-        "nelle",
-        "offre",
-        "offrono",
-        "offers",
-        "per",
-        "provide",
-        "provides",
-        "sono",
-        "support",
-        "supports",
-        "that",
-        "the",
-        "their",
-        "this",
-        "those",
-        "through",
-        "una",
-        "uno",
-        "was",
-        "were",
-        "which",
-        "with",
-        "your",
-        "comprende",
-        "comprendono",
-        "anche",
-    ];
+    support_sequence(value).into_iter().collect()
+}
+
+fn support_sequence(value: &str) -> Vec<String> {
     value
         .to_lowercase()
         .split(|character: char| !character.is_alphanumeric())
-        .filter(|term| term.chars().count() > 2 && !STOPWORDS.contains(term))
+        .filter(|term| term.chars().count() > 2 && !is_support_stopword(term))
         .map(normalize_support_term)
         .collect()
+}
+
+fn is_ordered_subsequence(needle: &[String], haystack: &[String]) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut next = 0;
+    for term in haystack {
+        if needle.get(next) == Some(term) {
+            next += 1;
+            if next == needle.len() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_support_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "about"
+            | "also"
+            | "and"
+            | "are"
+            | "che"
+            | "come"
+            | "con"
+            | "cosa"
+            | "dei"
+            | "del"
+            | "della"
+            | "delle"
+            | "enable"
+            | "enables"
+            | "for"
+            | "from"
+            | "gli"
+            | "has"
+            | "have"
+            | "include"
+            | "includes"
+            | "including"
+            | "into"
+            | "its"
+            | "nel"
+            | "nella"
+            | "nelle"
+            | "offre"
+            | "offrono"
+            | "offers"
+            | "per"
+            | "provide"
+            | "provides"
+            | "sono"
+            | "support"
+            | "supports"
+            | "that"
+            | "the"
+            | "their"
+            | "this"
+            | "those"
+            | "through"
+            | "una"
+            | "uno"
+            | "was"
+            | "were"
+            | "which"
+            | "with"
+            | "your"
+            | "comprende"
+            | "comprendono"
+            | "anche"
+    )
 }
 
 fn normalize_support_term(term: &str) -> String {
@@ -1714,6 +1775,31 @@ mod tests {
     }
 
     #[test]
+    fn verifier_requires_extractive_order_for_unknown_relations() {
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/payments.md",
+            "Alice paid Bob 120 euros on 2026-09-01. Bob paid Alice 80 euros on 2026-09-02.",
+            0.91,
+        )];
+        assert!(claim_supported(
+            "Alice paid Bob 120 euros on 2026-09-01.",
+            &BTreeSet::from([1]),
+            &evidence,
+        ));
+        assert!(!claim_supported(
+            "Bob paid Alice 120 euros on 2026-09-01.",
+            &BTreeSet::from([1]),
+            &evidence,
+        ));
+        assert!(!claim_supported(
+            "Alice did not pay Bob 120 euros on 2026-09-01.",
+            &BTreeSet::from([1]),
+            &evidence,
+        ));
+    }
+
+    #[test]
     fn verifier_binds_numbers_to_the_correct_relation_frame() {
         let evidence = vec![passage(
             "source:1:10",
@@ -1735,10 +1821,8 @@ mod tests {
 
     #[test]
     fn fuzzy_retrieval_scans_beyond_two_thousand_recent_memories() {
-        let db_path = std::env::temp_dir().join(format!(
-            "agentic-os-fuzzy-corpus-{}.db",
-            Uuid::new_v4()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("agentic-os-fuzzy-corpus-{}.db", Uuid::new_v4()));
         let db = Db::open(&db_path).unwrap();
         db.with_conn(|conn| {
             conn.execute(
@@ -1768,14 +1852,8 @@ mod tests {
         })
         .unwrap();
 
-        let hits = search_local_similarity(
-            &db,
-            "orcestrazione affidabile",
-            Some("work"),
-            false,
-            5,
-        )
-        .unwrap();
+        let hits = search_local_similarity(&db, "orcestrazione affidabile", Some("work"), false, 5)
+            .unwrap();
         assert!(hits.iter().any(|(id, _)| id == "target"));
         drop(db);
         let _ = std::fs::remove_file(db_path);
@@ -1783,18 +1861,64 @@ mod tests {
 
     #[test]
     fn benchmark_uses_confirmed_questions_and_the_production_pipeline() {
-        let db_path = std::env::temp_dir().join(format!(
-            "agentic-os-retrieval-eval-{}.db",
-            Uuid::new_v4()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("agentic-os-retrieval-eval-{}.db", Uuid::new_v4()));
         let db = Db::open(&db_path).unwrap();
         let fixtures = [
-            ("work", "feed", "work/decisions/feed.md", "Decisione integrazione", "Feed delta per evitare timeout SFTP", "Il feed PowerReviews usa file delta per evitare i timeout SFTP.", "Quale modalità del feed evita i timeout SFTP?"),
-            ("planphysique", "deload", "planphysique/decisions/deload.md", "Ciclo di scarico", "Deload ogni sei settimane", "Il programma prevede una settimana di deload ogni sei settimane.", "Ogni quante settimane è previsto il deload?"),
-            ("personal", "passport", "personal/facts/passport.md", "Rinnovo documento", "Passaporto il 14 ottobre 2026", "L'appuntamento per il rinnovo del passaporto è il 14 ottobre 2026.", "Quando è l'appuntamento per il rinnovo del passaporto?"),
-            ("family", "school", "family/facts/school.md", "Riunione scolastica", "Colloquio aula 3", "Il colloquio scolastico si tiene in aula 3 alle 17:30.", "In quale aula si tiene il colloquio scolastico?"),
-            ("finance", "tax", "finance/decisions/tax.md", "Accantonamento imposte", "Accantonare il 28 percento", "La decisione è accantonare il 28 percento di ogni incasso per le imposte.", "Quale percentuale degli incassi va accantonata per le imposte?"),
-            ("research", "embedding", "research/facts/embedding.md", "Modello embeddings locale", "e5-small per prototipo locale", "Il prototipo di ricerca semantica usa il modello e5-small in locale.", "Quale modello usa il prototipo di ricerca semantica locale?"),
+            (
+                "work",
+                "feed",
+                "work/decisions/feed.md",
+                "Decisione integrazione",
+                "Feed delta per evitare timeout SFTP",
+                "Il feed PowerReviews usa file delta per evitare i timeout SFTP.",
+                "Quale modalità del feed evita i timeout SFTP?",
+            ),
+            (
+                "planphysique",
+                "deload",
+                "planphysique/decisions/deload.md",
+                "Ciclo di scarico",
+                "Deload ogni sei settimane",
+                "Il programma prevede una settimana di deload ogni sei settimane.",
+                "Ogni quante settimane è previsto il deload?",
+            ),
+            (
+                "personal",
+                "passport",
+                "personal/facts/passport.md",
+                "Rinnovo documento",
+                "Passaporto il 14 ottobre 2026",
+                "L'appuntamento per il rinnovo del passaporto è il 14 ottobre 2026.",
+                "Quando è l'appuntamento per il rinnovo del passaporto?",
+            ),
+            (
+                "family",
+                "school",
+                "family/facts/school.md",
+                "Riunione scolastica",
+                "Colloquio aula 3",
+                "Il colloquio scolastico si tiene in aula 3 alle 17:30.",
+                "In quale aula si tiene il colloquio scolastico?",
+            ),
+            (
+                "finance",
+                "tax",
+                "finance/decisions/tax.md",
+                "Accantonamento imposte",
+                "Accantonare il 28 percento",
+                "La decisione è accantonare il 28 percento di ogni incasso per le imposte.",
+                "Quale percentuale degli incassi va accantonata per le imposte?",
+            ),
+            (
+                "research",
+                "embedding",
+                "research/facts/embedding.md",
+                "Modello embeddings locale",
+                "e5-small per prototipo locale",
+                "Il prototipo di ricerca semantica usa il modello e5-small in locale.",
+                "Quale modello usa il prototipo di ricerca semantica locale?",
+            ),
         ];
         for (domain, id, path, title, summary, body, question) in fixtures {
             let row = super::super::MemoryRow {
@@ -1834,7 +1958,14 @@ mod tests {
         }
 
         db.with_conn(|conn| {
-            for domain in ["work", "planphysique", "personal", "family", "finance", "research"] {
+            for domain in [
+                "work",
+                "planphysique",
+                "personal",
+                "family",
+                "finance",
+                "research",
+            ] {
                 for index in 0..200 {
                     let id = format!("{domain}-archive-{index}");
                     conn.execute(
@@ -1844,7 +1975,12 @@ mod tests {
                          VALUES (?1, ?2, ?3, 'fact', ?4, 'generic unrelated archive record',
                           'normal', 0.7, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z',
                           '{}', ?1, 'active')",
-                        params![id, format!("{domain}/facts/archive-{index}.md"), domain, format!("Archive {index}")],
+                        params![
+                            id,
+                            format!("{domain}/facts/archive-{index}.md"),
+                            domain,
+                            format!("Archive {index}")
+                        ],
                     )?;
                     let rowid = conn.last_insert_rowid();
                     conn.execute(

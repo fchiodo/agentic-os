@@ -105,7 +105,10 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                 task_id,
                 "context",
                 "context",
-                &format!("Injected {} memories into context", context.injected_paths.len()),
+                &format!(
+                    "Injected {} memories into context",
+                    context.injected_paths.len()
+                ),
                 json!({
                     "injected": context.injected_paths,
                     "memoryRefs": context.memory_refs,
@@ -205,14 +208,28 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                             let _ = orchestrator::set_thread_id(db, task_id, id);
                         }
                         record(
-                            app, db, task_id, "agent_message", "context", "Session started",
-                            value, None, None,
+                            app,
+                            db,
+                            task_id,
+                            "agent_message",
+                            "context",
+                            "Session started",
+                            value,
+                            None,
+                            None,
                         );
                     }
                     "turn.started" => {
                         record(
-                            app, db, task_id, "step_started", "model_call", "Turn started", value,
-                            None, None,
+                            app,
+                            db,
+                            task_id,
+                            "step_started",
+                            "model_call",
+                            "Turn started",
+                            value,
+                            None,
+                            None,
                         );
                     }
                     "turn.completed" => {
@@ -223,8 +240,15 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                             let _ = orchestrator::accrue_cost(db, task_id, tokens);
                         }
                         record(
-                            app, db, task_id, "step_completed", "model_call", "Turn completed",
-                            value, tokens, None,
+                            app,
+                            db,
+                            task_id,
+                            "step_completed",
+                            "model_call",
+                            "Turn completed",
+                            value,
+                            tokens,
+                            None,
                         );
                     }
                     "turn.failed" | "error" => {
@@ -283,15 +307,29 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                         };
 
                         record(
-                            app, db, task_id, event_kind, audit_kind, &summary_text, value,
-                            None, None,
+                            app,
+                            db,
+                            task_id,
+                            event_kind,
+                            audit_kind,
+                            &summary_text,
+                            value,
+                            None,
+                            None,
                         );
                     }
                     t if is_tool_shaped(t) => {
                         let summary_text = summarize(&value, t);
                         record(
-                            app, db, task_id, "tool_call", "tool_call",
-                            &summary_text, value, None, None,
+                            app,
+                            db,
+                            task_id,
+                            "tool_call",
+                            "tool_call",
+                            &summary_text,
+                            value,
+                            None,
+                            None,
                         );
                     }
                     t if t.contains("token") || t.contains("usage") => {
@@ -300,8 +338,15 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
                             let _ = orchestrator::accrue_cost(db, task_id, tokens);
                         }
                         record(
-                            app, db, task_id, "cost_update", "model_call", "Token usage update",
-                            value, tokens, None,
+                            app,
+                            db,
+                            task_id,
+                            "cost_update",
+                            "model_call",
+                            "Token usage update",
+                            value,
+                            tokens,
+                            None,
                         );
                     }
                     _ => {
@@ -405,7 +450,14 @@ async fn run(app: &AppHandle, db: &Db, task_id: &str) -> AppResult<()> {
         let outcome = if outcome.trim().is_empty() {
             "Task completed successfully.".to_string()
         } else {
-            outcome.chars().rev().take(8_000).collect::<String>().chars().rev().collect()
+            outcome
+                .chars()
+                .rev()
+                .take(8_000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect()
         };
         match crate::memory::pipeline::process_run_capture(
             db,
@@ -474,10 +526,20 @@ fn extract_token_count(value: &Value) -> Option<i64> {
 /// already included in output per the Codex accounting).
 fn extract_turn_usage(value: &Value) -> Option<i64> {
     let usage = value.get("usage")?;
-    let input = usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
-    let output = usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+    let input = usage
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let total = input + output;
-    if total > 0 { Some(total) } else { None }
+    if total > 0 {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {
@@ -559,6 +621,9 @@ fn enrich_structured_refs(mut detail: Value, audit_kind: &str) -> Value {
         ("tool", detail_pointer_string(object, "/toolName")),
         ("tool", detail_pointer_string(object, "/item/name")),
     ];
+    // These are catalog lookup hints only. Even an exact path can appear in a
+    // command that merely prints or inspects it, so this adapter must never
+    // manufacture an observed execution reference from command text.
     let catalog = EVENT_CATALOG.get_or_init(|| {
         crate::discovery::discover()
             .map(|discovery| discovery.catalog.items)
@@ -594,6 +659,12 @@ fn enrich_structured_refs(mut detail: Value, audit_kind: &str) -> Value {
                     "catalogId": item.id.clone(),
                     "kind": kind,
                     "matchField": field,
+                    "evidence": "inferred",
+                    "derivation": match field {
+                        "command" => "command_text",
+                        "path" => "path_match",
+                        _ => "tool_name_match",
+                    },
                 }));
             }
         }
@@ -604,10 +675,7 @@ fn enrich_structured_refs(mut detail: Value, audit_kind: &str) -> Value {
     detail
 }
 
-fn detail_pointer_string(
-    object: &serde_json::Map<String, Value>,
-    pointer: &str,
-) -> Option<String> {
+fn detail_pointer_string(object: &serde_json::Map<String, Value>, pointer: &str) -> Option<String> {
     Value::Object(object.clone())
         .pointer(pointer)
         .and_then(Value::as_str)

@@ -242,6 +242,11 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
   const [selectedId, setSelectedId] = useState<string>('core:agentic-os')
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [livePulse, setLivePulse] = useState(false)
+  const [reducedMotion, setReducedMotion] = useState(
+    () => typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  )
   const lastTaskEvent = useTaskEventsStore((state) => state.lastEvent)
   const orbitQuery = useMemoryOrbitMap(domain, includeSensitive)
   const refetchOrbit = orbitQuery.refetch
@@ -251,19 +256,28 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
     () => new Map((orbitQuery.data?.nodes ?? []).map((node) => [node.id, node])),
     [orbitQuery.data?.nodes],
   )
-  const selectedNode = nodeById.get(selectedId) ?? null
+  const activeSelectedId = nodeById.has(selectedId) ? selectedId : 'core:agentic-os'
+  const selectedNode = nodeById.get(activeSelectedId) ?? null
   const query = search.trim().toLocaleLowerCase()
 
   useEffect(() => {
     nodeByIdRef.current = nodeById
   }, [nodeById])
 
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const onChange = (event: MediaQueryListEvent) => setReducedMotion(event.matches)
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }, [])
+
   const visibleIds = useMemo(() => {
     const visible = new Set<string>()
     const nodes = orbitQuery.data?.nodes ?? []
     for (const node of nodes) {
       const matchesSearch = query.length === 0
-        || [node.label, node.subtitle ?? '', node.domain ?? '', node.status, node.sourceRef]
+        || [node.label, node.subtitle ?? '', node.domain ?? '', node.status, node.operationalState, node.catalogState, node.usageState, node.connectionState, node.sourceRef]
           .join(' ')
           .toLocaleLowerCase()
           .includes(query)
@@ -392,6 +406,17 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
     })
     renderer.getCamera().setState(cameraState)
 
+    if (reducedMotion) {
+      for (const [node, target] of targets) {
+        if (graph.hasNode(node)) graph.mergeNodeAttributes(node, target)
+      }
+      for (const node of departingIds) {
+        if (graph.hasNode(node)) graph.dropNode(node)
+      }
+      renderer.refresh()
+      return
+    }
+
     const started = performance.now()
     const animate = (now: number) => {
       const progress = Math.min(1, (now - started) / 220)
@@ -420,40 +445,37 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
       if (transitionRef.current !== null) window.cancelAnimationFrame(transitionRef.current)
       transitionRef.current = null
     }
-  }, [nextGraph])
+  }, [nextGraph, reducedMotion])
 
   useEffect(() => {
     const renderer = rendererRef.current
     const graph = graphRef.current
-    if (!renderer || !graph || !graph.hasNode(selectedId)) return
-    const neighbors = new Set(graph.neighbors(selectedId))
+    if (!renderer || !graph || !graph.hasNode(activeSelectedId)) return
+    const neighbors = new Set(graph.neighbors(activeSelectedId))
     renderer.setSetting('nodeReducer', (node, data) => {
       if (data.ringGuide) return data
-      if (node === selectedId) return { ...data, highlighted: true, forceLabel: true, size: data.size * 1.2 }
-      if (selectedId && !neighbors.has(node)) return { ...data, color: '#d1cfc5', label: '' }
+      if (node === activeSelectedId) return { ...data, highlighted: true, forceLabel: true, size: data.size * 1.2 }
+      if (activeSelectedId && !neighbors.has(node)) return { ...data, color: '#d1cfc5', label: '' }
       return data
     })
     renderer.setSetting('edgeReducer', (edge, data) => {
       if (data.ringGuide) return data
-      if (graph.source(edge) === selectedId || graph.target(edge) === selectedId) {
+      if (graph.source(edge) === activeSelectedId || graph.target(edge) === activeSelectedId) {
         return { ...data, color: data.recentActivity && livePulse ? '#c6613f' : '#141413', size: Math.max(data.recentActivity && livePulse ? 3.4 : 1.4, data.size), zIndex: 4 }
       }
-      return { ...data, color: '#e0ded6', hidden: Boolean(selectedId) }
+      return { ...data, color: '#e0ded6', hidden: Boolean(activeSelectedId) }
     })
     renderer.refresh()
-  }, [livePulse, selectedId])
+  }, [activeSelectedId, livePulse, nextGraph])
 
   useEffect(() => {
     const renderer = rendererRef.current
-    const graph = graphRef.current
-    if (!renderer || !graph || !graph.hasNode(selectedId)) return
-    const display = renderer.getNodeDisplayData(selectedId)
-    if (!display) return
-    renderer.getCamera().animate(
-      { x: display.x, y: display.y, ratio: selectedNode?.aggregate ? 0.72 : 0.55 },
-      { duration: 260 },
-    )
-  }, [selectedId, selectedNode?.aggregate])
+    if (!renderer || !nextGraph.hasNode(activeSelectedId)) return
+    const attributes = nextGraph.getNodeAttributes(activeSelectedId)
+    const target = { x: Number(attributes.x), y: Number(attributes.y), ratio: selectedNode?.aggregate ? 0.72 : 0.55 }
+    if (reducedMotion) renderer.getCamera().setState(target)
+    else renderer.getCamera().animate(target, { duration: 260 })
+  }, [activeSelectedId, nextGraph, reducedMotion, selectedNode?.aggregate])
 
   const relations = useMemo(() => {
     if (!orbitQuery.data || !selectedNode) return []
@@ -529,7 +551,7 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
               <div className="orbit-detail-heading"><Layers3 aria-hidden="true" size={18} /><div><p className="eyebrow">{RING_META[selectedNode.ring].label}</p><h2>{selectedNode.label}</h2></div></div>
               <div className="orbit-detail-badges"><StatusBadge label={selectedNode.operationalState} tone={selectedNode.operationalState === 'attention' || selectedNode.status === 'stale' ? 'warning' : selectedNode.operationalState === 'running' || selectedNode.operationalState === 'in_use' ? 'success' : 'neutral'} />{selectedNode.domain && <span>{DOMAIN_LABELS[selectedNode.domain] ?? selectedNode.domain}</span>}{selectedNode.sensitivity && <span><ShieldCheck aria-hidden="true" size={13} />{selectedNode.sensitivity}</span>}</div>
               {selectedNode.preview && <p className="orbit-preview">{selectedNode.preview}</p>}
-              <dl className="orbit-detail-meta"><dt>Source</dt><dd><code>{selectedNode.sourceRef}</code></dd>{selectedNode.sourcePath && <><dt>Path</dt><dd><code>{selectedNode.sourcePath}</code></dd></>}<dt>Visible items</dt><dd>{selectedNode.count}</dd>{selectedNode.lastActivityAt && <><dt>Last activity</dt><dd>{formatRelativeTime(Date.parse(selectedNode.lastActivityAt))}</dd></>}<dt>Domains</dt><dd>{selectedNode.domains.length > 0 ? selectedNode.domains.map((item) => `${item.value} (${item.evidence})`).join(', ') : 'Global'}</dd><dt>Capabilities</dt><dd>{selectedNode.capabilities.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd></dl>
+              <dl className="orbit-detail-meta"><dt>Source</dt><dd><code>{selectedNode.sourceRef}</code></dd>{selectedNode.sourcePath && <><dt>Path</dt><dd><code>{selectedNode.sourcePath}</code></dd></>}<dt>Catalog</dt><dd>{selectedNode.catalogState}</dd><dt>Usage</dt><dd>{selectedNode.usageState}</dd><dt>Connection</dt><dd>{selectedNode.connectionState}</dd><dt>Visible items</dt><dd>{selectedNode.count}</dd>{selectedNode.lastActivityAt && <><dt>Last activity</dt><dd>{formatRelativeTime(Date.parse(selectedNode.lastActivityAt))}</dd></>}<dt>Domains</dt><dd>{selectedNode.domains.length > 0 ? selectedNode.domains.map((item) => `${item.value} (${item.evidence})`).join(', ') : 'Global'}</dd><dt>Capabilities</dt><dd>{selectedNode.capabilities.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd></dl>
               <div className="orbit-detail-actions">
                 {selectedNode.aggregate && <button className="secondary-button" onClick={toggleSelectedGroup} type="button">{expandedGroups.has(selectedNode.id) ? 'Collapse group' : 'Expand group'}</button>}
                 {selectedNode.actions.includes('open_memory') && selectedNode.sourcePath && <button className="primary-button" onClick={() => onOpenMemory(selectedNode.sourcePath!)} type="button"><ExternalLink aria-hidden="true" size={14} />Open in Memory</button>}

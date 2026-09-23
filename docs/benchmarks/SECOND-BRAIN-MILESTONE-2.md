@@ -8,9 +8,9 @@ call is part of this measurement.
 
 | Profile | Top-1 | Hit@5 | Recall@5 | MRR | p50 | p95 | Outbound cost |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| FTS5 baseline | 100% | 100% | 100% | 1.00 | 1.39 ms | 1.73 ms | $0 |
-| Candidate: FTS5 + aliases + fuzzy trigram | 100% | 100% | 100% | 1.00 | 11.22 ms | 11.44 ms | $0 |
-| Production flags | 100% | 100% | 100% | 1.00 | 1.36 ms | 1.48 ms | $0 |
+| FTS5 baseline | 100% | 100% | 100% | 1.00 | 1.40 ms | 3.47 ms | $0 |
+| Candidate: FTS5 + aliases + fuzzy trigram | 100% | 100% | 100% | 1.00 | 11.26 ms | 13.39 ms | $0 |
+| Production flags | 100% | 100% | 100% | 1.00 | 1.35 ms | 1.42 ms | $0 |
 
 The fuzzy candidate scanned all 1,206 eligible rows. A separate regression test
 uses 2,006 rows and puts the only matching source behind 2,005 newer rows; it is
@@ -18,7 +18,7 @@ still retrieved, proving that the former 2,000-row truncation is gone.
 
 The real-registry orbital composition test on the same machine discovered 625
 skills and 208 applications, produced 857 typed relations, and completed in
-1,507.55 ms. The isolated demo vault correctly reported zero memories and the
+691.84 ms. The isolated demo vault correctly reported zero memories and the
 registry reported zero routines; the corresponding radial guides remain
 visible without inventing placeholder records. Registry discovery dominates
 that cold composition time and is the next optimization target.
@@ -28,6 +28,10 @@ adds roughly 10 ms p95, so it remains off by default. This result validates the
 measurement path and the corpus-limit fix; it is not evidence that embeddings
 are unnecessary. Semantic search remains `not_configured` until a real local
 embedding backend has its own quality, latency, storage and cost comparison.
+Six questions also do not establish general Ask quality, and the empty Memory
+and Routines rings do not validate expansion fluidity for a complete working
+vault. These remain explicit milestone-closure gates rather than inferred
+successes.
 
 Reproduce with:
 
@@ -36,6 +40,9 @@ cargo test memory::retrieval::tests::benchmark_uses_confirmed_questions_and_the_
 ```
 
 The deterministic Ask suite additionally rejects uncited claims, polarity
-reversals, changed subjects/numbers/dates, same-token role reversals, and a
-number attached to the wrong subject. Full native and frontend verification for
-this run: 57 Rust tests and 7 Vitest tests passed.
+reversals, changed subjects/numbers/dates, same-token role reversals, a number
+attached to the wrong subject, and role reversal for predicates outside the
+recognized relation list. The orbital suite proves that text-derived catalog
+references remain inferred and only complete executor envelopes become
+observed. Full native and frontend verification for this run: 60 Rust tests and
+7 Vitest tests passed; TypeScript build and ESLint also passed.
