@@ -106,6 +106,19 @@ struct QueryPlanOutcome {
     latency_ms: f64,
 }
 
+fn handle_progressive_retry_error(
+    error: crate::error::AppError,
+    warnings: &mut Vec<String>,
+) -> AppResult<()> {
+    if error.to_string() == crate::harness::structured::STOPPED_BY_USER {
+        return Err(error);
+    }
+    warnings.push(format!(
+        "Il secondo passaggio di sintesi non è disponibile ({error})."
+    ));
+    Ok(())
+}
+
 /// Half-lives for recency decay per type (in days).
 fn half_life_days(mem_type: &str) -> f64 {
     match mem_type {
@@ -993,14 +1006,14 @@ pub async fn ask(
                     metrics.retry_tokens = retry_output.tokens;
                     match parse_synthesis_json(&retry_output.text) {
                         Ok(retry_raw) => {
-                        answer = verify_synthesis(
-                            &answer_id,
-                            request,
-                            &generated_at,
-                            &broader,
-                            retry_raw,
-                            &mut warnings,
-                        );
+                            answer = verify_synthesis(
+                                &answer_id,
+                                request,
+                                &generated_at,
+                                &broader,
+                                retry_raw,
+                                &mut warnings,
+                            );
                         }
                         Err(error) => warnings.push(format!(
                             "Il secondo passaggio non ha prodotto dati verificabili ({error})."
@@ -1009,9 +1022,17 @@ pub async fn ask(
                 }
                 Err(error) => {
                     metrics.retry_latency_ms = retry_started.elapsed().as_secs_f64() * 1000.0;
-                    warnings.push(format!(
-                        "Il secondo passaggio di sintesi non è disponibile ({error})."
-                    ));
+                    if let Err(error) = handle_progressive_retry_error(error, &mut warnings) {
+                        let _ = audit_answer_failure(
+                            db,
+                            &answer_id,
+                            request,
+                            &error.to_string(),
+                            &metrics,
+                            ask_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -1059,9 +1080,7 @@ async fn plan_search_queries(
             tokens: output.tokens,
             latency_ms,
         }),
-        Ok(Err(error))
-            if error.to_string() == crate::harness::structured::STOPPED_BY_USER =>
-        {
+        Ok(Err(error)) if error.to_string() == crate::harness::structured::STOPPED_BY_USER => {
             Err(error)
         }
         _ => Ok(QueryPlanOutcome {
@@ -2154,6 +2173,25 @@ mod tests {
         };
         assert_eq!(metrics.total_tokens(), Some(230));
         assert_eq!(metrics.model_calls, 3);
+    }
+
+    #[test]
+    fn progressive_retry_propagates_user_cancellation() {
+        let mut warnings = Vec::new();
+        let stopped = crate::error::AppError::Io(std::io::Error::other(
+            crate::harness::structured::STOPPED_BY_USER,
+        ));
+
+        let error = handle_progressive_retry_error(stopped, &mut warnings).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            crate::harness::structured::STOPPED_BY_USER
+        );
+        assert!(
+            warnings.is_empty(),
+            "a cancellation must not be downgraded to a retry warning"
+        );
     }
 
     #[test]
