@@ -163,11 +163,12 @@ number/date and named-subject substitutions, same-token role reversals, numbers
 attached to the wrong subject, and role reversal for predicates outside the
 small recognized relation vocabulary. For an unrecognized relation, ordered
 overlap only locates a candidate sentence. For a recognized relation, both
-argument sides must match exactly before a model paraphrase is accepted. In all
+argument sides must match and the claim must cover the complete meaningful
+sequence of the source sentence before a model paraphrase is accepted. In all
 other cases Ask exposes the complete source sentence or abstains, preserving
-attribution and modal uncertainty such as “said” and “might”. Progressive
-retrieval is excluded from the zero-outbound-cost benchmark and remains
-measurable from audited Ask runs because it may add model tokens.
+sentence-level attribution, modality, conditions, and compound-clause scope.
+Progressive retrieval is excluded from the zero-outbound-cost benchmark and
+remains measurable from audited Ask runs because it may add model tokens.
 
 The candidate is promoted only if it improves coverage without reducing
 supported-claim precision, while keeping the agreed desktop p95 and cost

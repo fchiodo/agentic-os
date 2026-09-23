@@ -1146,10 +1146,11 @@ fn claim_supported(
 }
 
 /// Return only text that is safe to expose in the answer. A claim with a
-/// recognized relation can keep its verified wording only when both sides of
-/// the relation match exactly. Otherwise, as with relations outside the
-/// deterministic vocabulary, the model paraphrase is replaced with the
-/// complete source sentence so attribution and modality cannot disappear.
+/// recognized relation can keep its verified wording only when it covers the
+/// complete meaningful sequence of the source sentence. Otherwise, as with
+/// relations outside the deterministic vocabulary, the model paraphrase is
+/// replaced with the complete source sentence so attribution, modality,
+/// conditions, and context shared by compound clauses cannot disappear.
 fn verified_claim_text(
     claim: &str,
     citation_ids: &BTreeSet<usize>,
@@ -1205,12 +1206,12 @@ fn verified_claim_text(
                 if !supported {
                     return None;
                 }
-                let arguments_match_exactly = claim_frames.iter().all(|claim_frame| {
-                    evidence_frames
-                        .iter()
-                        .any(|evidence_frame| evidence_frame.supports_exactly(claim_frame))
-                });
-                if arguments_match_exactly {
+                // A locally exact relation frame is not enough to prove that a
+                // shortened claim preserved sentence-level scope. Reporting,
+                // modality, or a condition before the first clause can govern
+                // every later clause. Only keep the model wording when no
+                // meaningful source token was omitted.
+                if sentence_scope_sequence(claim) == sentence_scope_sequence(sentence) {
                     Some(claim.trim().to_string())
                 } else {
                     (sentence.chars().count() <= MAX_CLAIM_CHARS)
@@ -1234,10 +1235,6 @@ impl RelationFrame {
             && !claim.right.is_empty()
             && claim.left.is_subset(&self.left)
             && claim.right.is_subset(&self.right)
-    }
-
-    fn supports_exactly(&self, claim: &Self) -> bool {
-        self.relation == claim.relation && self.left == claim.left && self.right == claim.right
     }
 }
 
@@ -1392,6 +1389,19 @@ fn support_sequence(value: &str) -> Vec<String> {
         .split(|character: char| !character.is_alphanumeric())
         .filter(|term| term.chars().count() > 2 && !is_support_stopword(term))
         .map(normalize_support_term)
+        .collect()
+}
+
+/// Compare sentence scope without dropping short words or retrieval
+/// stopwords. Terms such as "if", "may", "that", and auxiliaries can govern
+/// the truth conditions of the whole sentence even though they add little to
+/// lexical retrieval.
+fn sentence_scope_sequence(value: &str) -> Vec<String> {
+    value
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_string)
         .collect()
 }
 
@@ -1948,11 +1958,54 @@ mod tests {
     }
 
     #[test]
+    fn verifier_preserves_sentence_level_context_for_compound_relations() {
+        for source in [
+            "Alice said that Carol manages Orion and Bob manages Vega.",
+            "If Carol approves the launch, Bob manages Vega.",
+        ] {
+            let claim = "Bob manages Vega.";
+            let evidence = vec![passage(
+                "source:1:10",
+                "_sources/work/ownership.md",
+                source,
+                0.91,
+            )];
+            let citations = BTreeSet::from([1]);
+            assert!(!claim_supported(claim, &citations, &evidence));
+            assert_eq!(
+                verified_claim_text(claim, &citations, &evidence).as_deref(),
+                Some(source),
+            );
+
+            let answer = verify_synthesis(
+                "00000000-0000-4000-8000-000000000101",
+                &request(),
+                "2026-09-23T12:00:00Z",
+                &evidence,
+                RawSynthesis {
+                    abstained: false,
+                    claims: vec![RawClaim {
+                        text: claim.to_string(),
+                        citations: vec![1],
+                    }],
+                },
+                &mut Vec::new(),
+            );
+            assert!(!answer.abstained);
+            assert_eq!(
+                answer.answer,
+                format!("{} [1].", source.trim_end_matches('.'))
+            );
+            assert!(!answer.answer.starts_with("Bob manages Vega"));
+        }
+    }
+
+    #[test]
     fn verifier_binds_numbers_to_the_correct_relation_frame() {
         let evidence = vec![passage(
             "source:1:10",
             "_sources/work/licenses.md",
-            "Alice owns 3 licenses, while Bob owns 7 licenses.",
+            "Alice owns 3 licenses. Bob owns 7 licenses.",
             0.91,
         )];
         assert!(claim_supported(
