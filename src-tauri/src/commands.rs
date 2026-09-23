@@ -354,13 +354,73 @@ pub fn memory_search(
         .map_err(|e| e.to_string())
 }
 
+/// In-flight Ask runs keyed by the frontend-generated ask id, so a Stop
+/// click can cancel exactly the run it belongs to. Watch channels let one
+/// Stop reach whichever model turn (planning or synthesis) is active.
+#[derive(Default)]
+pub struct AskCancellations(
+    pub std::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
+);
+
 #[tauri::command]
 pub async fn memory_ask(
     db: State<'_, Db>,
+    cancellations: State<'_, AskCancellations>,
+    ask_id: String,
     request: MemoryAskRequest,
+    on_progress: tauri::ipc::Channel<memory::MemoryAskProgress>,
 ) -> Result<MemoryAnswer, String> {
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    cancellations
+        .0
+        .lock()
+        .expect("ask cancellation registry poisoned")
+        .insert(ask_id.clone(), cancel_tx);
+
     let db = db.inner().clone();
-    memory::retrieval::ask(&db, &request)
+    let result = memory::retrieval::ask(
+        &db,
+        &request,
+        move |event| {
+            // A closed or slow listener must never fail the ask itself.
+            let _ = on_progress.send(event);
+        },
+        cancel_rx,
+    )
+    .await;
+
+    cancellations
+        .0
+        .lock()
+        .expect("ask cancellation registry poisoned")
+        .remove(&ask_id);
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_ask_cancel(
+    cancellations: State<'_, AskCancellations>,
+    ask_id: String,
+) -> Result<(), String> {
+    if let Some(cancel_tx) = cancellations
+        .0
+        .lock()
+        .expect("ask cancellation registry poisoned")
+        .remove(&ask_id)
+    {
+        let _ = cancel_tx.send(true);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn memory_lint(
+    db: State<'_, Db>,
+    domain: Option<String>,
+    deep: Option<bool>,
+) -> Result<memory::MemoryLintReport, String> {
+    let db = db.inner().clone();
+    memory::lint::run_lint(&db, domain.as_deref(), deep.unwrap_or(false))
         .await
         .map_err(|e| e.to_string())
 }

@@ -5,6 +5,8 @@ import {
   Blocks,
   FolderOpen,
   History,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   ServerCog,
   ShieldCheck,
@@ -90,6 +92,7 @@ export function AppShell() {
   const { data: controlStatus } = useControlStatus()
   const [isManualRefreshActive, setIsManualRefreshActive] = useState(false)
   const [refreshToast, setRefreshToast] = useState<RefreshToast | null>(null)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const refreshMutation = useMutation({
     mutationFn: refreshDashboardSnapshot,
     onSuccess: (snapshot) => {
@@ -203,16 +206,30 @@ export function AppShell() {
     : []
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div
+      className="app-shell"
+      style={{ gridTemplateColumns: `${sidebarCollapsed ? '76px' : '280px'} minmax(0, 1fr)` }}
+    >
+      <aside className={`sidebar ${sidebarCollapsed ? 'is-collapsed' : ''}`}>
         <div className="brand-block">
           <div className="brand-mark">
             <ServerCog aria-hidden="true" size={20} />
           </div>
-          <div>
-            <p className="eyebrow">Local Control Plane</p>
-            <h1>Agentic OS</h1>
-          </div>
+          {!sidebarCollapsed && (
+            <div>
+              <p className="eyebrow">Local Control Plane</p>
+              <h1>Agentic OS</h1>
+            </div>
+          )}
+          <button
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed((value) => !value)}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            type="button"
+          >
+            {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" size={16} /> : <PanelLeftClose aria-hidden="true" size={16} />}
+          </button>
         </div>
 
         <nav className="sidebar-nav" aria-label="Primary navigation">
@@ -227,44 +244,49 @@ export function AppShell() {
                 className={({ isActive }) =>
                   isActive ? 'nav-link is-active' : 'nav-link'
                 }
+                title={sidebarCollapsed ? item.label : undefined}
                 to={item.to}
               >
                 <Icon aria-hidden="true" size={18} />
-                <span className="nav-copy">
-                  <span className="nav-label">{item.label}</span>
-                  <span className="nav-summary">{item.summary}</span>
-                </span>
+                {!sidebarCollapsed && (
+                  <span className="nav-copy">
+                    <span className="nav-label">{item.label}</span>
+                    <span className="nav-summary">{item.summary}</span>
+                  </span>
+                )}
                 <NavBadge count={badgeCount} />
               </NavLink>
             )
           })}
         </nav>
 
-        <section className="sidebar-section">
-          <div className="panel-heading">
-            <h2>Runtime</h2>
-          </div>
-          <dl className="meta-list">
-            <div>
-              <dt>Platform</dt>
-              <dd>{data?.runtime.platform ?? 'Loading'}</dd>
+        {!sidebarCollapsed && (
+          <section className="sidebar-section">
+            <div className="panel-heading">
+              <h2>Runtime</h2>
             </div>
-            <div>
-              <dt>Home</dt>
-              <dd>{data?.runtime.codexHome ?? 'Unavailable'}</dd>
-            </div>
-            <div>
-              <dt>Last scan</dt>
-              <dd>
-                {data ? formatRelativeTime(data.generatedAt) : 'Waiting for scan'}
-              </dd>
-            </div>
-            <div>
-              <dt>View</dt>
-              <dd>{location.pathname.replace('/', '') || 'catalog'}</dd>
-            </div>
-          </dl>
-        </section>
+            <dl className="meta-list">
+              <div>
+                <dt>Platform</dt>
+                <dd>{data?.runtime.platform ?? 'Loading'}</dd>
+              </div>
+              <div>
+                <dt>Home</dt>
+                <dd>{data?.runtime.codexHome ?? 'Unavailable'}</dd>
+              </div>
+              <div>
+                <dt>Last scan</dt>
+                <dd>
+                  {data ? formatRelativeTime(data.generatedAt) : 'Waiting for scan'}
+                </dd>
+              </div>
+              <div>
+                <dt>View</dt>
+                <dd>{location.pathname.replace('/', '') || 'catalog'}</dd>
+              </div>
+            </dl>
+          </section>
+        )}
       </aside>
 
       <div className="workspace">
@@ -313,18 +335,20 @@ export function AppShell() {
           </div>
         </header>
 
-        <section className="metric-strip" aria-label="Runtime metrics">
-          {metrics.map((metric) => (
-            <MetricCard
-              key={metric.label}
-              hint={metric.hint}
-              label={metric.label}
-              tone={metric.tone}
-              tooltipAlign={metric.tooltipAlign}
-              value={metric.value}
-            />
-          ))}
-        </section>
+        {!location.pathname.startsWith('/memory') && (
+          <section className="metric-strip" aria-label="Runtime metrics">
+            {metrics.map((metric) => (
+              <MetricCard
+                key={metric.label}
+                hint={metric.hint}
+                label={metric.label}
+                tone={metric.tone}
+                tooltipAlign={metric.tooltipAlign}
+                value={metric.value}
+              />
+            ))}
+          </section>
+        )}
 
         {error ? (
           <section className="alert-banner" role="alert">

@@ -3,24 +3,28 @@ import {
   Brain,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Clock,
   Copy,
   FileText,
   Flag,
   FolderOpen,
+  Layers,
+  Loader2,
   MessageCircleQuestion,
   Plus,
   Save,
   Search,
   Shield,
+  Square,
   Tag,
-  Trash2,
   Upload,
   Wrench,
   X,
 } from 'lucide-react'
-import { type FormEvent, useCallback, useMemo, useState } from 'react'
+import { type FormEvent, Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
+import { isAskStoppedError } from '@/features/memory/api'
 import { DiffView } from '@/components/ui/diff-view'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { DocumentImportPanel } from '@/features/memory/document-import-panel'
@@ -28,6 +32,7 @@ import {
   useMemoryAsk,
   useMemoryAnswerFeedback,
   useMemoryConfirm,
+  useMemoryLint,
   useMemoryMaintenanceRun,
   useMemoryProposals,
   useMemoryProposalsDecide,
@@ -39,6 +44,8 @@ import {
 } from '@/features/memory/hooks'
 import type {
   MemoryAnswer,
+  MemoryAskProgress,
+  MemoryCitation,
   MemoryType,
   MemoryWriteProposal,
   Sensitivity,
@@ -54,6 +61,7 @@ const TYPE_ICONS: Record<string, typeof FileText> = {
   preference: Tag,
   entity: Brain,
   episode: Clock,
+  synthesis: Layers,
 }
 
 const STATUS_TONE: Record<string, 'accent' | 'neutral' | 'success' | 'warning'> = {
@@ -86,12 +94,144 @@ const CONFIDENCE_LABELS: Record<MemoryAnswer['confidence'], string> = {
   insufficient: 'Insufficient evidence',
 }
 
+function countVaultFiles(nodes: VaultNode[]): number {
+  return nodes.reduce((count, node) => count + (node.isDir ? countVaultFiles(node.children) : 1), 0)
+}
+
+function countVaultFilesByStatus(nodes: VaultNode[], status: string): number {
+  return nodes.reduce((total, node) => {
+    if (!node.isDir) return total + (node.status === status ? 1 : 0)
+    return total + countVaultFilesByStatus(node.children, status)
+  }, 0)
+}
+
+function countPopulatedDomains(nodes: VaultNode[]): number {
+  return nodes.filter((node) => node.isDir && countVaultFiles([node]) > 0).length
+}
+
+function proposalTitle(proposal: MemoryWriteProposal): string {
+  const title = proposal.newContent.match(/^title:\s*(.+)$/m)?.[1]?.replace(/^['"]|['"]$/g, '')
+  if (title && title.trim().length > 0) return title.trim()
+  const fileName = proposal.vaultPath.split('/').at(-1)?.replace(/\.md$/i, '')
+  return fileName ?? proposal.vaultPath
+}
+
 function savedAnswerBody(answer: MemoryAnswer): string {
   const sourceList = answer.citations
     .map((citation) => `[${citation.number}] ${citation.vaultPath}`)
     .join('\n')
   const value = sourceList ? `${answer.answer}\n\nSources:\n${sourceList}` : answer.answer
   return [...value].slice(0, 1_200).join('')
+}
+
+function proposalPreviewLines(unifiedDiff: string): Array<{ tone: 'add' | 'remove'; text: string }> {
+  return unifiedDiff
+    .split('\n')
+    .filter((line) => (line.startsWith('+') || line.startsWith('-')) && !line.startsWith('+++') && !line.startsWith('---'))
+    .slice(0, 3)
+    .map((line) => ({
+      tone: line.startsWith('+') ? 'add' : 'remove',
+      text: line,
+    }))
+}
+
+function MemoryMetricsStrip({
+  activeVaultCount,
+  approvalRequiredCount,
+  approvedCount,
+  pendingCount,
+  populatedDomainsCount,
+  reviewedCount,
+  vaultItemCount,
+}: {
+  activeVaultCount: number
+  approvalRequiredCount: number
+  approvedCount: number
+  pendingCount: number
+  populatedDomainsCount: number
+  reviewedCount: number
+  vaultItemCount: number
+}) {
+  const items = [
+    {
+      detail: `${formatCompactNumber(activeVaultCount)} active`,
+      label: 'Vault notes',
+      tone: 'neutral',
+      value: formatCompactNumber(vaultItemCount),
+    },
+    {
+      detail: `${formatCompactNumber(approvalRequiredCount)} requires approval`,
+      label: 'Pending review',
+      tone: pendingCount > 0 ? 'warning' : 'neutral',
+      value: formatCompactNumber(pendingCount),
+    },
+    {
+      detail: `${formatCompactNumber(approvedCount)} approved`,
+      label: 'Reviewed writes',
+      tone: reviewedCount > 0 ? 'success' : 'neutral',
+      value: formatCompactNumber(reviewedCount),
+    },
+    {
+      detail: `${formatCompactNumber(populatedDomainsCount)} of ${DOMAINS.length} active`,
+      label: 'Populated domains',
+      tone: populatedDomainsCount > 0 ? 'accent' : 'neutral',
+      value: formatCompactNumber(populatedDomainsCount),
+    },
+  ] as const
+
+  return (
+    <section aria-label="Memory metrics" className="memory-metric-strip">
+      {items.map((item) => (
+        <article className="memory-metric-cell" key={item.label}>
+          <span className="memory-metric-label">{item.label}</span>
+          <div className="memory-metric-value-row">
+            <strong className="memory-metric-value">{item.value}</strong>
+            <span className={`memory-metric-detail ${item.tone ? `is-${item.tone}` : ''}`}>{item.detail}</span>
+          </div>
+        </article>
+      ))}
+    </section>
+  )
+}
+
+function MemoryControlToolbar({
+  includeStale,
+  mode,
+  onSave,
+  onToggleStale,
+  setMode,
+}: {
+  includeStale: boolean
+  mode: 'search' | 'ask'
+  onSave: () => void
+  onToggleStale: (checked: boolean) => void
+  setMode: (mode: 'search' | 'ask') => void
+}) {
+  return (
+    <div className="memory-control-topbar">
+      <div className="memory-control-segment">
+        <button className={mode === 'ask' ? 'is-active' : ''} onClick={() => setMode('ask')} type="button">
+          <MessageCircleQuestion aria-hidden="true" size={15} />
+          Ask
+        </button>
+        <button className={mode === 'search' ? 'is-active' : ''} onClick={() => setMode('search')} type="button">
+          <Search aria-hidden="true" size={15} />
+          Search
+        </button>
+      </div>
+      <div className="memory-control-actions">
+        <label className="memory-toggle-pill">
+          <input checked={includeStale} onChange={(event) => onToggleStale(event.target.checked)} type="checkbox" />
+          <span className="memory-toggle-pill-box" aria-hidden="true" />
+          <span>Include stale</span>
+        </label>
+        <button className="secondary-button memory-toolbar-button" onClick={onSave} type="button">
+          <Plus aria-hidden="true" size={15} />
+          Save memory
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function TreeNode({
@@ -166,7 +306,78 @@ function MarkdownContent({ markdown }: { markdown: string }) {
   )
 }
 
-function MemoryReader({ path, onClose }: { path: string; onClose: () => void }) {
+/**
+ * The verifier joins approved claims into one flat string with inline [n]
+ * markers. Rendering splits it back into claims so each reads as its own
+ * paragraph — with the markers as clickable citation chips — instead of a
+ * wall of text.
+ */
+function splitAnswerClaims(answer: string): string[] {
+  const segments = answer.match(/.*?(?:\[\d+\]\s*)+/gs)
+  if (!segments) return [answer.trim()]
+  const rest = answer.slice(segments.join('').length)
+  const claims = [...segments, rest]
+    // Joining artifacts (separator dots between claims, an orphaned final
+    // period) must never render as bullets of their own.
+    .map((segment) => segment.replace(/^[\s.;:]+/, '').trim())
+    .filter((segment) => /[\p{L}\p{N}]/u.test(segment))
+  return claims.length > 0 ? claims : [answer.trim()]
+}
+
+function renderInlineText(text: string, keyPrefix: string): ReactNode[] {
+  return text
+    .split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
+    .filter(Boolean)
+    .map((part, index) => {
+      const key = `${keyPrefix}-${index}`
+      if (part.startsWith('**') && part.endsWith('**')) return <strong key={key}>{part.slice(2, -2)}</strong>
+      if (part.startsWith('`') && part.endsWith('`')) return <code key={key}>{part.slice(1, -1)}</code>
+      return <Fragment key={key}>{part}</Fragment>
+    })
+}
+
+function AnswerRichText({ answer, citations, onSelect }: { answer: string; citations: MemoryCitation[]; onSelect: (path: string) => void }) {
+  const claims = useMemo(() => splitAnswerClaims(answer), [answer])
+  const byNumber = useMemo(() => new Map(citations.map((citation) => [citation.number, citation])), [citations])
+
+  const renderClaim = (claim: string, claimKey: string) =>
+    claim
+      .split(/(\[\d+\])/g)
+      .filter(Boolean)
+      .map((part, index) => {
+        const key = `${claimKey}-${index}`
+        const marker = /^\[(\d+)\]$/.exec(part)
+        if (!marker) return <Fragment key={key}>{renderInlineText(part, key)}</Fragment>
+        const citation = byNumber.get(Number(marker[1]))
+        if (!citation) return <sup className="memory-cite-chip memory-cite-chip--plain" key={key}>{marker[1]}</sup>
+        return (
+          <sup key={key}>
+            <button
+              aria-label={`Citation ${citation.number}: ${citation.title}`}
+              className="memory-cite-chip"
+              onClick={() => onSelect(citation.vaultPath)}
+              title={`[${citation.number}] ${citation.vaultPath} — “${citation.excerpt}”`}
+              type="button"
+            >
+              {citation.number}
+            </button>
+          </sup>
+        )
+      })
+
+  if (claims.length <= 1) {
+    return <p className="memory-answer-copy">{renderClaim(claims[0] ?? answer, 'claim-0')}</p>
+  }
+  return (
+    <div className="memory-answer-flow">
+      {claims.map((claim, index) => (
+        <p className="memory-answer-claim" key={`claim-${index}-${claim.slice(0, 24)}`}>{renderClaim(claim, `claim-${index}`)}</p>
+      ))}
+    </div>
+  )
+}
+
+function MemoryReader({ path, onClose, onSelect }: { path: string; onClose: () => void; onSelect?: (path: string) => void }) {
   const readQuery = useMemoryRead(path)
   const confirmMutation = useMemoryConfirm()
 
@@ -210,6 +421,17 @@ function MemoryReader({ path, onClose }: { path: string; onClose: () => void }) 
       )}
 
       <div className="memory-reader-body"><MarkdownContent markdown={data.markdown} /></div>
+      {fm && fm.related.length > 0 && onSelect && (
+        <div className="memory-reader-related">
+          <span className="memory-citations-label">Linked memories</span>
+          {fm.related.map((relatedPath) => (
+            <button className="memory-reader-related-link" key={relatedPath} onClick={() => onSelect(relatedPath)} type="button">
+              <FileText aria-hidden="true" size={14} />
+              <span>{relatedPath}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {fm && data.status === 'stale' && (
         <div className="memory-reader-actions">
           <button className="primary-button" disabled={confirmMutation.isPending} onClick={() => confirmMutation.mutate(fm.id)} type="button">
@@ -279,7 +501,7 @@ function SaveMemoryForm({ defaultDomain, onClose }: { defaultDomain?: string; on
       <p className="row-subtle">The gate checks secrets, provenance, duplication, sensitivity, and domain isolation before anything reaches the vault.</p>
       <div className="memory-compose-grid">
         <label><span>Domain</span><select onChange={(event) => setDomain(event.target.value)} value={domain}>{DOMAINS.map((item) => <option key={item} value={item}>{DOMAIN_LABELS[item]}</option>)}</select></label>
-        <label><span>Type</span><select onChange={(event) => setMemType(event.target.value as MemoryType)} value={memType}>{(['fact', 'decision', 'preference', 'entity', 'episode'] as MemoryType[]).map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+        <label><span>Type</span><select onChange={(event) => setMemType(event.target.value as MemoryType)} value={memType}>{(['fact', 'decision', 'preference', 'entity', 'episode', 'synthesis'] as MemoryType[]).map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
         <label><span>Sensitivity</span><select onChange={(event) => setSensitivity(event.target.value as Sensitivity)} value={sensitivity}><option value="normal">normal</option><option value="sensitive">sensitive</option></select></label>
         <label className="memory-compose-title"><span>Title</span><input maxLength={200} onChange={(event) => setTitle(event.target.value)} required value={title} /></label>
         <label className="memory-compose-wide"><span>Body</span><textarea maxLength={memType === 'episode' || memType === 'entity' ? undefined : 1200} onChange={(event) => setBody(event.target.value)} required rows={8} value={body} /></label>
@@ -299,7 +521,63 @@ function SaveMemoryForm({ defaultDomain, onClose }: { defaultDomain?: string; on
   )
 }
 
-function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includeStale: boolean; onSelect: (path: string) => void }) {
+function AskProgressPanel({ events, pending, stopped = false }: { events: MemoryAskProgress[]; pending: boolean; stopped?: boolean }) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+
+  useEffect(() => {
+    if (!pending) return
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000))
+    }, 250)
+    return () => window.clearInterval(timer)
+  }, [pending])
+
+  return (
+    <div aria-live="polite" className="memory-ask-progress" role="status">
+      <div className="memory-ask-progress-header">
+        <span className="memory-ask-progress-title">
+          {pending ? 'Synthesizing with evidence' : stopped ? 'Stopped' : 'Stopped before completing'}
+        </span>
+        {pending && <span className="memory-ask-progress-elapsed">{elapsedSeconds}s</span>}
+      </div>
+      <ol className="memory-ask-progress-steps">
+        {events.length === 0 && pending && (
+          <li className="memory-ask-progress-step memory-ask-progress-step--active">
+            <Loader2 aria-hidden="true" className="memory-ask-progress-spinner" size={14} />
+            <span>Contacting the local synthesis engine…</span>
+          </li>
+        )}
+        {events.map((event, index) => {
+          const isActive = pending && index === events.length - 1
+          return (
+            <li
+              className={`memory-ask-progress-step ${isActive ? 'memory-ask-progress-step--active' : 'memory-ask-progress-step--done'}`}
+              key={`${event.at}-${index}`}
+            >
+              {isActive
+                ? <Loader2 aria-hidden="true" className="memory-ask-progress-spinner" size={14} />
+                : <CheckCircle2 aria-hidden="true" size={14} />}
+              <span>{event.label}</span>
+            </li>
+          )
+        })}
+      </ol>
+    </div>
+  )
+}
+
+function AskMemory({
+  domain,
+  header,
+  includeStale,
+  onSelect,
+}: {
+  domain?: string
+  header?: ReactNode
+  includeStale: boolean
+  onSelect: (path: string) => void
+}) {
   const askMutation = useMemoryAsk()
   const saveMutation = useMemorySaveManual()
   const feedbackMutation = useMemoryAnswerFeedback()
@@ -329,15 +607,23 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
   }
 
   const saveAnswer = (answer: MemoryAnswer) => {
+    // Saved answers are first-class synthesis notes linked to the memories
+    // they cited: answered questions compound instead of evaporating.
+    const citedMemoryPaths = [...new Set(
+      answer.citations
+        .filter((citation) => citation.sourceKind === 'memory')
+        .map((citation) => citation.vaultPath),
+    )]
     saveMutation.mutate({
       domain: answer.domain,
-      memType: 'fact',
+      memType: 'synthesis',
       title: `Answer: ${answer.question}`.slice(0, 200),
       body: savedAnswerBody(answer),
       tags: ['ask', 'grounded-answer'],
       sensitivity: 'normal',
       source: `memory-ask:${answer.id}`,
       confidence: answer.confidenceScore,
+      related: citedMemoryPaths,
     })
   }
 
@@ -352,13 +638,36 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
 
   return (
     <div className="memory-ask">
-      <form className="memory-ask-form" onSubmit={submit}>
-        <MessageCircleQuestion aria-hidden="true" size={20} />
-        <input aria-label="Ask the Second Brain" onChange={(event) => setQuestion(event.target.value)} placeholder="What did we decide about the PowerReviews feed?" value={question} />
-        <select aria-label="Answer domain" onChange={(event) => setAskDomain(event.target.value)} value={askDomain}>{DOMAINS.map((item) => <option key={item} value={item}>{DOMAIN_LABELS[item]}</option>)}</select>
-        <button className="primary-button" disabled={askMutation.isPending || question.trim().length < 2} type="submit">{askMutation.isPending ? 'Synthesizing…' : 'Ask'}</button>
-      </form>
-      {askMutation.error && <div className="inline-error" role="alert">{errorMessage(askMutation.error)}</div>}
+      <div className="surface memory-control-panel">
+        {header}
+        <form className="memory-control-form memory-control-form--ask memory-ask-form" onSubmit={submit}>
+          <label className="memory-control-query">
+            <span className="memory-control-query-icon" aria-hidden="true">
+              <MessageCircleQuestion size={18} />
+            </span>
+            <input aria-label="Ask the Second Brain" onChange={(event) => setQuestion(event.target.value)} placeholder="What did we decide about the PowerReviews feed?" value={question} />
+          </label>
+          <label className="memory-control-domain">
+            <select aria-label="Answer domain" onChange={(event) => setAskDomain(event.target.value)} value={askDomain}>{DOMAINS.map((item) => <option key={item} value={item}>{DOMAIN_LABELS[item]}</option>)}</select>
+          </label>
+          {askMutation.isPending
+            ? (
+              <button className="secondary-button memory-control-submit memory-ask-stop" onClick={() => askMutation.stop()} type="button">
+                <Square aria-hidden="true" size={12} />
+                Stop
+              </button>
+            )
+            : <button className="primary-button memory-control-submit" disabled={question.trim().length < 2} type="submit">Ask</button>}
+        </form>
+      </div>
+      {(askMutation.isPending || (askMutation.error !== null && askMutation.progress.length > 0)) && (
+        <AskProgressPanel
+          events={askMutation.progress}
+          pending={askMutation.isPending}
+          stopped={askMutation.error !== null && isAskStoppedError(askMutation.error)}
+        />
+      )}
+      {askMutation.error && !isAskStoppedError(askMutation.error) && <div className="inline-error" role="alert">{errorMessage(askMutation.error)}</div>}
       {askMutation.data && (
         <div className={`memory-answer ${askMutation.data.abstained ? 'memory-answer--abstained' : ''}`}>
           <div className="memory-answer-header">
@@ -372,7 +681,7 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
               {!askMutation.data.abstained && ` · ${askMutation.data.sourceCount} source${askMutation.data.sourceCount === 1 ? '' : 's'}`}
             </div>
           </div>
-          <p className="memory-answer-copy">{askMutation.data.answer}</p>
+          <AnswerRichText answer={askMutation.data.answer} citations={askMutation.data.citations} onSelect={onSelect} />
           {askMutation.data.warnings.map((warning) => <div className="memory-answer-warning" key={warning}>{warning}</div>)}
           {askMutation.data.citations.length > 0 && (
             <div className="memory-citations">
@@ -404,7 +713,10 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
                 {feedbackMutation.isPending ? 'Flagging…' : feedbackMutation.isSuccess ? 'Flagged' : 'Flag'}
               </button>
             </div>
-            <span>AI-synthesized · citation verified · abstains without evidence</span>
+            <span>
+              AI-synthesized · citation verified · abstains without evidence
+              {askMutation.durationMs !== null && ` · ${Math.max(1, Math.round(askMutation.durationMs / 1000))}s`}
+            </span>
           </div>
           {saveMutation.data && <div className="memory-operation-result" role="status"><CheckCircle2 aria-hidden="true" size={16} />{saveMutation.data.status === 'auto_applied' ? 'Answer saved, indexed, and audited.' : 'Memory proposal created and waiting for approval.'}</div>}
           {saveMutation.error && <div className="inline-error" role="alert">{errorMessage(saveMutation.error)}</div>}
@@ -412,7 +724,7 @@ function AskMemory({ domain, includeStale, onSelect }: { domain?: string; includ
           {feedbackMutation.error && <div className="inline-error" role="alert">{errorMessage(feedbackMutation.error)}</div>}
         </div>
       )}
-      {!askMutation.data && !askMutation.isPending && <div className="memory-welcome"><MessageCircleQuestion aria-hidden="true" className="memory-welcome-icon" size={48} /><h2>Ask with evidence</h2><p>The AI synthesizes the relevant passages, then a local verifier removes uncited claims. Without sufficient evidence, it abstains instead of inventing an answer.</p></div>}
+      {!askMutation.data && !askMutation.isPending && !askMutation.error && <div className="memory-welcome"><MessageCircleQuestion aria-hidden="true" className="memory-welcome-icon" size={48} /><h2>Ask with evidence</h2><p>The AI synthesizes the relevant passages, then a local verifier removes uncited claims. Without sufficient evidence, it abstains instead of inventing an answer.</p></div>}
     </div>
   )
 }
@@ -424,15 +736,34 @@ function ProposalCard({ proposal, onDecide }: { proposal: MemoryWriteProposal; o
   const gate = useMemo<GateReport>(() => {
     try { return JSON.parse(proposal.gateReport) as GateReport } catch { return {} }
   }, [proposal.gateReport])
+  const previewLines = useMemo(() => proposalPreviewLines(proposal.unifiedDiff), [proposal.unifiedDiff])
+  const leadPill = proposal.sensitivity === 'sensitive'
+    ? { label: 'Sensitive', tone: 'warning' as const }
+    : { label: proposal.op, tone: 'neutral' as const }
+
   return (
-    <div className="proposal-card">
-      <div className="proposal-card-head">
-        <StatusBadge label={proposal.op} tone={proposal.op === 'supersede' ? 'warning' : proposal.op === 'create' ? 'success' : 'accent'} />
-        <span className="proposal-card-path" title={proposal.vaultPath}>{proposal.vaultPath}</span>
-        <StatusBadge label={proposal.status} tone={STATUS_TONE[proposal.status] ?? 'neutral'} />
+    <div className={`proposal-card ${proposal.status === 'pending' ? 'proposal-card--pending' : 'proposal-card--activity'}`}>
+      <div className="proposal-card-meta">
+        <span className={`proposal-card-pill ${leadPill.tone === 'warning' ? 'proposal-card-pill--warning' : ''}`}>{leadPill.label}</span>
+        <span className="proposal-card-time">{formatRelativeTime(new Date(proposal.createdAt).getTime())}</span>
       </div>
-      <div className="proposal-card-meta"><span>{DOMAIN_LABELS[proposal.domain] ?? proposal.domain}</span><span>{formatRelativeTime(new Date(proposal.createdAt).getTime())}</span>{proposal.requiresApproval && <StatusBadge label="needs approval" tone="warning" />}</div>
-      <button className="proposal-toggle" onClick={() => setExpanded((value) => !value)} type="button">{expanded ? 'Hide review' : 'Review gate and diff'}</button>
+      <h3 className="proposal-card-title">{proposalTitle(proposal)}</h3>
+      <div className="proposal-card-preview">
+        <span className="proposal-card-path" title={proposal.vaultPath}>{proposal.vaultPath}</span>
+        {previewLines.length > 0 ? (
+          previewLines.map((line, index) => (
+            <span className={`proposal-card-diffline is-${line.tone}`} key={`${proposal.id}-${index}-${line.text.slice(0, 16)}`}>
+              {line.text}
+            </span>
+          ))
+        ) : <span className="proposal-card-placeholder">Review the gate report and diff before deciding.</span>}
+      </div>
+      {(gate.checks?.length ?? 0) > 0 && (
+        <button className="proposal-toggle" onClick={() => setExpanded((value) => !value)} type="button">
+          <ChevronRight aria-hidden="true" className={expanded ? 'is-expanded' : ''} size={13} />
+          {expanded ? 'Hide gate checks' : 'Show gate checks'}
+        </button>
+      )}
       {expanded && (
         <div className="proposal-review">
           <div className="proposal-checks">
@@ -443,11 +774,65 @@ function ProposalCard({ proposal, onDecide }: { proposal: MemoryWriteProposal; o
       )}
       {proposal.status === 'pending' && proposal.requiresApproval && (
         <div className="proposal-actions">
-          <button className="primary-button" onClick={() => onDecide(proposal.id, 'approve')} type="button"><CheckCircle2 aria-hidden="true" size={14} />Approve</button>
-          <button className="icon-button" onClick={() => onDecide(proposal.id, 'discard')} title="Discard" type="button"><Trash2 aria-hidden="true" size={14} /></button>
+          <button className="proposal-action proposal-action--approve" onClick={() => onDecide(proposal.id, 'approve')} type="button">Approve</button>
+          <button className="proposal-action proposal-action--dismiss" onClick={() => onDecide(proposal.id, 'discard')} type="button">Dismiss</button>
+        </div>
+      )}
+      {proposal.status !== 'pending' && (
+        <div className="proposal-card-statusline">
+          <StatusBadge label={proposal.status.replace('_', ' ')} tone={STATUS_TONE[proposal.status] ?? 'neutral'} />
+          <span>{DOMAIN_LABELS[proposal.domain] ?? proposal.domain}</span>
         </div>
       )}
     </div>
+  )
+}
+
+function GovernanceRail({
+  activity,
+  collapsed,
+  decideError,
+  onDecide,
+  pending,
+  railTab,
+  setRailTab,
+}: {
+  activity: MemoryWriteProposal[]
+  collapsed: boolean
+  decideError: unknown
+  onDecide: (id: string, decision: string) => void
+  pending: MemoryWriteProposal[]
+  railTab: 'pending' | 'activity'
+  setRailTab: (value: 'pending' | 'activity') => void
+}) {
+  const visibleProposals = railTab === 'pending' ? pending : activity
+
+  return (
+    <aside aria-hidden={collapsed} className={`memory-governance-rail surface ${collapsed ? 'is-closed' : ''}`}>
+      <div className="memory-governance-header">
+        <Shield aria-hidden="true" size={17} />
+        <span className="memory-governance-title">Governance</span>
+        {pending.length > 0 && <span className="memory-governance-count">{pending.length}</span>}
+      </div>
+      <div className="memory-governance-tabs">
+        <button className={railTab === 'pending' ? 'is-active' : ''} onClick={() => setRailTab('pending')} type="button">Pending</button>
+        <button className={railTab === 'activity' ? 'is-active' : ''} onClick={() => setRailTab('activity')} type="button">Activity</button>
+      </div>
+      {railTab === 'pending' && pending.length > 0 && (
+        <div className="memory-governance-banner">
+          <Flag aria-hidden="true" size={15} />
+          <span>
+            {pending.length} write{pending.length === 1 ? '' : 's'} {pending.length === 1 ? 'is' : 'are'} waiting for review before {pending.length === 1 ? 'it reaches' : 'they reach'} the vault.
+          </span>
+        </div>
+      )}
+      {decideError && <div className="inline-error memory-rail-error" role="alert">{errorMessage(decideError)}</div>}
+      <div className="memory-governance-list">
+        {visibleProposals.map((proposal) => <ProposalCard key={proposal.id} onDecide={onDecide} proposal={proposal} />)}
+        {visibleProposals.length === 0 && <div className="empty-state"><h3>{railTab === 'pending' ? 'Nothing to review' : 'No activity yet'}</h3><p>{railTab === 'pending' ? 'Sensitive and truth-changing writes appear here.' : 'Automatic and decided writes appear here.'}</p></div>}
+      </div>
+      <p className="memory-governance-footer">Sensitive and truth-changing writes appear here before they are committed.</p>
+    </aside>
   )
 }
 
@@ -460,6 +845,7 @@ export function MemoryPage() {
   const [showComposer, setShowComposer] = useState(false)
   const [showImporter, setShowImporter] = useState(false)
   const [railTab, setRailTab] = useState<'pending' | 'activity'>('pending')
+  const [governanceOpen, setGovernanceOpen] = useState(true)
 
   const treeQuery = useMemoryTree(domainFilter)
   const searchQuery = useMemorySearch(searchText, domainFilter, includeStale)
@@ -467,21 +853,51 @@ export function MemoryPage() {
   const decideMutation = useMemoryProposalsDecide()
   const reindexMutation = useMemoryReindex()
   const maintenanceMutation = useMemoryMaintenanceRun()
+  const lintMutation = useMemoryLint()
 
+  const vaultItemCount = useMemo(() => countVaultFiles(treeQuery.data ?? []), [treeQuery.data])
+  const activeVaultCount = useMemo(() => countVaultFilesByStatus(treeQuery.data ?? [], 'active'), [treeQuery.data])
+  const populatedDomainsCount = useMemo(() => countPopulatedDomains(treeQuery.data ?? []), [treeQuery.data])
   const pending = useMemo(() => proposalsQuery.data?.filter((proposal) => proposal.status === 'pending') ?? [], [proposalsQuery.data])
   const activity = useMemo(() => proposalsQuery.data?.filter((proposal) => proposal.status !== 'pending') ?? [], [proposalsQuery.data])
-  const visibleProposals = railTab === 'pending' ? pending : activity
+  const approvalRequiredCount = useMemo(() => pending.filter((proposal) => proposal.requiresApproval).length, [pending])
+  const approvedCount = useMemo(() => activity.filter((proposal) => proposal.status === 'approved').length, [activity])
   const selectPath = useCallback((path: string) => { setSelectedPath(path); setShowComposer(false); setShowImporter(false) }, [])
+  const openImporter = useCallback(() => { setShowImporter(true); setShowComposer(false); setSelectedPath(null) }, [])
+  const openComposer = useCallback(() => { setShowComposer(true); setShowImporter(false); setSelectedPath(null) }, [])
+  const controlToolbar = (
+    <MemoryControlToolbar
+      includeStale={includeStale}
+      mode={mode}
+      onSave={openComposer}
+      onToggleStale={setIncludeStale}
+      setMode={setMode}
+    />
+  )
 
   return (
     <section className="page-section memory-page">
-      <div className="memory-layout">
+      <MemoryMetricsStrip
+        activeVaultCount={activeVaultCount}
+        approvalRequiredCount={approvalRequiredCount}
+        approvedCount={approvedCount}
+        pendingCount={pending.length}
+        populatedDomainsCount={populatedDomainsCount}
+        reviewedCount={activity.length}
+        vaultItemCount={vaultItemCount}
+      />
+      <div
+        className="memory-layout"
+        style={{
+          gridTemplateColumns: `280px minmax(0, 1fr) ${governanceOpen ? '340px' : '0px'} 32px`,
+        }}
+      >
         <aside className="memory-sidebar surface">
           <div className="panel-heading">
             <div><p className="eyebrow">Local vault</p><h2>Second Brain</h2></div>
             <div className="panel-heading-actions">
-              <button aria-label="Import document" className="icon-button" onClick={() => { setShowImporter(true); setShowComposer(false); setSelectedPath(null) }} title="Import document" type="button"><Upload aria-hidden="true" size={16} /></button>
-              <button aria-label="Save a memory" className="icon-button" onClick={() => { setShowComposer(true); setShowImporter(false); setSelectedPath(null) }} type="button"><Plus aria-hidden="true" size={16} /></button>
+              <button aria-label="Import document" className="icon-button" onClick={openImporter} title="Import document" type="button"><Upload aria-hidden="true" size={16} /></button>
+              <button aria-label="Save a memory" className="icon-button" onClick={openComposer} type="button"><Plus aria-hidden="true" size={16} /></button>
             </div>
           </div>
           <div className="memory-domain-strip">
@@ -497,23 +913,45 @@ export function MemoryPage() {
           <div className="memory-sidebar-tools">
             <button disabled={reindexMutation.isPending} onClick={() => reindexMutation.mutate()} type="button"><ArchiveRestore aria-hidden="true" size={14} />{reindexMutation.isPending ? 'Indexing…' : 'Reindex'}</button>
             <button disabled={maintenanceMutation.isPending} onClick={() => maintenanceMutation.mutate()} type="button"><Wrench aria-hidden="true" size={14} />{maintenanceMutation.isPending ? 'Running…' : 'Maintenance'}</button>
+            <button disabled={lintMutation.isPending} onClick={() => lintMutation.mutate({ deep: true, domain: domainFilter })} title="Check links, orphans, staleness, and contradictions" type="button"><Shield aria-hidden="true" size={14} />{lintMutation.isPending ? 'Linting…' : 'Lint'}</button>
           </div>
           {(reindexMutation.data || maintenanceMutation.data) && <div className="memory-maintenance-result" role="status">{reindexMutation.data && `${reindexMutation.data.indexed} indexed · ${reindexMutation.data.drifted} drifted · ${reindexMutation.data.orphaned} orphaned`}{maintenanceMutation.data && `${maintenanceMutation.data.expired} archived · ${maintenanceMutation.data.markedStale} stale`}</div>}
-          {(reindexMutation.error || maintenanceMutation.error) && <div className="inline-error" role="alert">{errorMessage(reindexMutation.error ?? maintenanceMutation.error)}</div>}
+          {(reindexMutation.error || maintenanceMutation.error || lintMutation.error) && <div className="inline-error" role="alert">{errorMessage(reindexMutation.error ?? maintenanceMutation.error ?? lintMutation.error)}</div>}
+          {lintMutation.data && (
+            <div className="memory-lint-result" role="status">
+              <span className="memory-lint-summary">
+                Lint: {lintMutation.data.scanned} notes · {lintMutation.data.findings.length === 0 ? 'no issues' : `${lintMutation.data.findings.length} finding${lintMutation.data.findings.length === 1 ? '' : 's'}`}
+              </span>
+              {lintMutation.data.findings.map((finding, index) => (
+                <div className={`memory-lint-finding memory-lint-finding--${finding.severity}`} key={`${finding.kind}-${index}`}>
+                  <span className="memory-lint-kind">{finding.kind.replace('_', ' ')}</span>
+                  <p>{finding.detail}</p>
+                  {finding.paths.map((findingPath) => (
+                    <button className="memory-lint-path" key={findingPath} onClick={() => selectPath(findingPath)} type="button">{findingPath}</button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
           <div className="memory-sidebar-footer"><span className="row-subtle">{formatCompactNumber(proposalsQuery.data?.length ?? 0)} writes</span>{pending.length > 0 && <StatusBadge label={`${pending.length} pending`} tone="warning" />}</div>
         </aside>
 
         <main className="memory-main">
-          {showImporter ? <DocumentImportPanel defaultDomain={domainFilter} onClose={() => setShowImporter(false)} /> : showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={() => setSelectedPath(null)} path={selectedPath} /> : (
+          {showImporter ? <DocumentImportPanel defaultDomain={domainFilter} onClose={() => setShowImporter(false)} /> : showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={() => setSelectedPath(null)} onSelect={selectPath} path={selectedPath} /> : (
             <>
-              <div className="surface memory-mode-bar">
-                <div className="memory-mode-switch"><button className={mode === 'search' ? 'is-active' : ''} onClick={() => setMode('search')} type="button"><Search aria-hidden="true" size={15} />Search</button><button className={mode === 'ask' ? 'is-active' : ''} onClick={() => setMode('ask')} type="button"><MessageCircleQuestion aria-hidden="true" size={15} />Ask</button></div>
-                <label className="memory-toggle-label"><input checked={includeStale} onChange={(event) => setIncludeStale(event.target.checked)} type="checkbox" />Include stale</label>
-                <div className="memory-mode-actions"><button className="secondary-button" onClick={() => { setShowImporter(true); setShowComposer(false) }} type="button"><Upload aria-hidden="true" size={15} />Import document</button><button className="primary-button" onClick={() => { setShowComposer(true); setShowImporter(false) }} type="button"><Plus aria-hidden="true" size={15} />Save memory</button></div>
-              </div>
               {mode === 'search' ? (
                 <>
-                  <div className="surface memory-search-bar"><Search aria-hidden="true" size={18} /><input aria-label="Search memory" onChange={(event) => setSearchText(event.target.value)} placeholder="Search titles, facts, decisions, people…" type="search" value={searchText} /></div>
+                  <div className="surface memory-control-panel">
+                    {controlToolbar}
+                    <div className="memory-control-form memory-control-form--search">
+                      <label className="memory-control-query">
+                        <span className="memory-control-query-icon" aria-hidden="true">
+                          <Search size={18} />
+                        </span>
+                        <input aria-label="Search memory" onChange={(event) => setSearchText(event.target.value)} placeholder="Search titles, facts, decisions, people…" type="search" value={searchText} />
+                      </label>
+                    </div>
+                  </div>
                   <div className="memory-search-results">
                     {searchQuery.error && <div className="inline-error" role="alert">{errorMessage(searchQuery.error)}</div>}
                     {searchText.length >= 2 && searchQuery.data?.map((item) => <SearchResult item={item} key={item.row.id} onSelect={selectPath} />)}
@@ -521,20 +959,34 @@ export function MemoryPage() {
                     {searchText.length < 2 && <div className="memory-welcome"><Brain aria-hidden="true" className="memory-welcome-icon" size={48} /><h2>Your governed memory</h2><p>Markdown is the source of truth; SQLite powers retrieval; Git and the audit chain preserve every change.</p></div>}
                   </div>
                 </>
-              ) : <AskMemory domain={domainFilter} includeStale={includeStale} onSelect={selectPath} />}
+              ) : <AskMemory domain={domainFilter} header={controlToolbar} includeStale={includeStale} onSelect={selectPath} />}
             </>
           )}
         </main>
 
-        <aside className="memory-proposals-rail surface">
-          <div className="memory-proposals-toggle"><Shield aria-hidden="true" size={16} /><span>Governance</span>{pending.length > 0 && <span className="memory-proposals-count">{pending.length}</span>}</div>
-          <div className="memory-rail-tabs"><button className={railTab === 'pending' ? 'is-active' : ''} onClick={() => setRailTab('pending')} type="button">Pending</button><button className={railTab === 'activity' ? 'is-active' : ''} onClick={() => setRailTab('activity')} type="button">Activity</button></div>
-          {decideMutation.error && <div className="inline-error memory-rail-error" role="alert">{errorMessage(decideMutation.error)}</div>}
-          <div className="memory-proposals-list">
-            {visibleProposals.map((proposal) => <ProposalCard key={proposal.id} onDecide={(id, decision) => decideMutation.mutate({ id, decision })} proposal={proposal} />)}
-            {visibleProposals.length === 0 && <div className="empty-state"><h3>{railTab === 'pending' ? 'Nothing to review' : 'No activity yet'}</h3><p>{railTab === 'pending' ? 'Sensitive and truth-changing writes appear here.' : 'Automatic and decided writes appear here.'}</p></div>}
-          </div>
-        </aside>
+        <GovernanceRail
+          activity={activity}
+          collapsed={!governanceOpen}
+          decideError={decideMutation.error}
+          onDecide={(id, decision) => decideMutation.mutate({ id, decision })}
+          pending={pending}
+          railTab={railTab}
+          setRailTab={setRailTab}
+        />
+
+        <div className="memory-governance-tab-col">
+          <button
+            aria-expanded={governanceOpen}
+            aria-label={governanceOpen ? 'Collapse governance' : 'Expand governance'}
+            className="memory-governance-tab"
+            onClick={() => setGovernanceOpen((value) => !value)}
+            type="button"
+          >
+            {governanceOpen ? <ChevronRight aria-hidden="true" size={14} /> : <ChevronLeft aria-hidden="true" size={14} />}
+            <span className="memory-governance-tab-label">Governance</span>
+            {pending.length > 0 && <span className="memory-governance-tab-count">{pending.length}</span>}
+          </button>
+        </div>
       </div>
     </section>
   )

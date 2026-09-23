@@ -9,17 +9,29 @@ use crate::db::Db;
 use crate::error::AppResult;
 
 use super::{
-    MemoryAnswer, MemoryAnswerFeedbackRequest, MemoryAskRequest, MemoryCitation, MemorySearchOpts,
-    ScoredMemory,
+    MemoryAnswer, MemoryAnswerFeedbackRequest, MemoryAskProgress, MemoryAskRequest, MemoryCitation,
+    MemorySearchOpts, ScoredMemory,
 };
 
-const MAX_EVIDENCE_PASSAGES: usize = 8;
+/// Retrieve wide, let the synthesis turn select what it cites (the model is
+/// the reranker): the pool is deliberately larger than the old single-query
+/// pipeline while every passage stays bounded.
+const MAX_EVIDENCE_PASSAGES: usize = 14;
+const MAX_MEMORY_PASSAGES: usize = 8;
+const MAX_SOURCE_PASSAGES: usize = 10;
 const MAX_EVIDENCE_CHARS: usize = 1_800;
+const MAX_SEARCH_QUERIES: usize = 5;
+const MAX_PLAN_QUERIES: usize = 4;
+const QUERY_PLAN_TIMEOUT_SECS: u64 = 30;
+/// At most this many notes enter the evidence pool through `related` edges
+/// of the top hits (1-hop graph expansion).
+const MAX_LINK_EXPANSIONS: usize = 3;
+const LINK_SCORE_DAMPING: f64 = 0.6;
 const MAX_CLAIMS: usize = 8;
 const MAX_CLAIM_CHARS: usize = 600;
 
 #[derive(Debug, Clone)]
-struct EvidencePassage {
+pub(crate) struct EvidencePassage {
     id: String,
     title: String,
     vault_path: String,
@@ -228,7 +240,25 @@ fn best_excerpt(body: &str, question: &str) -> String {
 /// Grounded Q&A over governed memories and imported source passages. Retrieval
 /// is deterministic; Codex performs one read-only synthesis turn; Rust then
 /// rejects uncited or lexically unsupported claims before returning them.
-pub async fn ask(db: &Db, request: &MemoryAskRequest) -> AppResult<MemoryAnswer> {
+///
+/// `on_progress` receives stage/label markers for the live Ask UI. It carries
+/// structural metadata only: the model draft never travels on it, so the
+/// citation verifier stays the single gate between model output and the user.
+pub async fn ask(
+    db: &Db,
+    request: &MemoryAskRequest,
+    on_progress: impl Fn(MemoryAskProgress) + Send + Sync,
+    cancel: crate::harness::structured::CancelSignal,
+) -> AppResult<MemoryAnswer> {
+    let emit = |stage: &str, label: String, transient: bool| {
+        on_progress(MemoryAskProgress {
+            stage: stage.to_string(),
+            label,
+            at: chrono::Utc::now().to_rfc3339(),
+            transient,
+        });
+    };
+    let progress = |stage: &str, label: String| emit(stage, label, false);
     if request.question.trim().chars().count() < 2 {
         return Err(crate::error::AppError::Io(std::io::Error::other(
             "question is too short",
@@ -251,7 +281,45 @@ pub async fn ask(db: &Db, request: &MemoryAskRequest) -> AppResult<MemoryAnswer>
 
     let answer_id = Uuid::new_v4().to_string();
     let generated_at = chrono::Utc::now().to_rfc3339();
-    let (evidence, mut warnings) = retrieve_evidence(db, request)?;
+
+    // Agentic-RAG query understanding: one cheap bounded turn rewrites the
+    // question into lexical sub-queries (cross-language included) before the
+    // FTS retrieval. Failures degrade to the raw question, never block.
+    progress(
+        "retrieval",
+        "Planning search queries for the vault".to_string(),
+    );
+    let planned = plan_search_queries(&request.question, cancel.clone()).await;
+    let mut queries = vec![request.question.trim().to_string()];
+    for query in planned {
+        if !queries
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&query))
+        {
+            queries.push(query);
+        }
+    }
+    if queries.len() > 1 {
+        progress(
+            "retrieval",
+            format!(
+                "Search plan ready — {} queries: {}",
+                queries.len(),
+                queries
+                    .iter()
+                    .skip(1)
+                    .map(|query| format!("\"{query}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
+
+    progress(
+        "retrieval",
+        "Searching the vault for relevant passages".to_string(),
+    );
+    let (evidence, mut warnings) = retrieve_evidence(db, request, &queries)?;
     if evidence.is_empty() {
         let answer = insufficient_answer(
             &answer_id,
@@ -265,14 +333,60 @@ pub async fn ask(db: &Db, request: &MemoryAskRequest) -> AppResult<MemoryAnswer>
         return Ok(answer);
     }
 
+    progress(
+        "retrieval",
+        format!(
+            "{} relevant passage{} found",
+            evidence.len(),
+            if evidence.len() == 1 { "" } else { "s" }
+        ),
+    );
+
     let prompt = synthesis_prompt(request, &evidence)?;
-    let model_output = match crate::harness::structured::run_read_only_json(&prompt).await {
+    progress("synthesis", "Starting the AI synthesis turn".to_string());
+    let model_output = match crate::harness::structured::run_read_only_json_with_progress(
+        &prompt,
+        |event| {
+            use crate::harness::structured::SynthesisProgress;
+            let (label, transient) = match event {
+                SynthesisProgress::ProcessSpawned => (
+                    "Synthesis process launched — waiting for the model".to_string(),
+                    false,
+                ),
+                SynthesisProgress::SessionStarted => ("Model session started".to_string(), false),
+                SynthesisProgress::TurnStarted => ("Model turn started".to_string(), false),
+                SynthesisProgress::Reasoning => {
+                    ("Model is reasoning over the evidence".to_string(), false)
+                }
+                SynthesisProgress::AnswerDrafted => (
+                    "Draft answer received — pending verification".to_string(),
+                    false,
+                ),
+                SynthesisProgress::TokensUsed { tokens } => {
+                    (format!("Model turn completed · {tokens} tokens"), false)
+                }
+                SynthesisProgress::Diagnostic { line } => (format!("codex: {line}"), true),
+                SynthesisProgress::Waiting { seconds } => (
+                    format!("Still waiting for the model — {seconds}s without output"),
+                    true,
+                ),
+            };
+            emit("synthesis", label, transient);
+        },
+        cancel.clone(),
+    )
+    .await
+    {
         Ok(output) => output,
         Err(error) => {
             let _ = audit_answer_failure(db, &answer_id, request, &error.to_string());
             return Err(error);
         }
     };
+    progress(
+        "verification",
+        "Verifying every claim against its citations".to_string(),
+    );
     let raw = match parse_synthesis_json(&model_output.text) {
         Ok(raw) => raw,
         Err(error) => {
@@ -292,26 +406,120 @@ pub async fn ask(db: &Db, request: &MemoryAskRequest) -> AppResult<MemoryAnswer>
     Ok(answer)
 }
 
-fn retrieve_evidence(
+/// One bounded model turn that rewrites the question into lexical sub-queries
+/// aligned with the stored content (cross-language). Purely input-side: a bad
+/// plan degrades retrieval quality, never trust — so every failure path
+/// (timeout, malformed JSON, cancel) silently falls back to the raw question.
+async fn plan_search_queries(
+    question: &str,
+    cancel: crate::harness::structured::CancelSignal,
+) -> Vec<String> {
+    let prompt = format!(
+        "You prepare search queries for a lexical full-text index over a personal knowledge vault.\n\
+         Vault notes are often in English; the question may be in another language.\n\
+         Reply with exactly one JSON object and nothing else: {{\"queries\":[\"...\"]}}\n\
+         Rules:\n\
+         - 2 to {MAX_PLAN_QUERIES} short keyword queries, each 2-6 words.\n\
+         - Always include at least one English variant with the key domain terms translated.\n\
+         - Keep proper nouns, product names, and acronyms exactly as written.\n\
+         - No boolean operators, no quotes inside queries.\n\n\
+         QUESTION:\n{}",
+        question.trim()
+    );
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(QUERY_PLAN_TIMEOUT_SECS),
+        crate::harness::structured::run_read_only_json_with_progress(&prompt, |_| {}, cancel),
+    )
+    .await;
+    match outcome {
+        Ok(Ok(output)) => parse_query_plan(&output.text),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_query_plan(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    let Some(start) = trimmed.find('{') else {
+        return Vec::new();
+    };
+    let Some(end) = trimmed.rfind('}') else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&trimmed[start..=end]) else {
+        return Vec::new();
+    };
+    let mut queries = Vec::new();
+    if let Some(items) = parsed.get("queries").and_then(|v| v.as_array()) {
+        for item in items {
+            let Some(query) = item.as_str() else { continue };
+            let query = query.trim();
+            if query.is_empty() || query.chars().count() > 80 {
+                continue;
+            }
+            if queries
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(query))
+            {
+                continue;
+            }
+            queries.push(query.to_string());
+            if queries.len() == MAX_PLAN_QUERIES {
+                break;
+            }
+        }
+    }
+    queries
+}
+
+pub(crate) fn retrieve_evidence(
     db: &Db,
     request: &MemoryAskRequest,
+    queries: &[String],
 ) -> AppResult<(Vec<EvidencePassage>, Vec<String>)> {
     let mut warnings = super::importer::ensure_search_chunks(db);
-    let results = search(
-        db,
-        &request.question,
-        Some(&request.domain),
-        &MemorySearchOpts {
-            include_stale: request.include_stale,
-            limit: Some(8),
-        },
-    )?;
+    // Union of per-query results (retrieve wide, let the synthesis turn pick
+    // what it cites): dedupe by id, keep the best score.
+    let mut merged: BTreeMap<String, super::ScoredMemory> = BTreeMap::new();
+    for query in queries.iter().take(MAX_SEARCH_QUERIES) {
+        for result in search(
+            db,
+            query,
+            Some(&request.domain),
+            &MemorySearchOpts {
+                include_stale: request.include_stale,
+                limit: Some(8),
+            },
+        )? {
+            match merged.get(&result.row.id) {
+                Some(existing) if existing.score >= result.score => {}
+                _ => {
+                    merged.insert(result.row.id.clone(), result);
+                }
+            }
+        }
+    }
+    let mut results: Vec<super::ScoredMemory> = merged.into_values().collect();
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut evidence = Vec::new();
-    for result in results.into_iter().take(6) {
+    let mut link_candidates: Vec<(String, f64)> = Vec::new();
+    for (rank, result) in results.into_iter().take(MAX_MEMORY_PASSAGES).enumerate() {
         let (content, _) = super::vault::read_file(&result.row.vault_path)?;
-        let body = super::frontmatter::parse(&content)
-            .map(|(_, body)| body)
-            .unwrap_or(content);
+        let parsed = super::frontmatter::parse(&content);
+        // Link-aware expansion (LLM-wiki pattern): the related edges of the
+        // strongest hits pull in notes lexical search alone would miss.
+        if rank < 3 {
+            if let Some((fm, _)) = parsed.as_ref() {
+                for path in &fm.related {
+                    link_candidates.push((path.clone(), result.score));
+                }
+            }
+        }
+        let body = parsed.map(|(_, body)| body).unwrap_or(content);
         let excerpt = best_excerpt(&body, &request.question);
         if result.row.status == "stale" {
             warnings.push(format!(
@@ -331,7 +539,66 @@ fn retrieve_evidence(
         });
     }
 
-    for hit in super::index::search_document_chunks(db, &request.question, &request.domain, 8)? {
+    let mut expansions = 0usize;
+    for (path, parent_score) in link_candidates {
+        if expansions == MAX_LINK_EXPANSIONS {
+            break;
+        }
+        if evidence
+            .iter()
+            .any(|passage: &EvidencePassage| passage.vault_path == path)
+        {
+            continue;
+        }
+        let Some(row) = super::index::get_by_path(db, &path)? else {
+            continue;
+        };
+        if row.domain != request.domain
+            || row.status == "expired"
+            || (row.status == "stale" && !request.include_stale)
+        {
+            continue;
+        }
+        let Ok((content, _)) = super::vault::read_file(&row.vault_path) else {
+            continue;
+        };
+        let body = super::frontmatter::parse(&content)
+            .map(|(_, body)| body)
+            .unwrap_or(content);
+        evidence.push(EvidencePassage {
+            id: format!("memory:{}", row.id),
+            title: row.title,
+            vault_path: row.vault_path,
+            status: row.status,
+            excerpt: best_excerpt(&body, &request.question),
+            text: take_chars(&body, MAX_EVIDENCE_CHARS),
+            // Dampened: an edge is a weaker signal than a direct lexical hit.
+            score: parent_score * LINK_SCORE_DAMPING,
+            source_kind: "memory".to_string(),
+        });
+        expansions += 1;
+    }
+
+    let mut chunk_hits: BTreeMap<String, super::index::DocumentChunkHit> = BTreeMap::new();
+    for query in queries.iter().take(MAX_SEARCH_QUERIES) {
+        for hit in super::index::search_document_chunks(db, query, &request.domain, 8)? {
+            let key = format!("{}:{}", hit.import_id, hit.id);
+            match chunk_hits.get(&key) {
+                Some(existing) if existing.score >= hit.score => {}
+                _ => {
+                    chunk_hits.insert(key, hit);
+                }
+            }
+        }
+    }
+    let mut chunk_hits: Vec<super::index::DocumentChunkHit> = chunk_hits.into_values().collect();
+    chunk_hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for hit in chunk_hits.into_iter().take(MAX_SOURCE_PASSAGES) {
         evidence.push(EvidencePassage {
             id: format!("source:{}:{}", hit.import_id, hit.id),
             title: hit.title,
@@ -393,6 +660,8 @@ Answer the QUESTION in the same language as the question. Return exactly one JSO
 Rules:
 - Every claim must directly answer the question and must cite at least one evidence id.
 - Preserve names, numbers, dates, endpoint categories, and technical terms exactly.
+- A local verifier rejects any claim containing a content word that does not literally appear in its cited evidence. When the question language differs from the evidence language, still answer in the question's language, but copy key terms, role titles, product names, and list items verbatim from the evidence instead of translating them (e.g. "si occupa di \"Azure Migrations\"").
+- Write each claim as one natural, readable sentence — never transcribe list rows as bare semicolon chains. Connect the verbatim terms with plain function words of the question's language.
 - Prefer a concise synthesis over copying whole passages.
 - Do not include citation markers in claim text; the application adds them.
 - Return at most {MAX_CLAIMS} claims, each under {MAX_CLAIM_CHARS} characters.
@@ -509,26 +778,44 @@ fn verify_synthesis(
                 .map(|id| format!("[{id}]"))
                 .collect::<Vec<_>>()
                 .join("");
+            // Sentence-final punctuation stays with its claim ("Claim. [1]"),
+            // so the frontend can split on markers without stray leading
+            // periods or an orphaned trailing dot.
             format!(
-                "{} {markers}",
+                "{}. {markers}",
                 text.trim_end_matches(|character: char| character == '.' || character == ' ')
             )
         })
         .collect::<Vec<_>>()
-        .join(". ")
-        + ".";
+        .join(" ");
+    // Per-claim excerpts: the quoted passage fragment must prove the claims
+    // that cite it, not merely echo the question's keywords.
+    let mut claims_by_citation: BTreeMap<usize, Vec<&str>> = BTreeMap::new();
+    for (text, ids) in &accepted {
+        for id in ids {
+            claims_by_citation.entry(*id).or_default().push(text);
+        }
+    }
     let citations = used_ids
         .iter()
         .filter_map(|original| {
-            evidence.get(original - 1).map(|passage| MemoryCitation {
-                id: passage.id.clone(),
-                number: remap[original],
-                title: passage.title.clone(),
-                vault_path: passage.vault_path.clone(),
-                status: passage.status.clone(),
-                excerpt: take_chars(&passage.excerpt, 420),
-                score: passage.score,
-                source_kind: passage.source_kind.clone(),
+            evidence.get(original - 1).map(|passage| {
+                let excerpt = match claims_by_citation.get(original) {
+                    Some(texts) if !texts.is_empty() => {
+                        best_excerpt(&passage.text, &texts.join(" "))
+                    }
+                    _ => passage.excerpt.clone(),
+                };
+                MemoryCitation {
+                    id: passage.id.clone(),
+                    number: remap[original],
+                    title: passage.title.clone(),
+                    vault_path: passage.vault_path.clone(),
+                    status: passage.status.clone(),
+                    excerpt: take_chars(&excerpt, 420),
+                    score: passage.score,
+                    source_kind: passage.source_kind.clone(),
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -583,7 +870,53 @@ fn claim_supported(
 }
 
 fn support_terms(value: &str) -> BTreeSet<String> {
-    const STOPWORDS: [&str; 52] = [
+    // Function words only (both languages): removing them from the support
+    // check never weakens the guarantee because they carry no facts.
+    const STOPWORDS: &[&str] = &[
+        "agli",
+        "alle",
+        "cioè",
+        "composta",
+        "composto",
+        "dalla",
+        "dalle",
+        "degli",
+        "dove",
+        "essere",
+        "fanno",
+        "inoltre",
+        "insieme",
+        "invece",
+        "loro",
+        "mentre",
+        "non",
+        "occupa",
+        "occupano",
+        "ogni",
+        "oltre",
+        "ossia",
+        "ovvero",
+        "parte",
+        "presso",
+        "quale",
+        "quali",
+        "quando",
+        "questa",
+        "queste",
+        "questi",
+        "questo",
+        "riguarda",
+        "riguardano",
+        "rispettivamente",
+        "secondo",
+        "stato",
+        "svolge",
+        "svolgono",
+        "tramite",
+        "tutte",
+        "tutti",
+        "viene",
+        "vengono",
         "about",
         "also",
         "and",
@@ -858,6 +1191,88 @@ mod tests {
         .unwrap();
         assert!(!parsed.abstained);
         assert_eq!(parsed.claims.len(), 1);
+    }
+
+    #[test]
+    fn query_plan_parses_and_bounds_model_output() {
+        let queries = parse_query_plan(
+            "```json\n{\"queries\":[\"ADT Team 3 members\",\"ADT Team 3 responsibilities Azure\",\"adt team 3 members\",\"\",\"cloud application delivery team\",\"extra beyond cap\",\"another\"]}\n```",
+        );
+        assert_eq!(
+            queries,
+            vec![
+                "ADT Team 3 members",
+                "ADT Team 3 responsibilities Azure",
+                "cloud application delivery team",
+                "extra beyond cap",
+            ],
+            "duplicates (case-insensitive), empties, and overflow must be dropped"
+        );
+        assert!(parse_query_plan("not json at all").is_empty());
+        assert!(parse_query_plan("{\"queries\": 42}").is_empty());
+    }
+
+    #[test]
+    fn cross_language_claim_passes_when_key_terms_are_quoted_verbatim() {
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/orgchart.md",
+            "ADT TEAM 3 responsibilities: Azure Migrations, Azure Application Delivery Projects, Databricks, API, and all AI Development Projects.",
+            0.9,
+        )];
+        let mut warnings = Vec::new();
+        let answer = verify_synthesis(
+            "00000000-0000-4000-8000-000000000002",
+            &request(),
+            "2026-07-21T12:00:00Z",
+            &evidence,
+            RawSynthesis {
+                abstained: false,
+                claims: vec![RawClaim {
+                    text: "Il team si occupa di \"Azure Migrations\" e \"AI Development Projects\""
+                        .to_string(),
+                    citations: vec![1],
+                }],
+            },
+            &mut warnings,
+        );
+        assert!(
+            !answer.abstained,
+            "an Italian claim quoting evidence terms verbatim must survive: {:?}",
+            answer.warnings
+        );
+        assert_eq!(answer.citations.len(), 1);
+    }
+
+    #[test]
+    fn citation_excerpt_proves_the_accepted_claim_not_the_question() {
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/orgchart.md",
+            "The Admin API provides endpoint categories for many uses. Team assignments: Thomas Kim and Ken Ilalde handle Azure Migrations and Databricks Development Projects.",
+            0.9,
+        )];
+        let mut warnings = Vec::new();
+        let answer = verify_synthesis(
+            "00000000-0000-4000-8000-000000000003",
+            &request(),
+            "2026-07-21T12:00:00Z",
+            &evidence,
+            RawSynthesis {
+                abstained: false,
+                claims: vec![RawClaim {
+                    text: "Thomas Kim and Ken Ilalde handle \"Azure Migrations\"".to_string(),
+                    citations: vec![1],
+                }],
+            },
+            &mut warnings,
+        );
+        assert!(!answer.abstained);
+        let excerpt = &answer.citations[0].excerpt;
+        assert!(
+            excerpt.contains("Thomas Kim"),
+            "excerpt must contain the claim's supporting sentence, got: {excerpt}"
+        );
     }
 
     #[test]

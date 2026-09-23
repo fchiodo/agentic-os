@@ -1,11 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useRef, useState } from 'react'
 import {
   memoryDocumentImportsList,
   memoryDocumentSourceRead,
   memoryImportDocument,
   memoryAsk,
+  memoryAskCancel,
   memoryAnswerFeedback,
   memoryConfirm,
+  memoryLint,
   memoryMaintenanceRun,
   memoryProposalsDecide,
   memoryProposalsList,
@@ -20,6 +23,7 @@ import type {
   DocumentImportRequest,
   ManualSaveRequest,
   MemoryAnswerFeedbackRequest,
+  MemoryAskProgress,
   MemoryAskRequest,
   ProposalDecideRequest,
 } from '@/features/memory/schema'
@@ -67,10 +71,56 @@ export function useMemoryProposals(status?: string) {
   })
 }
 
+/**
+ * Ask mutation plus the live progress trail streamed over the per-invocation
+ * Tauri channel. `progress` resets on each ask and is intentionally kept
+ * after settling so the trail stays inspectable on errors (e.g. showing the
+ * last stage reached before a failed synthesis). `stop` cancels the in-flight
+ * run — there is no wall-clock timeout on the backend, the user decides.
+ */
 export function useMemoryAsk() {
-  return useMutation({
-    mutationFn: (request: MemoryAskRequest) => memoryAsk(request),
+  const [progress, setProgress] = useState<MemoryAskProgress[]>([])
+  const [durationMs, setDurationMs] = useState<number | null>(null)
+  const runRef = useRef(0)
+  const askIdRef = useRef<string | null>(null)
+  const startedAtRef = useRef<number | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: (request: MemoryAskRequest) => {
+      const run = ++runRef.current
+      const askId = crypto.randomUUID()
+      askIdRef.current = askId
+      startedAtRef.current = Date.now()
+      setProgress([])
+      setDurationMs(null)
+      return memoryAsk(request, askId, (event) => {
+        // The run guard drops stragglers from a superseded ask so a rapid
+        // re-submit can never interleave two progress trails.
+        if (runRef.current === run) {
+          setProgress((previous) => {
+            // Transient events (heartbeats, stderr lines) update in place —
+            // a stalled run shows one live status line, not a growing stack.
+            const last = previous[previous.length - 1]
+            if (last?.transient && event.transient) {
+              return [...previous.slice(0, -1), event]
+            }
+            return [...previous, event]
+          })
+        }
+      })
+    },
+    onSettled: () => {
+      setDurationMs(startedAtRef.current === null ? null : Date.now() - startedAtRef.current)
+    },
   })
+
+  const stop = () => {
+    if (askIdRef.current !== null) {
+      void memoryAskCancel(askIdRef.current)
+    }
+  }
+
+  return { ...mutation, progress, durationMs, stop }
 }
 
 export function useMemoryAnswerFeedback() {
@@ -151,6 +201,13 @@ export function useMemoryReindex() {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
     },
+  })
+}
+
+export function useMemoryLint() {
+  return useMutation({
+    mutationFn: ({ domain, deep }: { domain?: string; deep?: boolean }) =>
+      memoryLint(domain, deep),
   })
 }
 
