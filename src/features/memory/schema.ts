@@ -6,6 +6,7 @@ export const memoryTypeSchema = z.enum([
   'preference',
   'entity',
   'episode',
+  'synthesis',
 ])
 
 export const memoryStatusSchema = z.enum(['active', 'stale', 'expired'])
@@ -37,6 +38,7 @@ export const memoryFrontmatterSchema = z.object({
   confirmations: z.number().nullable().optional(),
   expires: z.string().nullable().optional(),
   tags: z.array(z.string()),
+  related: z.array(z.string()).default([]),
 })
 
 export const memoryRowSchema = z.object({
@@ -209,12 +211,35 @@ export const manualSaveRequestSchema = z.object({
   staleAfterDays: z.number().int().positive().optional(),
   expires: z.string().optional(),
   supersedesId: z.string().optional(),
+  related: z.array(z.string()).optional(),
+})
+
+export const memoryLintFindingSchema = z.object({
+  kind: z.enum(['broken_link', 'orphan', 'stale', 'contradiction']),
+  severity: z.enum(['info', 'warning']),
+  paths: z.array(z.string()),
+  detail: z.string(),
+})
+
+export const memoryLintReportSchema = z.object({
+  generatedAt: z.string(),
+  scanned: z.number(),
+  findings: z.array(memoryLintFindingSchema),
+  deep: z.boolean(),
+  modelTokens: z.number().nullable(),
 })
 
 export const memoryAskRequestSchema = z.object({
   question: z.string(),
   domain: z.string(),
   includeStale: z.boolean(),
+})
+
+export const memoryAskProgressSchema = z.object({
+  stage: z.enum(['retrieval', 'synthesis', 'verification']),
+  label: z.string(),
+  at: z.string(),
+  transient: z.boolean().default(false),
 })
 
 export const memoryCitationSchema = z.object({
@@ -421,6 +446,7 @@ export type ManualSaveRequest = z.infer<typeof manualSaveRequestSchema>
 export type MemoryAskRequest = z.infer<typeof memoryAskRequestSchema>
 export type MemoryCitation = z.infer<typeof memoryCitationSchema>
 export type MemoryAnswer = z.infer<typeof memoryAnswerSchema>
+export type MemoryAskProgress = z.infer<typeof memoryAskProgressSchema>
 export type MemoryAnswerFeedbackRequest = z.infer<typeof memoryAnswerFeedbackRequestSchema>
 export type ExtractedMemoryCandidate = z.infer<typeof extractedMemoryCandidateSchema>
 export type MemoryIngestRequest = z.infer<typeof memoryIngestRequestSchema>
@@ -437,3 +463,5 @@ export type OrbitNode = z.infer<typeof orbitNodeSchema>
 export type OrbitFacet = z.infer<typeof orbitFacetSchema>
 export type OrbitEdge = z.infer<typeof orbitEdgeSchema>
 export type OrbitMap = z.infer<typeof orbitMapSchema>
+export type MemoryLintFinding = z.infer<typeof memoryLintFindingSchema>
+export type MemoryLintReport = z.infer<typeof memoryLintReportSchema>

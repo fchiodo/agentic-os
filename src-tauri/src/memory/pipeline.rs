@@ -149,8 +149,47 @@ fn subdir_for(mem_type: MemoryType) -> &'static str {
     match mem_type {
         MemoryType::Decision => "decisions",
         MemoryType::Episode => "episodes",
+        MemoryType::Synthesis => "synthesis",
         _ => "memories",
     }
+}
+
+/// Resolve requested related links against the index. Invalid entries
+/// (cross-domain, path traversal, unknown targets) are dropped, never fatal:
+/// a bad link must not block an otherwise valid save. Returns the surviving
+/// links plus a human-readable gate detail.
+fn resolve_related_links(
+    db: &Db,
+    requested: &[String],
+    domain: &str,
+    own_path: Option<&str>,
+) -> (Vec<String>, String) {
+    let mut resolved = Vec::new();
+    let mut dropped = 0usize;
+    for raw in requested {
+        let path = raw.trim().trim_start_matches('/');
+        if path.is_empty()
+            || path.contains("..")
+            || !path.starts_with(&format!("{domain}/"))
+            || Some(path) == own_path
+            || resolved.iter().any(|existing| existing == path)
+        {
+            dropped += 1;
+            continue;
+        }
+        match super::index::metadata_by_path(db, path) {
+            Ok(Some(_)) => resolved.push(path.to_string()),
+            _ => dropped += 1,
+        }
+    }
+    let detail = if requested.is_empty() {
+        "no links requested".to_string()
+    } else if dropped == 0 {
+        format!("{} link(s) resolved", resolved.len())
+    } else {
+        format!("{} resolved, {} dropped", resolved.len(), dropped)
+    };
+    (resolved, detail)
 }
 
 fn parse_lifecycle_date(value: &str) -> Option<chrono::NaiveDate> {
@@ -599,6 +638,16 @@ fn process_manual_save_with_context(
                     .to_string()
             })
         });
+    let (mut related, related_detail) =
+        resolve_related_links(db, &request.related, domain.as_str(), Some(&vault_path));
+    if let Some((old_fm, _)) = old_parsed.as_ref() {
+        for path in &old_fm.related {
+            if !related.contains(path) {
+                related.push(path.clone());
+            }
+        }
+    }
+    report.check("related_links", true, &related_detail);
     let fm = MemoryFrontmatter {
         id: id.clone(),
         mem_type,
@@ -641,6 +690,7 @@ fn process_manual_save_with_context(
         confirmations: Some(confirmations),
         expires,
         tags,
+        related,
     };
     let content = super::frontmatter::serialize(&fm, &final_body);
     let old_content = old_document
@@ -739,6 +789,7 @@ pub fn process_ingest_batch(
             stale_after_days: candidate.stale_after_days,
             expires: candidate.expires.clone(),
             supersedes_id: candidate.supersedes_id.clone(),
+            related: Vec::new(),
         };
         match process_manual_save(db, &manual, &request.source) {
             Ok(proposal) => proposals.push(proposal),
@@ -802,6 +853,7 @@ pub fn process_run_capture(
                 .to_string(),
         ),
         supersedes_id: None,
+        related: Vec::new(),
     };
 
     match process_manual_save(db, &request, &format!("task:{task_id}")) {
@@ -976,7 +1028,7 @@ fn merge_bodies(old: &str, new: &str, mem_type: MemoryType) -> String {
     }
 }
 
-fn normalized_terms(value: &str) -> std::collections::BTreeSet<String> {
+pub(crate) fn normalized_terms(value: &str) -> std::collections::BTreeSet<String> {
     value
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -985,7 +1037,7 @@ fn normalized_terms(value: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-fn jaccard(left: &str, right: &str) -> f64 {
+pub(crate) fn jaccard(left: &str, right: &str) -> f64 {
     let left = normalized_terms(left);
     let right = normalized_terms(right);
     if left.is_empty() || right.is_empty() {

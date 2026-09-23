@@ -335,6 +335,29 @@ fn recover_import(db: &Db, operation: &PendingOperation) -> AppResult<RecoveryOu
     };
     let source_path = string("sourcePath")?;
     let source_hash = string("snapshotHash")?;
+    let images = payload
+        .get("images")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let path = item
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| operation_error("import image journal is missing path"))?;
+                    let content_hash = item
+                        .get("contentHash")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            operation_error("import image journal is missing contentHash")
+                        })?;
+                    Ok((path.to_string(), content_hash.to_string()))
+                })
+                .collect::<AppResult<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let existing_row = db.with_conn(|conn| {
         conn.query_row(
             "SELECT 1 FROM document_imports WHERE id = ?1",
@@ -347,6 +370,12 @@ fn recover_import(db: &Db, operation: &PendingOperation) -> AppResult<RecoveryOu
     })?;
     if !super::vault::file_exists(&source_path)? {
         if !existing_row {
+            if let Some(original_path) = payload.get("originalPath").and_then(Value::as_str) {
+                let _ = super::vault::remove_file(original_path);
+            }
+            for (path, _) in &images {
+                let _ = super::vault::remove_file(path);
+            }
             rolled_back(db, &operation.id, Some("no durable source file found"))?;
             return Ok(RecoveryOutcome::RolledBack);
         }
@@ -370,6 +399,20 @@ fn recover_import(db: &Db, operation: &PendingOperation) -> AppResult<RecoveryOu
             return Err(operation_error(
                 "import original artifact does not match its journal",
             ));
+        }
+    }
+    for (path, expected_hash) in &images {
+        if !super::vault::file_exists(path)? {
+            return Err(operation_error(format!(
+                "import embedded image is missing: {path}"
+            )));
+        }
+        let bytes = super::vault::read_bytes(path)?;
+        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+        if &actual_hash != expected_hash {
+            return Err(operation_error(format!(
+                "import embedded image does not match its journal: {path}"
+            )));
         }
     }
 
@@ -424,6 +467,7 @@ fn recover_import(db: &Db, operation: &PendingOperation) -> AppResult<RecoveryOu
                 "importId": operation.entity_id,
                 "domain": string("domain")?,
                 "sourcePath": source_path,
+                "imagePaths": images.iter().map(|(path, _)| path).collect::<Vec<_>>(),
                 "recovered": true,
             }),
             None,
