@@ -32,10 +32,10 @@ export function AuditPage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
 
   const requestedRunId = searchParams.get('run')
-  const effectiveRunId = runs?.find((run) => run.runId === requestedRunId)?.runId
-    ?? selectedRunId
-    ?? runs?.[0]?.runId
-    ?? null
+  const requestedRunExists = requestedRunId ? runs?.some((run) => run.runId === requestedRunId) ?? false : false
+  const effectiveRunId = requestedRunId
+    ? (requestedRunExists ? requestedRunId : null)
+    : selectedRunId ?? runs?.[0]?.runId ?? null
   const { data: trace } = useAuditTrace(effectiveRunId)
 
   return (
@@ -96,7 +96,9 @@ export function AuditPage() {
             <div className="panel-heading">
               <h2>Trace</h2>
             </div>
-            {trace && trace.length > 0 ? (
+            {requestedRunId && runs && !requestedRunExists ? (
+              <div className="inline-error" role="alert">Trace “{requestedRunId}” was not found. No different run was opened.</div>
+            ) : trace && trace.length > 0 ? (
               <TraceTimeline entries={trace} />
             ) : (
               <p className="row-subtle">Select a run to see its full trace.</p>

@@ -1,5 +1,6 @@
 import '@testing-library/jest-dom/vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type Graph from 'graphology'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { orbitMapSchema } from '@/features/memory/schema'
@@ -7,6 +8,7 @@ import type { OrbitMap, OrbitNode } from '@/features/memory/schema'
 
 const sigmaMock = vi.hoisted(() => ({
   animate: vi.fn(),
+  graph: null as Graph | null,
   handlers: new Map<string, (payload: { edge?: string; node?: string }) => void>(),
   setState: vi.fn(),
 }))
@@ -18,6 +20,10 @@ const orbitHookState = vi.hoisted(() => ({
 
 vi.mock('sigma', () => ({
   default: class SigmaMock {
+    constructor(graph: Graph) {
+      sigmaMock.graph = graph
+    }
+
     on(event: string, handler: (payload: { edge?: string; node?: string }) => void) {
       sigmaMock.handlers.set(event, handler)
     }
@@ -110,8 +116,9 @@ function fixture(generatedAt = '2026-09-23T10:00:00Z'): OrbitMap {
     activityWindow: 'today',
     nodes,
     edges: [
-      { id: 'edge:registers', source: 'core:agentic-os', target: 'group:skill:test', relation: 'registers', evidence: 'declared', weight: 1, activityAt: null, provenance: [] },
-      { id: 'edge:observed', source: 'skill:deep', target: 'application:github', relation: 'uses', evidence: 'observed', weight: 1, activityAt: '2026-09-23T09:00:00Z', provenance: [{ kind: 'execution_event', reference: 'audit:run-1', detail: 'Successful structured invocation', ts: '2026-09-23T09:00:00Z' }] },
+      { id: 'edge:registers', source: 'core:agentic-os', target: 'group:skill:test', relation: 'registers', evidence: 'declared', weight: 1, activityAt: null, provenance: [{ kind: 'registry', reference: 'catalog:skill:test', detail: 'Registered skill group', ts: null }] },
+      { id: 'edge:contains', source: 'group:skill:test', target: 'skill:deep', relation: 'contains', evidence: 'declared', weight: 1, activityAt: null, provenance: [{ kind: 'registry', reference: 'catalog:deep', detail: 'Discovered skill', ts: null }] },
+      { id: 'edge:observed', source: 'skill:deep', target: 'application:github', relation: 'used', evidence: 'observed', weight: 1, activityAt: '2026-09-23T09:00:00Z', provenance: [{ kind: 'execution_event', reference: 'audit:run-1', detail: 'Successful structured invocation', ts: '2026-09-23T09:00:00Z' }] },
     ],
     activities: [
       { taskId: 'task-1', title: 'Run governed task', domain: 'work', status: 'completed', updatedAt: '2026-09-23T09:00:00Z', eventCount: 2, telemetryAvailable: true, links: [
@@ -120,7 +127,7 @@ function fixture(generatedAt = '2026-09-23T10:00:00Z'): OrbitMap {
       ] },
       { taskId: 'task-2', title: 'Task without trace', domain: 'personal', status: 'queued', updatedAt: '2026-09-23T08:00:00Z', eventCount: 0, telemetryAvailable: false, links: [] },
     ],
-    counts: { skills: 1, memories: 1, routines: 0, applications: 1, relations: 2 },
+    counts: { skills: 1, memories: 1, routines: 0, applications: 1, relations: 3 },
     metrics: { composeMs: 1.2, tasksScanned: 2, tracesScanned: 1, activityEvents: 2 },
   }
 }
@@ -135,6 +142,7 @@ beforeEach(() => {
   sigmaMock.animate.mockReset()
   sigmaMock.setState.mockReset()
   sigmaMock.handlers.clear()
+  sigmaMock.graph = null
   vi.stubGlobal('matchMedia', vi.fn(() => ({
     matches: true,
     addEventListener: vi.fn(),
@@ -169,6 +177,18 @@ describe('OrbitMapView exploration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Center selection' }))
     expect(sigmaMock.setState).toHaveBeenCalledWith({ ratio: 0.58, x: 0.23, y: 0.71 })
+  })
+
+  it('renders memory sector separators through transparent visible anchors', () => {
+    renderMap()
+    const graph = sigmaMock.graph
+    expect(graph).not.toBeNull()
+    for (let index = 0; index < 6; index += 1) {
+      expect(graph?.hasEdge(`__sector-edge:${index}`)).toBe(true)
+      expect(graph?.getNodeAttribute(`__sector:${index}:inner`, 'hidden')).not.toBe(true)
+      expect(graph?.getNodeAttribute(`__sector:${index}:outer`, 'hidden')).not.toBe(true)
+      expect(graph?.getNodeAttribute(`__sector:${index}:inner`, 'color')).toBe('#ffffff00')
+    }
   })
 
   it('finds an item in a closed group, expands its parent, and opens the detail', async () => {
@@ -208,6 +228,61 @@ describe('OrbitMapView exploration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Task without trace/ }))
     expect(await screen.findByText(/Data not available: this task has no trace events/i)).toBeInTheDocument()
+  })
+
+  it('keeps the selected task while inspecting one of its linked nodes', async () => {
+    renderMap()
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    const taskButton = screen.getByRole('button', { name: /Run governed task/ })
+    fireEvent.click(taskButton)
+    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'skill:deep' }))
+
+    expect(await screen.findByRole('heading', { name: 'Deep skill' })).toBeInTheDocument()
+    expect(screen.getByText('Inspecting within task: Run governed task')).toBeInTheDocument()
+    expect(taskButton).toHaveAttribute('aria-pressed', 'true')
+    expect(sigmaMock.graph?.hasEdge('activity:task-1:0')).toBe(true)
+  })
+
+  it('applies evidence filters to selected-node and activity relations', async () => {
+    renderMap()
+    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'skill:deep' }))
+    expect(sigmaMock.graph?.hasEdge('edge:observed')).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show relations' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Observed' }))
+    await waitFor(() => expect(sigmaMock.graph?.hasEdge('edge:observed')).toBe(false))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+    fireEvent.click(screen.getByRole('button', { name: /Run governed task/ }))
+    expect(sigmaMock.graph?.hasEdge('activity:task-1:0')).toBe(false)
+  })
+
+  it('routes registry evidence to Catalog instead of presenting it as a trace', async () => {
+    renderMap()
+    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'skill:deep' }))
+    fireEvent.click(await screen.findByRole('button', { name: /target of contains/i }))
+
+    expect(screen.getByRole('button', { name: 'Open in Catalog · catalog:deep' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Open trace/ })).not.toBeInTheDocument()
+  })
+
+  it('reports the complete search count and progressively reveals results after forty', () => {
+    const current = fixture()
+    const matchingNodes = Array.from({ length: 45 }, (_, index) => node({
+      id: `skill:matching-${index.toString().padStart(2, '0')}`,
+      kind: 'skill',
+      ring: 1,
+      label: `Matching skill ${index + 1}`,
+      groupId: 'group:skill:test',
+    }))
+    orbitHookState.current = { ...current, nodes: [...current.nodes, ...matchingNodes] }
+    renderMap()
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search all map items' }), { target: { value: 'Matching skill' } })
+    expect(screen.getByText((_content, element) => element?.textContent === '45 results in authorized data · showing 40')).toBeInTheDocument()
+    expect(within(screen.getByRole('listbox', { name: 'Map search results' })).getAllByRole('option')).toHaveLength(40)
+    fireEvent.click(screen.getByRole('button', { name: 'Show 5 more' }))
+    expect(within(screen.getByRole('listbox', { name: 'Map search results' })).getAllByRole('option')).toHaveLength(45)
   })
 })
 

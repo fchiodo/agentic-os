@@ -925,14 +925,24 @@ fn add_observed_relations(
 }
 
 fn activity_since(window: &str) -> chrono::DateTime<chrono::Utc> {
-    let now = chrono::Utc::now();
+    activity_since_at(window, chrono::Local::now().fixed_offset())
+}
+
+fn activity_since_at(
+    window: &str,
+    local_now: chrono::DateTime<chrono::FixedOffset>,
+) -> chrono::DateTime<chrono::Utc> {
     if window == "7d" {
-        now - chrono::Duration::days(7)
+        local_now.with_timezone(&chrono::Utc) - chrono::Duration::days(7)
     } else {
-        now.date_naive()
+        local_now
+            .date_naive()
             .and_hms_opt(0, 0, 0)
             .expect("midnight is a valid time")
-            .and_utc()
+            .and_local_timezone(*local_now.offset())
+            .single()
+            .expect("a fixed offset has one local midnight")
+            .with_timezone(&chrono::Utc)
     }
 }
 
@@ -2050,6 +2060,33 @@ mod tests {
             .links
             .iter()
             .all(|link| !link.node_id.contains("unverified")));
+    }
+
+    #[test]
+    fn today_window_starts_at_local_midnight_converted_to_utc() {
+        let summer_now = chrono::DateTime::parse_from_rfc3339("2026-09-24T10:15:00+02:00")
+            .expect("valid fixed-offset time");
+        let winter_now = chrono::DateTime::parse_from_rfc3339("2026-01-24T10:15:00+01:00")
+            .expect("valid fixed-offset time");
+
+        assert_eq!(
+            activity_since_at("today", summer_now).to_rfc3339(),
+            "2026-09-23T22:00:00+00:00"
+        );
+        assert_eq!(
+            activity_since_at("today", winter_now).to_rfc3339(),
+            "2026-01-23T23:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn seven_day_window_is_an_exact_rolling_interval() {
+        let local_now = chrono::DateTime::parse_from_rfc3339("2026-09-24T10:15:00+02:00")
+            .expect("valid fixed-offset time");
+        assert_eq!(
+            activity_since_at("7d", local_now).to_rfc3339(),
+            "2026-09-17T08:15:00+00:00"
+        );
     }
 
     #[test]

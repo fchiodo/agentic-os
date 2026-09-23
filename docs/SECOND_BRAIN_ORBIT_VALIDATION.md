@@ -1,8 +1,18 @@
 # Second Brain orbital map — implementation and validation
 
-Validated branch: `feat/second-brain-orbit-evolution`
+Validated branch: `fix/second-brain-orbit-review`
 
-Base: `dc64ef6` (`master`, merge of PR #2). The branch is intentionally local and is not merged or pushed.
+Base: `ec05f36` (`master`, initial orbital-map milestone). The branch is intentionally local and is not merged or pushed.
+
+## Review corrections after `ec05f36`
+
+- Memory-sector guide anchors are transparent, renderable Sigma nodes instead of hidden nodes, so all six separators remain visible in WebGL.
+- Activity task selection and inspected-node selection are independent. Inspecting a linked memory, skill, routine, or application retains the task and its observed links.
+- Evidence and relation-type filters apply to selected-node links, advanced Structure links, and Activity links. Filtering an edge also closes its stale edge detail.
+- Evidence actions are routed by provenance: audit references open Audit, catalog references open Catalog, vault paths open Library documents, and document-import references open their governed original source.
+- Audit no longer falls back to an unrelated run when a requested trace is absent; it shows an explicit not-found message with no trace selected.
+- Search reports the complete authorized match count and reveals results in pages of 40 instead of silently truncating.
+- “Today” starts at local midnight and converts that boundary to UTC. Tests cover both the Italian UTC+1 and UTC+2 offsets; “Last 7 days” remains a rolling 168-hour interval.
 
 ## Delivered behavior
 
@@ -36,13 +46,13 @@ Reference device: MacBook Air, Apple M2 (8 cores), 8 GB RAM, arm64, macOS 26.4.1
 
 | Stage | Dataset | Result |
 | --- | --- | ---: |
-| Rust payload composition | Real local registries discovered during two runs; 625 skills, 0 indexed memories, 0 routines, 208 applications, 857 relations, 25 top-level nodes | 553.288–708.097 ms |
-| Deterministic layout | Clearly separated synthetic fixture: 671 nodes (561 skills and 100 applications plus aggregates/sectors) | 0.472 ms |
+| Rust payload composition | Real local registries; 625 skills, 0 indexed memories, 0 routines, 209 applications, 858 relations, 25 top-level nodes | 1,031.672 ms |
+| Deterministic layout | Clearly separated synthetic fixture: 671 nodes (561 skills and 100 applications plus aggregates/sectors) | 0.508 ms |
 | First useful render after payload | Browser preview, authorized one-node fallback | 11.3 ms |
 | Graph update including intentional transition | Browser preview, one-node fallback, 300 ms transition enabled | 306.0 ms |
 | Search | Browser preview, one-node fallback | below displayed 0.01 ms precision |
 
-The representative layout benchmark has a test budget of 100 ms. Interaction tests cover selection, expansion/search, Escape dismissal, refresh camera stability, and Activity telemetry states. The in-app performance disclosure is the source for measurements on a populated vault because it measures the currently authorized payload without exporting its contents.
+The representative layout benchmark has a test budget of 100 ms. Interaction tests cover selection, expansion/search, complete search counts, Escape dismissal, refresh camera stability, evidence filtering, provenance routing, and Activity telemetry/task-selection states. The in-app performance disclosure is the source for measurements on a populated vault because it measures the currently authorized payload without exporting its contents.
 
 The live desktop database used for the final smoke run contained no memories, tasks, imports, or audit events. Therefore the Tauri run validated the real catalog and explicit empty states, while populated group/search/activity behavior was validated with the clearly isolated test fixture. No data was seeded into the user's vault to make the demonstration look fuller.
 
@@ -50,11 +60,13 @@ The live desktop database used for the final smoke run contained no memories, ta
 
 - `pnpm build` — passed.
 - `pnpm lint` — passed.
-- `pnpm vitest run` — 17 tests passed.
-- `cargo test --manifest-path src-tauri/Cargo.toml` — 87 tests passed.
+- `pnpm vitest run` — 24 tests passed across 5 files.
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` — 89 tests passed.
+- `pnpm check:native` — passed.
 - `pnpm dev:desktop` — Tauri debug binary compiled and launched against the real local database.
-- Browser visual QA — Structure and Activity captured at desktop width; no console warnings or errors.
-- Release bundle — built and locally ad-hoc signed; `codesign --verify --deep --strict` passed.
+- Browser WebGL visual QA — the real Sigma renderer showed all concentric rings and all six Memory separators at desktop width in both map themes. The visual captures belong to the review session; the browser preview remains clearly identified as non-Tauri data.
+- Release application bundle — `pnpm exec tauri build --bundles app` passed; a local ad-hoc signature passes `codesign --verify --deep --strict`. The bundle is not Developer ID signed or notarized, so it is a local test artifact rather than a distributable release.
+- Release smoke — the compiled app launched successfully against an isolated temporary database and vault, leaving the user's real empty vault unchanged.
 
 Run the desktop app with:
 

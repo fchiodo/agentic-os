@@ -43,7 +43,7 @@ import { useWorkbenchStore } from '@/store/workbench'
 
 const DOMAINS = ['work', 'planphysique', 'personal', 'family', 'finance', 'research'] as const
 const DEFAULT_CHILD_LIMIT = 48
-const MAX_SEARCH_RESULTS = 40
+const SEARCH_PAGE_SIZE = 40
 const DEFAULT_EDGE_LIMIT = 120
 
 type MapMode = 'structure' | 'activity'
@@ -85,6 +85,7 @@ const DEFAULT_RELATION_TYPES = [
   'derived_from',
   'executed',
   'governs',
+  'inserted_into_context',
   'produced',
   'related_to',
   'supersedes',
@@ -153,8 +154,11 @@ function makeGraph(
     const angle = -Math.PI / 2 + (Math.PI * 2 * (index - 0.5)) / DOMAINS.length
     const inner = `__sector:${index}:inner`
     const outer = `__sector:${index}:outer`
-    graph.addNode(inner, { x: Math.cos(angle) * 18, y: Math.sin(angle) * 18, size: 0.01, hidden: true })
-    graph.addNode(outer, { x: Math.cos(angle) * 32, y: Math.sin(angle) * 32, size: 0.01, hidden: true })
+    // Sigma also hides every edge incident to a hidden node. Keep sector
+    // anchors renderable but fully transparent so their guide line remains
+    // visible without introducing decorative points.
+    graph.addNode(inner, { x: Math.cos(angle) * 18, y: Math.sin(angle) * 18, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
+    graph.addNode(outer, { x: Math.cos(angle) * 32, y: Math.sin(angle) * 32, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
     graph.addEdgeWithKey(`__sector-edge:${index}`, inner, outer, { color: sectorColor, size: 0.55, ringGuide: true, type: 'line', zIndex: 0 })
   }
 
@@ -262,6 +266,7 @@ export function OrbitMapView({
   const [domain, setDomain] = useState<string | undefined>()
   const [includeSensitive, setIncludeSensitive] = useState(false)
   const [search, setSearch] = useState('')
+  const [searchLimit, setSearchLimit] = useState(SEARCH_PAGE_SIZE)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set())
   const [groupLimits, setGroupLimits] = useState<Record<string, number>>({})
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -321,14 +326,15 @@ export function OrbitMapView({
     return grouped
   }, [nodes])
 
-  const searchResults = useMemo(() => {
+  const matchingSearchResults = useMemo(() => {
     if (!query) return []
     return nodes
       .filter((node) => node.kind !== 'core')
       .filter((node) => [node.label, node.subtitle ?? '', node.domain ?? '', node.status, node.operationalState, node.catalogState, node.usageState, node.connectionState, node.sourceRef].join(' ').toLocaleLowerCase().includes(query))
       .sort((left, right) => Number(right.aggregate) - Number(left.aggregate) || left.label.localeCompare(right.label))
-      .slice(0, MAX_SEARCH_RESULTS)
   }, [nodes, query])
+  const searchResults = useMemo(() => matchingSearchResults.slice(0, searchLimit), [matchingSearchResults, searchLimit])
+  const relationIsEnabled = useCallback((edge: OrbitEdge) => relationTypes.has(edge.relation) && evidenceTypes.has(edge.evidence), [evidenceTypes, relationTypes])
 
   useEffect(() => {
     const started = searchStartedRef.current
@@ -352,6 +358,14 @@ export function OrbitMapView({
     if (selectedNode) {
       visible.add(selectedNode.id)
       if (selectedNode.groupId) visible.add(selectedNode.groupId)
+      for (const edge of allEdges) {
+        if (!relationIsEnabled(edge) || (edge.relation === 'registers' && !showRelations)) continue
+        const relatedId = edge.source === selectedNode.id ? edge.target : edge.target === selectedNode.id ? edge.source : null
+        if (!relatedId) continue
+        visible.add(relatedId)
+        const parent = nodeById.get(relatedId)?.groupId
+        if (parent) visible.add(parent)
+      }
     }
     for (const nodeId of selectedActivityNodeIds) {
       visible.add(nodeId)
@@ -359,15 +373,14 @@ export function OrbitMapView({
       if (parent) visible.add(parent)
     }
     return visible
-  }, [childrenByGroup, expandedGroups, groupLimits, nodeById, nodes, selectedActivityNodeIds, selectedNode])
-
-  const allRelationTypes = useMemo(() => [...new Set(allEdges.map((edge) => edge.relation))].sort(), [allEdges])
+  }, [allEdges, childrenByGroup, expandedGroups, groupLimits, nodeById, nodes, relationIsEnabled, selectedActivityNodeIds, selectedNode, showRelations])
 
   const taskEdges = useMemo(() => activityEdges(selectedActivity), [selectedActivity])
+  const allRelationTypes = useMemo(() => [...new Set([...allEdges, ...taskEdges].map((edge) => edge.relation))].sort(), [allEdges, taskEdges])
   const displayedEdges = useMemo(() => {
-    if (mode === 'activity') return taskEdges.slice(0, relationLimit)
-    const selected = selectedId ? allEdges.filter((edge) => edge.source === selectedId || edge.target === selectedId) : []
-    const advanced = showRelations ? allEdges.filter((edge) => relationTypes.has(edge.relation) && evidenceTypes.has(edge.evidence)) : []
+    if (mode === 'activity') return taskEdges.filter(relationIsEnabled).slice(0, relationLimit)
+    const selected = selectedId ? allEdges.filter((edge) => (edge.source === selectedId || edge.target === selectedId) && relationIsEnabled(edge)) : []
+    const advanced = showRelations ? allEdges.filter(relationIsEnabled) : []
     const byId = new Map<string, OrbitEdge>()
     for (const edge of [...selected, ...advanced]) {
       if (edge.relation === 'registers' && !showRelations) continue
@@ -376,9 +389,9 @@ export function OrbitMapView({
     return [...byId.values()]
       .sort((left, right) => Number(right.source === selectedId || right.target === selectedId) - Number(left.source === selectedId || left.target === selectedId) || (right.activityAt ?? '').localeCompare(left.activityAt ?? ''))
       .slice(0, relationLimit)
-  }, [allEdges, evidenceTypes, mode, relationLimit, relationTypes, selectedId, showRelations, taskEdges])
+  }, [allEdges, mode, relationIsEnabled, relationLimit, selectedId, showRelations, taskEdges])
 
-  const selectedEdge = displayedEdges.find((edge) => edge.id === selectedEdgeId) ?? allEdges.find((edge) => edge.id === selectedEdgeId) ?? taskEdges.find((edge) => edge.id === selectedEdgeId) ?? null
+  const selectedEdge = displayedEdges.find((edge) => edge.id === selectedEdgeId) ?? null
 
   const nextGraph = useMemo(() => {
     return makeGraph(nodes, displayedEdges, visibleIds, theme)
@@ -420,7 +433,6 @@ export function OrbitMapView({
       if (node.startsWith('__')) return
       interactionStartedRef.current.selectionMs = performance.now()
       setSelectedId(node)
-      setSelectedTaskId(null)
       setSelectedEdgeId(null)
       setDetailOpen(true)
     })
@@ -431,7 +443,6 @@ export function OrbitMapView({
     })
     renderer.on('clickStage', () => {
       setSelectedId(null)
-      setSelectedTaskId(null)
       setSelectedEdgeId(null)
     })
     return () => {
@@ -607,7 +618,6 @@ export function OrbitMapView({
     interactionStartedRef.current.selectionMs = performance.now()
     if (node.groupId) setExpandedGroups((current) => new Set(current).add(node.groupId!))
     setSelectedId(id)
-    setSelectedTaskId(null)
     setSelectedEdgeId(null)
     setDetailOpen(true)
     if (focus) window.requestAnimationFrame(() => requestFocus(id))
@@ -642,6 +652,7 @@ export function OrbitMapView({
 
   const changeSearch = useCallback((value: string) => {
     searchStartedRef.current = performance.now()
+    setSearchLimit(SEARCH_PAGE_SIZE)
     setSearch(value)
   }, [])
 
@@ -653,6 +664,7 @@ export function OrbitMapView({
     setSelectedEdgeId(null)
     setShowRelations(false)
     setSearch('')
+    setSearchLimit(SEARCH_PAGE_SIZE)
     const camera = rendererRef.current?.getCamera()
     if (camera) {
       const target = { x: 0.5, y: 0.5, ratio: 1 }
@@ -663,6 +675,7 @@ export function OrbitMapView({
 
   const goBackLevel = () => {
     if (selectedEdgeId) return setSelectedEdgeId(null)
+    if (selectedTaskId && selectedId) return setSelectedId(null)
     if (selectedNode?.groupId) return selectNode(selectedNode.groupId)
     if (selectedTaskId || selectedId) {
       setSelectedTaskId(null)
@@ -681,17 +694,46 @@ export function OrbitMapView({
 
   const openTrace = (reference: string) => void navigate(`/audit?run=${encodeURIComponent(reference.replace(/^audit:/, ''))}`)
 
+  const openCatalogReference = (reference: string) => {
+    const node = nodes.find((candidate) => candidate.sourceRef === reference && catalogId(candidate))
+    if (node) return navigateCatalog(node)
+    const [, kind = 'all', ...labelParts] = reference.split(':')
+    setSelectedCatalogId(null)
+    setCatalogSearch(labelParts.join(':'))
+    setCatalogFilter(kind === 'skill' || kind === 'routine' ? kind : 'all')
+    void navigate('/catalog')
+  }
+
+  const evidenceAction = (reference: string): { label: string; run: () => void } | null => {
+    if (reference.startsWith('audit:')) return { label: 'Open trace', run: () => openTrace(reference) }
+    if (reference.startsWith('catalog:')) return { label: 'Open in Catalog', run: () => openCatalogReference(reference) }
+    if (reference.startsWith('document-import:') && onOpenSource) {
+      const importId = reference.replace(/^document-import:/, '')
+      const source = nodes.find((node) => node.id === `source:${importId}`)
+      return { label: 'Open original source', run: () => onOpenSource(importId, source?.domain ?? undefined) }
+    }
+    const sourceNode = nodes.find((node) => node.sourcePath === reference || node.sourceRef === reference)
+    if (sourceNode?.kind === 'source' && onOpenSource) {
+      return { label: 'Open original source', run: () => onOpenSource(sourceNode.id.replace(/^source:/, ''), sourceNode.domain ?? undefined) }
+    }
+    const documentPath = sourceNode?.sourcePath ?? (reference.endsWith('.md') ? reference : null)
+    if (documentPath) return { label: 'Open document', run: () => onOpenMemory(documentPath) }
+    return null
+  }
+
   const nodeRelations = useMemo(() => {
     if (!selectedNode) return []
     return allEdges
-      .filter((edge) => edge.source === selectedNode.id || edge.target === selectedNode.id)
+      .filter((edge) => (edge.source === selectedNode.id || edge.target === selectedNode.id) && relationIsEnabled(edge))
       .sort((left, right) => Number(right.evidence === 'observed') - Number(left.evidence === 'observed') || right.weight - left.weight)
-  }, [allEdges, selectedNode])
+  }, [allEdges, relationIsEnabled, selectedNode])
 
-  const breadcrumb = selectedActivity
-    ? ['Overview', 'Activity', selectedActivity.title]
+  const breadcrumb = selectedActivity && selectedNode
+    ? ['Overview', 'Activity', selectedActivity.title, selectedNode.label]
     : selectedNode
       ? ['Overview', selectedNode.groupId ? nodeById.get(selectedNode.groupId)?.label ?? 'Group' : RING_META[selectedNode.ring].label, selectedNode.label]
+      : selectedActivity
+        ? ['Overview', 'Activity', selectedActivity.title]
       : ['Overview']
   const counts = orbitQuery.data?.counts
 
@@ -705,7 +747,7 @@ export function OrbitMapView({
         </div>
         <div className="orbit-search-shell">
           <label className="orbit-search"><Search aria-hidden="true" size={16} /><input aria-label="Search all map items" onChange={(event) => changeSearch(event.target.value)} placeholder="Search groups, items, and sources" type="search" value={search} /></label>
-          {query && <div className="orbit-search-results" role="listbox" aria-label="Map search results"><div><strong>{searchResults.length}</strong> result{searchResults.length === 1 ? '' : 's'} in authorized data</div>{searchResults.map((node) => <button key={node.id} onClick={() => selectNode(node.id, true)} role="option" type="button"><span>{node.label}<small>{kindLabel(node)}{node.domain ? ` · ${DOMAIN_LABELS[node.domain] ?? node.domain}` : ''}</small></span><Crosshair aria-hidden="true" size={14} /></button>)}{searchResults.length === 0 && <p>No authorized item matches the active filters.</p>}</div>}
+          {query && <div className="orbit-search-results" role="listbox" aria-label="Map search results"><div><strong>{matchingSearchResults.length}</strong> result{matchingSearchResults.length === 1 ? '' : 's'} in authorized data{searchResults.length < matchingSearchResults.length ? ` · showing ${searchResults.length}` : ''}</div>{searchResults.map((node) => <button key={node.id} onClick={() => selectNode(node.id, true)} role="option" type="button"><span>{node.label}<small>{kindLabel(node)}{node.domain ? ` · ${DOMAIN_LABELS[node.domain] ?? node.domain}` : ''}</small></span><Crosshair aria-hidden="true" size={14} /></button>)}{searchResults.length < matchingSearchResults.length && <button onClick={() => setSearchLimit((current) => current + SEARCH_PAGE_SIZE)} type="button">Show {Math.min(SEARCH_PAGE_SIZE, matchingSearchResults.length - searchResults.length)} more</button>}{matchingSearchResults.length === 0 && <p>No authorized item matches the active filters.</p>}</div>}
         </div>
         <div className="orbit-toolbar-actions">
           <select aria-label="Filter map by domain" onChange={(event) => setDomain(event.target.value || undefined)} value={domain ?? ''}><option value="">All domains</option>{DOMAINS.map((item) => <option key={item} value={item}>{DOMAIN_LABELS[item]}</option>)}</select>
@@ -721,7 +763,7 @@ export function OrbitMapView({
         <div className="orbit-context-actions"><button disabled={breadcrumb.length === 1} onClick={goBackLevel} type="button"><ArrowLeft aria-hidden="true" size={14} />Back</button><button onClick={resetOverview} type="button"><RotateCcw aria-hidden="true" size={14} />Reset overview</button><button disabled={!selectedNode} onClick={() => selectedNode && requestFocus(selectedNode.id)} type="button"><Crosshair aria-hidden="true" size={14} />Center selection</button>{!detailOpen && <button onClick={() => setDetailOpen(true)} type="button"><Eye aria-hidden="true" size={14} />Show details</button>}</div>
       </div>
 
-      <div className="orbit-active-filters" aria-label="Active map filters"><span>Mode: {mode}</span>{domain && <span>Domain: {DOMAIN_LABELS[domain]}</span>}{includeSensitive && <span>Sensitive content included</span>}{query && <span>Search: “{search.trim()}” · {searchResults.length} results</span>}{expandedGroups.size > 0 && <span>{expandedGroups.size} expanded group{expandedGroups.size === 1 ? '' : 's'}</span>}{livePulse && <span className="orbit-live-activity" role="status">Observed event received</span>}</div>
+      <div className="orbit-active-filters" aria-label="Active map filters"><span>Mode: {mode}</span>{domain && <span>Domain: {DOMAIN_LABELS[domain]}</span>}{includeSensitive && <span>Sensitive content included</span>}{query && <span>Search: “{search.trim()}” · {matchingSearchResults.length} results</span>}{expandedGroups.size > 0 && <span>{expandedGroups.size} expanded group{expandedGroups.size === 1 ? '' : 's'}</span>}{livePulse && <span className="orbit-live-activity" role="status">Observed event received</span>}</div>
       {orbitQuery.error && <div className="inline-error" role="alert">{errorMessage(orbitQuery.error)}</div>}
 
       <div className={`orbit-main ${detailOpen ? '' : 'is-detail-closed'}`}>
@@ -742,8 +784,18 @@ export function OrbitMapView({
             <div className="orbit-detail-heading"><Network aria-hidden="true" size={18} /><div><p className="eyebrow">Relation</p><h2>{selectedEdge.relation}</h2></div></div>
             <p className="orbit-preview">{nodeById.get(selectedEdge.source)?.label ?? selectedEdge.source} → {nodeById.get(selectedEdge.target)?.label ?? selectedEdge.target}</p>
             <div className="orbit-detail-badges"><StatusBadge label={EVIDENCE_META[selectedEdge.evidence].label} tone={selectedEdge.evidence === 'observed' ? 'success' : selectedEdge.evidence === 'inferred' ? 'warning' : 'neutral'} /><span>{EVIDENCE_META[selectedEdge.evidence].style}</span><span>{selectedEdge.weight} event{selectedEdge.weight === 1 ? '' : 's'}</span></div>
-            <div className="orbit-provenance"><h3>Verifiable evidence</h3>{selectedEdge.provenance.map((item, index) => <div key={`${item.reference}-${index}`}><strong>{item.kind}</strong><span>{item.detail}</span>{item.ts && <time>{formatRelativeTime(Date.parse(item.ts))}</time>}<button onClick={() => openTrace(item.reference)} type="button">Open trace · {item.reference}</button></div>)}</div>
+            <div className="orbit-provenance"><h3>Verifiable evidence</h3>{selectedEdge.provenance.map((item, index) => { const action = evidenceAction(item.reference); return <div key={`${item.reference}-${index}`}><strong>{item.kind}</strong><span>{item.detail}</span>{item.ts && <time>{formatRelativeTime(Date.parse(item.ts))}</time>}{action ? <button onClick={action.run} type="button">{action.label} · {item.reference}</button> : <small>No execution trace or governed destination is associated with this evidence.</small>}</div> })}</div>
             <div className="orbit-detail-actions"><button className="secondary-button" onClick={() => setSelectedEdgeId(null)} type="button"><ArrowLeft aria-hidden="true" size={14} />Back to item</button></div>
+          </> : selectedNode ? <>
+            <div className="orbit-detail-heading"><Layers3 aria-hidden="true" size={18} /><div><p className="eyebrow">{kindLabel(selectedNode)}</p><h2>{selectedNode.label}</h2></div></div>
+            <p className="orbit-preview">{nodeDescription(selectedNode)}</p>
+            {selectedActivity && <p className="orbit-group-label">Inspecting within task: {selectedActivity.title}</p>}
+            {(selectedNode.domain || selectedNode.groupId) && <p className="orbit-group-label">{selectedNode.domain ? DOMAIN_LABELS[selectedNode.domain] ?? selectedNode.domain : nodeById.get(selectedNode.groupId ?? '')?.label}</p>}
+            <div className="orbit-detail-badges"><StatusBadge label={stateLabel(selectedNode.operationalState)} tone={selectedNode.operationalState === 'attention' || selectedNode.status === 'stale' || selectedNode.connectionState === 'failing' ? 'warning' : selectedNode.operationalState === 'running' || selectedNode.operationalState === 'in_use' || selectedNode.connectionState === 'working' ? 'success' : 'neutral'} />{selectedNode.catalogState !== 'not_applicable' && <span>Catalog: {stateLabel(selectedNode.catalogState)}</span>}{selectedNode.usageState !== 'not_applicable' && <span>Usage: {stateLabel(selectedNode.usageState)}</span>}{selectedNode.connectionState !== 'not_applicable' && <span>Connection: {stateLabel(selectedNode.connectionState)}</span>}{selectedNode.sensitivity && <span><ShieldCheck aria-hidden="true" size={13} />{selectedNode.sensitivity}</span>}</div>
+            {selectedNode.lastActivityAt && <dl className="orbit-user-meta"><dt>Last observed activity</dt><dd>{formatRelativeTime(Date.parse(selectedNode.lastActivityAt))}</dd></dl>}
+            <div className="orbit-relations"><h3>Main relations <span>{nodeRelations.length}</span></h3>{nodeRelations.slice(0, 18).map((edge) => { const otherId = edge.source === selectedNode.id ? edge.target : edge.source; const other = nodeById.get(otherId); return <div className="orbit-relation-row" key={edge.id}><button onClick={() => setSelectedEdgeId(edge.id)} type="button"><span><strong>{relationLabel(edge, selectedNode.id)}</strong><small>{EVIDENCE_META[edge.evidence].label} · {edge.source === selectedNode.id ? 'outgoing' : 'incoming'} · {edge.weight}</small></span><span>{other?.label ?? otherId}</span></button><button aria-label={`Go to ${other?.label ?? otherId}`} onClick={() => selectNode(otherId, true)} type="button"><ChevronRight aria-hidden="true" size={14} /></button></div> })}{nodeRelations.length === 0 && <p className="row-subtle">No governed relation is recorded for this item with the active relation filters.</p>}</div>
+            <div className="orbit-detail-actions">{selectedActivity && <button className="secondary-button" onClick={() => { setSelectedId(null); setSelectedEdgeId(null) }} type="button"><ArrowLeft aria-hidden="true" size={14} />Back to task</button>}{selectedNode.aggregate && <button className="secondary-button" onClick={() => toggleGroup(selectedNode.id)} type="button">{expandedGroups.has(selectedNode.id) ? 'Collapse group' : 'Expand group'}</button>}{selectedNode.actions.includes('open_memory') && selectedNode.sourcePath && <button className="primary-button" onClick={() => onOpenMemory(selectedNode.sourcePath!)} type="button"><ExternalLink aria-hidden="true" size={14} />Open document</button>}{selectedNode.actions.includes('open_source') && onOpenSource && <button className="primary-button" onClick={() => onOpenSource(selectedNode.id.replace(/^source:/, ''), selectedNode.domain ?? undefined)} type="button"><FileText aria-hidden="true" size={14} />Open original source</button>}{catalogId(selectedNode) && <button className="primary-button" onClick={() => navigateCatalog(selectedNode)} type="button"><ExternalLink aria-hidden="true" size={14} />Open in Catalog</button>}{selectedNode.actions.includes('confirm_memory') && <button className="secondary-button" disabled={confirmMutation.isPending} onClick={() => confirmMutation.mutate(selectedNode.id.replace(/^memory:/, ''))} type="button"><CheckCircle2 aria-hidden="true" size={14} />Confirm still true</button>}</div>
+            <details className="orbit-technical"><summary>Technical details</summary><dl><dt>ID</dt><dd><code>{selectedNode.id}</code></dd><dt>Source ref</dt><dd><code>{selectedNode.sourceRef}</code></dd>{selectedNode.sourcePath && <><dt>Path</dt><dd><code>{selectedNode.sourcePath}</code></dd></>}<dt>Visible items</dt><dd>{selectedNode.count}</dd><dt>Domains</dt><dd>{selectedNode.domains.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd><dt>Capabilities</dt><dd>{selectedNode.capabilities.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd></dl></details>
           </> : selectedActivity ? <>
             <div className="orbit-detail-heading"><Activity aria-hidden="true" size={18} /><div><p className="eyebrow">Recorded task</p><h2>{selectedActivity.title}</h2></div></div>
             <p className="orbit-preview">Observed events for this task. A memory “inserted into context” is not claimed to have determined the answer.</p>
@@ -751,15 +803,6 @@ export function OrbitMapView({
             <dl className="orbit-user-meta"><dt>Last recorded activity</dt><dd>{formatRelativeTime(Date.parse(selectedActivity.updatedAt))}</dd><dt>Telemetry</dt><dd>{selectedActivity.telemetryAvailable ? `${selectedActivity.eventCount} recorded events` : 'Data not available'}</dd></dl>
             <div className="orbit-relations"><h3>Observed links <span>{selectedActivity.links.length}</span></h3>{selectedActivity.links.map((link, index) => <div className="orbit-activity-link" key={`${link.eventRef}-${link.nodeId}-${index}`}><button onClick={() => selectNode(link.nodeId, true)} type="button"><span><strong>{link.relation}</strong><small>{link.detail}</small><small><time dateTime={link.occurredAt}>{formatRelativeTime(Date.parse(link.occurredAt))}</time>{link.outcome ? ` · ${stateLabel(link.outcome)}` : ''}</small></span><span>{nodeById.get(link.nodeId)?.label ?? link.nodeId}</span><ChevronRight aria-hidden="true" size={14} /></button><button onClick={() => openTrace(link.eventRef)} type="button">Trace</button></div>)}{selectedActivity.telemetryAvailable && selectedActivity.links.length === 0 && <p className="row-subtle">No structured memory, skill, routine, or application reference is available for these events.</p>}{!selectedActivity.telemetryAvailable && <p className="orbit-data-unavailable">Data not available: this task has no trace events in the selected interval.</p>}</div>
             <details className="orbit-technical"><summary>Technical details</summary><dl><dt>Task ID</dt><dd><code>{selectedActivity.taskId}</code></dd><dt>Window</dt><dd>{activityWindow}</dd></dl></details>
-          </> : selectedNode ? <>
-            <div className="orbit-detail-heading"><Layers3 aria-hidden="true" size={18} /><div><p className="eyebrow">{kindLabel(selectedNode)}</p><h2>{selectedNode.label}</h2></div></div>
-            <p className="orbit-preview">{nodeDescription(selectedNode)}</p>
-            {(selectedNode.domain || selectedNode.groupId) && <p className="orbit-group-label">{selectedNode.domain ? DOMAIN_LABELS[selectedNode.domain] ?? selectedNode.domain : nodeById.get(selectedNode.groupId ?? '')?.label}</p>}
-            <div className="orbit-detail-badges"><StatusBadge label={stateLabel(selectedNode.operationalState)} tone={selectedNode.operationalState === 'attention' || selectedNode.status === 'stale' || selectedNode.connectionState === 'failing' ? 'warning' : selectedNode.operationalState === 'running' || selectedNode.operationalState === 'in_use' || selectedNode.connectionState === 'working' ? 'success' : 'neutral'} />{selectedNode.catalogState !== 'not_applicable' && <span>Catalog: {stateLabel(selectedNode.catalogState)}</span>}{selectedNode.usageState !== 'not_applicable' && <span>Usage: {stateLabel(selectedNode.usageState)}</span>}{selectedNode.connectionState !== 'not_applicable' && <span>Connection: {stateLabel(selectedNode.connectionState)}</span>}{selectedNode.sensitivity && <span><ShieldCheck aria-hidden="true" size={13} />{selectedNode.sensitivity}</span>}</div>
-            {selectedNode.lastActivityAt && <dl className="orbit-user-meta"><dt>Last observed activity</dt><dd>{formatRelativeTime(Date.parse(selectedNode.lastActivityAt))}</dd></dl>}
-            <div className="orbit-relations"><h3>Main relations <span>{nodeRelations.length}</span></h3>{nodeRelations.slice(0, 18).map((edge) => { const otherId = edge.source === selectedNode.id ? edge.target : edge.source; const other = nodeById.get(otherId); return <div className="orbit-relation-row" key={edge.id}><button onClick={() => setSelectedEdgeId(edge.id)} type="button"><span><strong>{relationLabel(edge, selectedNode.id)}</strong><small>{EVIDENCE_META[edge.evidence].label} · {edge.source === selectedNode.id ? 'outgoing' : 'incoming'} · {edge.weight}</small></span><span>{other?.label ?? otherId}</span></button><button aria-label={`Go to ${other?.label ?? otherId}`} onClick={() => selectNode(otherId, true)} type="button"><ChevronRight aria-hidden="true" size={14} /></button></div> })}{nodeRelations.length === 0 && <p className="row-subtle">No governed relation is recorded for this item.</p>}</div>
-            <div className="orbit-detail-actions">{selectedNode.aggregate && <button className="secondary-button" onClick={() => toggleGroup(selectedNode.id)} type="button">{expandedGroups.has(selectedNode.id) ? 'Collapse group' : 'Expand group'}</button>}{selectedNode.actions.includes('open_memory') && selectedNode.sourcePath && <button className="primary-button" onClick={() => onOpenMemory(selectedNode.sourcePath!)} type="button"><ExternalLink aria-hidden="true" size={14} />Open document</button>}{selectedNode.actions.includes('open_source') && onOpenSource && <button className="primary-button" onClick={() => onOpenSource(selectedNode.id.replace(/^source:/, ''), selectedNode.domain ?? undefined)} type="button"><FileText aria-hidden="true" size={14} />Open original source</button>}{catalogId(selectedNode) && <button className="primary-button" onClick={() => navigateCatalog(selectedNode)} type="button"><ExternalLink aria-hidden="true" size={14} />Open in Catalog</button>}{selectedNode.actions.includes('confirm_memory') && <button className="secondary-button" disabled={confirmMutation.isPending} onClick={() => confirmMutation.mutate(selectedNode.id.replace(/^memory:/, ''))} type="button"><CheckCircle2 aria-hidden="true" size={14} />Confirm still true</button>}</div>
-            <details className="orbit-technical"><summary>Technical details</summary><dl><dt>ID</dt><dd><code>{selectedNode.id}</code></dd><dt>Source ref</dt><dd><code>{selectedNode.sourceRef}</code></dd>{selectedNode.sourcePath && <><dt>Path</dt><dd><code>{selectedNode.sourcePath}</code></dd></>}<dt>Visible items</dt><dd>{selectedNode.count}</dd><dt>Domains</dt><dd>{selectedNode.domains.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd><dt>Capabilities</dt><dd>{selectedNode.capabilities.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd></dl></details>
           </> : <div className="orbit-overview-detail"><Layers3 aria-hidden="true" size={22} /><h2>System overview</h2><p>Select an item to inspect it. Expansion is a separate action, available in the detail panel and accessible list.</p><dl><dt>Skills</dt><dd>{formatCompactNumber(counts?.skills ?? 0)}</dd><dt>Memory</dt><dd>{formatCompactNumber(counts?.memories ?? 0)}</dd><dt>Routines</dt><dd>{formatCompactNumber(counts?.routines ?? 0)}</dd><dt>Applications</dt><dd>{formatCompactNumber(counts?.applications ?? 0)}</dd></dl></div>}
           <details className="orbit-performance"><summary>Performance measurements</summary><dl><dt>Payload build</dt><dd>{orbitQuery.data?.metrics.composeMs.toFixed(1) ?? '—'} ms</dd><dt>First useful render</dt><dd>{uiMetrics.firstRenderMs.toFixed(1)} ms</dd><dt>Graph update + transition</dt><dd>{uiMetrics.graphBuildMs.toFixed(1)} ms</dd><dt>Search</dt><dd>{uiMetrics.searchMs.toFixed(2)} ms</dd><dt>Expansion response</dt><dd>{uiMetrics.expansionMs.toFixed(1)} ms</dd><dt>Selection response</dt><dd>{uiMetrics.selectionMs.toFixed(1)} ms</dd></dl><small>Measured locally with the authorized payload: {nodes.length} nodes, {allEdges.length} relations, {orbitQuery.data?.metrics.tracesScanned ?? 0} traces scanned.</small></details>
         </aside>}
