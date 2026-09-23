@@ -30,6 +30,7 @@ import type {
   MemoryAnswerFeedbackRequest,
   MemoryAskProgress,
   MemoryAskRequest,
+  OrbitActivityWindow,
   RetrievalEvalCaseRequest,
   ProposalDecideRequest,
 } from '@/features/memory/schema'
@@ -266,10 +267,14 @@ export function useMemoryRetrievalEvalCaseSave() {
   })
 }
 
-export function useMemoryOrbitMap(domain?: string, includeSensitive = false) {
+export function useMemoryOrbitMap(
+  domain?: string,
+  includeSensitive = false,
+  activityWindow: OrbitActivityWindow = 'today',
+) {
   return useQuery({
-    queryKey: [...memoryOrbitQueryKey, domain, includeSensitive],
-    queryFn: () => memoryOrbitMap(domain, includeSensitive),
+    queryKey: [...memoryOrbitQueryKey, domain, includeSensitive, activityWindow],
+    queryFn: () => memoryOrbitMap(domain, includeSensitive, activityWindow),
   })
 }
 

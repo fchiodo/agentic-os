@@ -406,10 +406,34 @@ export const orbitEdgeSchema = z.object({
   provenance: z.array(orbitProvenanceSchema),
 })
 
+export const orbitActivityWindowSchema = z.enum(['today', '7d'])
+
+export const orbitActivityLinkSchema = z.object({
+  nodeId: z.string(),
+  relation: z.string(),
+  eventRef: z.string(),
+  detail: z.string(),
+  occurredAt: z.string(),
+  outcome: z.string().nullable(),
+})
+
+export const orbitActivitySchema = z.object({
+  taskId: z.string(),
+  title: z.string(),
+  domain: z.string(),
+  status: z.string(),
+  updatedAt: z.string(),
+  eventCount: z.number().int().nonnegative(),
+  telemetryAvailable: z.boolean(),
+  links: z.array(orbitActivityLinkSchema),
+})
+
 export const orbitMapSchema = z.object({
   generatedAt: z.string(),
+  activityWindow: orbitActivityWindowSchema,
   nodes: z.array(orbitNodeSchema),
   edges: z.array(orbitEdgeSchema),
+  activities: z.array(orbitActivitySchema),
   counts: z.object({
     skills: z.number().int().nonnegative(),
     memories: z.number().int().nonnegative(),
@@ -421,6 +445,7 @@ export const orbitMapSchema = z.object({
     composeMs: z.number().nonnegative(),
     tasksScanned: z.number().int().nonnegative(),
     tracesScanned: z.number().int().nonnegative(),
+    activityEvents: z.number().int().nonnegative(),
   }),
 })
 
@@ -462,6 +487,9 @@ export type MemorySearchOpts = z.infer<typeof memorySearchOptsSchema>
 export type OrbitNode = z.infer<typeof orbitNodeSchema>
 export type OrbitFacet = z.infer<typeof orbitFacetSchema>
 export type OrbitEdge = z.infer<typeof orbitEdgeSchema>
+export type OrbitActivityWindow = z.infer<typeof orbitActivityWindowSchema>
+export type OrbitActivityLink = z.infer<typeof orbitActivityLinkSchema>
+export type OrbitActivity = z.infer<typeof orbitActivitySchema>
 export type OrbitMap = z.infer<typeof orbitMapSchema>
 export type MemoryLintFinding = z.infer<typeof memoryLintFindingSchema>
 export type MemoryLintReport = z.infer<typeof memoryLintReportSchema>

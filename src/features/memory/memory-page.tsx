@@ -872,6 +872,7 @@ export function MemoryPage() {
   const [mode, setMode] = useState<'search' | 'ask'>('search')
   const [showComposer, setShowComposer] = useState(false)
   const [showImporter, setShowImporter] = useState(false)
+  const [selectedImportId, setSelectedImportId] = useState<string | null>(null)
   const [railTab, setRailTab] = useState<'pending' | 'activity'>('pending')
   const [governanceOpen, setGovernanceOpen] = useState(true)
 
@@ -897,9 +898,18 @@ export function MemoryPage() {
     setSelectedPath(path)
     setShowComposer(false)
     setShowImporter(false)
+    setSelectedImportId(null)
     setView('library')
   }, [])
-  const openImporter = useCallback(() => { setShowImporter(true); setShowComposer(false); setSelectedPath(null); setView('library') }, [])
+  const openImporter = useCallback(() => { setSelectedImportId(null); setShowImporter(true); setShowComposer(false); setSelectedPath(null); setView('library') }, [])
+  const openImportedSource = useCallback((importId: string, domain?: string) => {
+    if (domain) setDomainFilter(domain)
+    setSelectedImportId(importId)
+    setShowImporter(true)
+    setShowComposer(false)
+    setSelectedPath(null)
+    setView('library')
+  }, [])
   const openComposer = useCallback(() => { setShowComposer(true); setShowImporter(false); setSelectedPath(null); setView('library') }, [])
   const controlToolbar = (
     <MemoryControlToolbar
@@ -923,7 +933,7 @@ export function MemoryPage() {
       {operationsNeedingAttention.length > 0 && <div className="inline-error" role="alert">{operationsNeedingAttention.length} interrupted memory operation{operationsNeedingAttention.length === 1 ? '' : 's'} need attention. The journal has preserved the exact stage and no conflicting state was guessed.</div>}
       {view === 'map' ? (
         <Suspense fallback={<div className="orbit-loading"><Network aria-hidden="true" size={34} /><p>Loading graph renderer…</p></div>}>
-          <OrbitMapView onOpenMemory={selectPath} />
+          <OrbitMapView onOpenMemory={selectPath} onOpenSource={openImportedSource} />
         </Suspense>
       ) : (
         <>
@@ -989,7 +999,7 @@ export function MemoryPage() {
         </aside>
 
         <main className="memory-main">
-          {showImporter ? <DocumentImportPanel defaultDomain={domainFilter} onClose={() => setShowImporter(false)} /> : showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={() => setSelectedPath(null)} onSelect={selectPath} path={selectedPath} /> : (
+          {showImporter ? <DocumentImportPanel defaultDomain={domainFilter} initialImportId={selectedImportId} key={selectedImportId ?? 'new-import'} onClose={() => { setShowImporter(false); setSelectedImportId(null) }} /> : showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={() => setSelectedPath(null)} onSelect={selectPath} path={selectedPath} /> : (
             <>
               {mode === 'search' ? (
                 <>

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rusqlite::params;
 use serde::Serialize;
@@ -21,8 +21,10 @@ const DOMAINS: [&str; 6] = [
 #[serde(rename_all = "camelCase")]
 pub struct OrbitMap {
     pub generated_at: String,
+    pub activity_window: String,
     pub nodes: Vec<OrbitNode>,
     pub edges: Vec<OrbitEdge>,
+    pub activities: Vec<OrbitActivity>,
     pub counts: OrbitCounts,
     pub metrics: OrbitMetrics,
 }
@@ -33,6 +35,7 @@ pub struct OrbitMetrics {
     pub compose_ms: f64,
     pub tasks_scanned: usize,
     pub traces_scanned: usize,
+    pub activity_events: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +106,30 @@ pub struct OrbitProvenance {
     pub ts: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitActivity {
+    pub task_id: String,
+    pub title: String,
+    pub domain: String,
+    pub status: String,
+    pub updated_at: String,
+    pub event_count: usize,
+    pub telemetry_available: bool,
+    pub links: Vec<OrbitActivityLink>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitActivityLink {
+    pub node_id: String,
+    pub relation: String,
+    pub event_ref: String,
+    pub detail: String,
+    pub occurred_at: String,
+    pub outcome: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct TaskRecord {
     id: String,
@@ -137,11 +164,22 @@ struct ExecutionRef {
 /// Filtering happens here, before node counts, previews, and trace relations
 /// are produced, so hidden domains or sensitive memories cannot leak through
 /// aggregate metadata.
-pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResult<OrbitMap> {
+pub fn build(
+    db: &Db,
+    domain: Option<&str>,
+    include_sensitive: bool,
+    activity_window: Option<&str>,
+) -> AppResult<OrbitMap> {
     let compose_started = std::time::Instant::now();
     if domain.is_some_and(|value| !DOMAINS.contains(&value)) {
         return Err(AppError::Io(std::io::Error::other(
             "invalid orbit domain filter",
+        )));
+    }
+    let activity_window = activity_window.unwrap_or("today");
+    if !matches!(activity_window, "today" | "7d") {
+        return Err(AppError::Io(std::io::Error::other(
+            "invalid orbit activity window",
         )));
     }
 
@@ -210,12 +248,32 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
 
     add_catalog_ring(&mut nodes, &mut edges, &skill_items, 1, "skill");
     add_memory_ring(&mut nodes, &mut edges, &memories, domain);
+    if include_sensitive {
+        let imports = crate::memory::importer::list(db, domain)?;
+        add_source_nodes(&mut nodes, &mut edges, &imports);
+    }
     add_catalog_ring(&mut nodes, &mut edges, &routine_items, 3, "routine");
     add_catalog_ring(&mut nodes, &mut edges, &application_items, 4, "application");
     add_temporal_relations(&nodes, &mut edges);
 
-    let tasks = load_tasks(db)?;
-    let traces = load_traces(db)?;
+    let tasks = load_tasks(db)?
+        .into_iter()
+        .filter(|task| domain.map_or(true, |value| task.domain == value))
+        .collect::<Vec<_>>();
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<HashSet<_>>();
+    let traces = load_traces(db)?
+        .into_iter()
+        .filter(|trace| {
+            domain.is_none()
+                || trace.task_id.as_deref().map_or_else(
+                    || task_ids.contains(trace.run_id.as_str()),
+                    |id| task_ids.contains(id),
+                )
+        })
+        .collect::<Vec<_>>();
     enrich_operational_state(&mut nodes, &tasks, &traces, &routine_items);
     let (tasks_scanned, traces_scanned) = add_observed_relations(
         &nodes,
@@ -226,6 +284,8 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
         &traces,
         &mut edges,
     )?;
+    let activities = build_activities(&nodes, &tasks, &traces, activity_window)?;
+    let activity_events = activities.iter().map(|activity| activity.event_count).sum();
 
     let node_ids = nodes
         .iter()
@@ -245,13 +305,16 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
 
     Ok(OrbitMap {
         generated_at: chrono::Utc::now().to_rfc3339(),
+        activity_window: activity_window.to_string(),
         nodes,
         edges,
+        activities,
         counts,
         metrics: OrbitMetrics {
             compose_ms: compose_started.elapsed().as_secs_f64() * 1000.0,
             tasks_scanned,
             traces_scanned,
+            activity_events,
         },
     })
 }
@@ -259,7 +322,7 @@ pub fn build(db: &Db, domain: Option<&str>, include_sensitive: bool) -> AppResul
 fn add_temporal_relations(nodes: &[OrbitNode], edges: &mut Vec<OrbitEdge>) {
     let memory_by_path = nodes
         .iter()
-        .filter(|node| node.kind == "memory")
+        .filter(|node| matches!(node.kind.as_str(), "memory" | "source"))
         .filter_map(|node| {
             node.source_path
                 .as_ref()
@@ -305,6 +368,77 @@ fn add_temporal_relations(nodes: &[OrbitNode], edges: &mut Vec<OrbitEdge>) {
                 ));
             }
         }
+        for related in frontmatter.related {
+            if let Some(target) = memory_by_path.get(related.as_str()) {
+                if *target != node.id {
+                    edges.push(declared_edge(
+                        &node.id,
+                        target,
+                        "related_to",
+                        path,
+                        &format!("Related memory declared in Markdown frontmatter: {related}"),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn add_source_nodes(
+    nodes: &mut Vec<OrbitNode>,
+    edges: &mut Vec<OrbitEdge>,
+    imports: &[crate::memory::DocumentImportRecord],
+) {
+    for import in imports {
+        let domain_id = format!("memory-domain:{}", import.domain);
+        if !nodes.iter().any(|node| node.id == domain_id) {
+            continue;
+        }
+        let node_id = format!("source:{}", import.id);
+        nodes.push(OrbitNode {
+            id: node_id.clone(),
+            kind: "source".to_string(),
+            ring: 2,
+            label: import.title.clone(),
+            subtitle: Some(format!("{} source", import.input_kind)),
+            domain: Some(import.domain.clone()),
+            // Imported sources can contain arbitrary document text. Until the
+            // import contract carries its own sensitivity classification, the
+            // map exposes their metadata only after the explicit sensitive
+            // content opt-in and never includes their body as a preview.
+            sensitivity: Some("sensitive".to_string()),
+            status: import.status.clone(),
+            operational_state: import.status.clone(),
+            catalog_state: "not_applicable".to_string(),
+            usage_state: "not_applicable".to_string(),
+            connection_state: "not_applicable".to_string(),
+            domains: vec![facet(
+                &import.domain,
+                "declared",
+                &format!("document-import:{}", import.id),
+            )],
+            capabilities: vec![facet(
+                "original_source",
+                "declared",
+                &format!("document-import:{}", import.id),
+            )],
+            last_activity_at: Some(import.updated_at.clone()),
+            source_path: Some(import.source_path.clone()),
+            source_ref: format!("document-import:{}", import.id),
+            group_id: Some(domain_id.clone()),
+            count: 1,
+            preview: None,
+            updated_at: Some(import.updated_at.clone()),
+            actions: vec!["open_source".to_string()],
+            aggregate: false,
+        });
+        edges.push(declared_edge(
+            &domain_id,
+            &node_id,
+            "contains_source",
+            &format!("document-import:{}", import.id),
+            "Original source metadata from the governed import registry",
+        ));
     }
 }
 
@@ -690,7 +824,8 @@ fn add_observed_relations(
                         OrbitProvenance {
                             kind: "structured_event".to_string(),
                             reference: format!("audit:{}", trace.run_id),
-                            detail: trace.summary.clone(),
+                            detail: "Structured memory reference recorded in task context"
+                                .to_string(),
                             ts: Some(trace.ts.clone()),
                         },
                     );
@@ -707,7 +842,7 @@ fn add_observed_relations(
                         OrbitProvenance {
                             kind: "trace".to_string(),
                             reference: format!("audit:{}", trace.run_id),
-                            detail: trace.summary.clone(),
+                            detail: "Vault path matched a visible memory output".to_string(),
                             ts: Some(trace.ts.clone()),
                         },
                     );
@@ -761,7 +896,10 @@ fn add_observed_relations(
                                     .to_string(),
                                     reference: format!("audit:{}", trace.run_id),
                                     detail: execution.map_or_else(
-                                        || trace.summary.clone(),
+                                        || {
+                                            "Catalog reference inferred from trace metadata"
+                                                .to_string()
+                                        },
                                         |reference| {
                                             format!(
                                                 "{}: {} ({})",
@@ -784,6 +922,150 @@ fn add_observed_relations(
     }
 
     Ok((tasks_scanned, traces_scanned))
+}
+
+fn activity_since(window: &str) -> chrono::DateTime<chrono::Utc> {
+    let now = chrono::Utc::now();
+    if window == "7d" {
+        now - chrono::Duration::days(7)
+    } else {
+        now.date_naive()
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight is a valid time")
+            .and_utc()
+    }
+}
+
+fn timestamp_at_or_after(value: &str, since: chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc) >= since)
+        .unwrap_or(false)
+}
+
+fn build_activities(
+    nodes: &[OrbitNode],
+    tasks: &[TaskRecord],
+    traces: &[TraceRecord],
+    window: &str,
+) -> AppResult<Vec<OrbitActivity>> {
+    build_activities_since(nodes, tasks, traces, activity_since(window))
+}
+
+fn build_activities_since(
+    nodes: &[OrbitNode],
+    tasks: &[TaskRecord],
+    traces: &[TraceRecord],
+    since: chrono::DateTime<chrono::Utc>,
+) -> AppResult<Vec<OrbitActivity>> {
+    let visible_ids = nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut activities = Vec::new();
+
+    for task in tasks {
+        let task_traces = traces
+            .iter()
+            .filter(|trace| {
+                (trace.task_id.as_deref() == Some(task.id.as_str()) || trace.run_id == task.id)
+                    && timestamp_at_or_after(&trace.ts, since)
+            })
+            .collect::<Vec<_>>();
+        if task_traces.is_empty() && !timestamp_at_or_after(&task.updated_at, since) {
+            continue;
+        }
+
+        let mut links = Vec::new();
+        let mut seen = HashSet::new();
+        for trace in &task_traces {
+            for (kind, relation) in [
+                ("skill", "executed"),
+                ("routine", "executed"),
+                ("application", "used"),
+            ] {
+                for reference in execution_refs(&trace.detail, kind) {
+                    let node_id = format!("{kind}:{}", reference.catalog_id);
+                    if !visible_ids.contains(node_id.as_str()) {
+                        continue;
+                    }
+                    let key = format!(
+                        "{node_id}|{relation}|{}|{}",
+                        trace.run_id, reference.occurred_at
+                    );
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    links.push(OrbitActivityLink {
+                        node_id,
+                        relation: relation.to_string(),
+                        event_ref: format!("audit:{}", trace.run_id),
+                        detail: format!("{} ({})", reference.operation, reference.outcome),
+                        occurred_at: reference.occurred_at,
+                        outcome: Some(reference.outcome),
+                    });
+                }
+            }
+
+            if trace.kind == "context" {
+                for memory_id in structured_memory_ids(&trace.detail) {
+                    let node_id = format!("memory:{memory_id}");
+                    if visible_ids.contains(node_id.as_str())
+                        && seen.insert(format!(
+                            "{node_id}|inserted_into_context|{}|{}",
+                            trace.run_id, trace.ts
+                        ))
+                    {
+                        links.push(OrbitActivityLink {
+                            node_id,
+                            relation: "inserted_into_context".to_string(),
+                            event_ref: format!("audit:{}", trace.run_id),
+                            detail: "Memory identifier recorded in the task context event"
+                                .to_string(),
+                            occurred_at: trace.ts.clone(),
+                            outcome: None,
+                        });
+                    }
+                }
+            }
+
+            if let Some(memory_id) = trace.detail.get("memoryId").and_then(Value::as_str) {
+                let node_id = format!("memory:{memory_id}");
+                if visible_ids.contains(node_id.as_str())
+                    && seen.insert(format!("{node_id}|produced|{}|{}", trace.run_id, trace.ts))
+                {
+                    links.push(OrbitActivityLink {
+                        node_id,
+                        relation: "produced".to_string(),
+                        event_ref: format!("audit:{}", trace.run_id),
+                        detail: "Memory identifier recorded in the task output event".to_string(),
+                        occurred_at: trace.ts.clone(),
+                        outcome: None,
+                    });
+                }
+            }
+        }
+
+        let updated_at = task_traces
+            .iter()
+            .map(|trace| trace.ts.as_str())
+            .max()
+            .unwrap_or(task.updated_at.as_str())
+            .to_string();
+        activities.push(OrbitActivity {
+            task_id: task.id.clone(),
+            title: task.title.clone(),
+            domain: task.domain.clone(),
+            status: task.status.clone(),
+            updated_at,
+            event_count: task_traces.len(),
+            telemetry_available: !task_traces.is_empty(),
+            links,
+        });
+    }
+
+    activities.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    activities.truncate(100);
+    Ok(activities)
 }
 
 fn load_tasks(db: &Db) -> AppResult<Vec<TaskRecord>> {
@@ -919,8 +1201,7 @@ fn enrich_operational_state(
     // reduced independently of task state so a completed/failed historical
     // task cannot masquerade as current activity. Audit rows are currently
     // loaded newest-first, but correctness must not depend on query order.
-    let mut latest_connection_at =
-        HashMap::<String, chrono::DateTime<chrono::FixedOffset>>::new();
+    let mut latest_connection_at = HashMap::<String, chrono::DateTime<chrono::FixedOffset>>::new();
     for trace in traces {
         for kind in ["skill", "application"] {
             for reference in execution_refs(&trace.detail, kind) {
@@ -1221,7 +1502,13 @@ fn merge_edge(
     if let Some(index) = edge_index.get(&key).copied() {
         let edge = &mut edges[index];
         edge.weight += 1;
-        edge.activity_at = provenance.ts.clone().or_else(|| edge.activity_at.clone());
+        if provenance
+            .ts
+            .as_deref()
+            .is_some_and(|candidate| timestamp_is_newer(candidate, edge.activity_at.as_deref()))
+        {
+            edge.activity_at = provenance.ts.clone();
+        }
         if edge.provenance.len() < 8 {
             edge.provenance.push(provenance);
         }
@@ -1593,12 +1880,7 @@ mod tests {
                 }
                 let mut active_task = task();
                 active_task.status = "running".to_string();
-                enrich_operational_state(
-                    &mut nodes,
-                    &[active_task],
-                    &active_traces,
-                    &[],
-                );
+                enrich_operational_state(&mut nodes, &[active_task], &active_traces, &[]);
                 let active_node = nodes
                     .iter()
                     .find(|node| node.id == "application:research-mcp")
@@ -1689,6 +1971,225 @@ mod tests {
         assert_eq!(catalog_trace_match(&routine, &trace_text), Some("inferred"));
     }
 
+    fn activity_fixture_nodes() -> Vec<OrbitNode> {
+        let mut skill = core_node();
+        skill.id = "skill:verified-skill".to_string();
+        skill.kind = "skill".to_string();
+        skill.ring = 1;
+        skill.label = "Verified skill".to_string();
+        skill.source_ref = "catalog:verified-skill".to_string();
+
+        let mut memory = core_node();
+        memory.id = "memory:decision-1".to_string();
+        memory.kind = "memory".to_string();
+        memory.ring = 2;
+        memory.label = "Decision".to_string();
+        memory.domain = Some("work".to_string());
+        memory.source_ref = "memory:decision-1".to_string();
+
+        let mut application = core_node();
+        application.id = "application:research-mcp".to_string();
+        application.kind = "application".to_string();
+        application.ring = 4;
+        application.label = "Research server".to_string();
+        application.source_ref = "catalog:research-mcp".to_string();
+        vec![core_node(), skill, memory, application]
+    }
+
+    #[test]
+    fn activity_uses_only_structured_execution_and_memory_references() {
+        let traces = vec![
+            TraceRecord {
+                run_id: "run-1".to_string(),
+                task_id: Some("task-1".to_string()),
+                ts: "2026-09-23T10:00:00Z".to_string(),
+                kind: "tool_call".to_string(),
+                summary: "structured execution".to_string(),
+                detail: serde_json::json!({
+                    "executionRefs": [
+                        {"catalogId":"verified-skill","kind":"skill","operation":"invoke","outcome":"succeeded","occurredAt":"2026-09-23T10:00:00Z"},
+                        {"catalogId":"research-mcp","kind":"application","operation":"mcp_tool:search","outcome":"succeeded","occurredAt":"2026-09-23T10:00:00Z"}
+                    ],
+                    "catalogRefs": [{"catalogId":"unverified","kind":"skill","evidence":"inferred"}]
+                }),
+            },
+            TraceRecord {
+                run_id: "run-1".to_string(),
+                task_id: Some("task-1".to_string()),
+                ts: "2026-09-23T10:00:01Z".to_string(),
+                kind: "context".to_string(),
+                summary: "context assembled".to_string(),
+                detail: serde_json::json!({"memoryRefs":[{"memoryId":"decision-1"}]}),
+            },
+        ];
+        let activities = build_activities_since(
+            &activity_fixture_nodes(),
+            &[task()],
+            &traces,
+            chrono::DateTime::parse_from_rfc3339("2026-09-23T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+        .unwrap();
+        let activity = &activities[0];
+        assert!(activity.telemetry_available);
+        assert_eq!(activity.event_count, 2);
+        assert!(activity.links.iter().any(|link| {
+            link.node_id == "skill:verified-skill"
+                && link.relation == "executed"
+                && link.event_ref == "audit:run-1"
+        }));
+        assert!(activity
+            .links
+            .iter()
+            .any(|link| { link.node_id == "application:research-mcp" && link.relation == "used" }));
+        assert!(activity.links.iter().any(|link| {
+            link.node_id == "memory:decision-1" && link.relation == "inserted_into_context"
+        }));
+        assert!(activity
+            .links
+            .iter()
+            .all(|link| !link.node_id.contains("unverified")));
+    }
+
+    #[test]
+    fn text_or_catalog_inference_never_becomes_activity() {
+        let trace = TraceRecord {
+            run_id: "run-1".to_string(),
+            task_id: Some("task-1".to_string()),
+            ts: "2026-09-23T10:00:00Z".to_string(),
+            kind: "tool_call".to_string(),
+            summary: "printed /vault/connectors/research.json".to_string(),
+            detail: serde_json::json!({
+                "command":"printf /vault/connectors/research.json",
+                "catalogRefs":[{"catalogId":"research-mcp","kind":"application","evidence":"inferred"}]
+            }),
+        };
+        let activities = build_activities_since(
+            &activity_fixture_nodes(),
+            &[task()],
+            &[trace],
+            chrono::DateTime::parse_from_rfc3339("2026-09-23T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+        .unwrap();
+        assert!(activities[0].telemetry_available);
+        assert!(activities[0].links.is_empty());
+    }
+
+    #[test]
+    fn activity_window_rejects_unknown_values() {
+        let db_path = std::env::temp_dir().join(format!(
+            "agentic-os-orbit-invalid-window-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Db::open(&db_path).unwrap();
+        let error = build(&db, None, false, Some("all-time")).unwrap_err();
+        assert!(error.to_string().contains("invalid orbit activity window"));
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn imported_source_metadata_requires_sensitive_opt_in_without_changing_memory_count() {
+        let db_path = std::env::temp_dir().join(format!(
+            "agentic-os-orbit-source-visibility-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Db::open(&db_path).unwrap();
+        crate::memory::index::ensure_tables(&db).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO document_imports (
+                    id, domain, title, input_kind, source_ref, source_path, content_hash,
+                    byte_count, candidate_count, warning_count, warnings_json, status,
+                    created_at, updated_at
+                 ) VALUES (?1, 'work', 'Private source', 'email', 'mail:test',
+                    'sources/work/private.md', 'hash', 42, 0, 0, '[]', 'completed', ?2, ?2)",
+                params!["import-1", chrono::Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let hidden = build(&db, Some("work"), false, None).unwrap();
+        assert!(hidden.nodes.iter().all(|node| node.kind != "source"));
+        let visible = build(&db, Some("work"), true, None).unwrap();
+        let source = visible
+            .nodes
+            .iter()
+            .find(|node| node.id == "source:import-1")
+            .unwrap();
+        assert_eq!(source.sensitivity.as_deref(), Some("sensitive"));
+        assert!(source.preview.is_none());
+        assert_eq!(visible.counts.memories, hidden.counts.memories);
+
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn domain_filter_is_applied_before_activity_counts_and_traces() {
+        let db_path = std::env::temp_dir().join(format!(
+            "agentic-os-orbit-domain-activity-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Db::open(&db_path).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.with_conn(|conn| {
+            for (id, domain) in [("task-work", "work"), ("task-finance", "finance")] {
+                conn.execute(
+                    "INSERT INTO tasks (
+                        id, title, goal, domain, harness, status, origin_kind, sandbox_mode,
+                        cwd, risk_level, created_at, updated_at
+                     ) VALUES (?1, ?2, 'test', ?3, 'codex', 'completed', 'manual',
+                        'read-only', '/tmp', 'low', ?4, ?4)",
+                    params![id, format!("{domain} task"), domain, now],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        crate::audit::append_row(
+            &db,
+            "run-work",
+            "task-work",
+            "context",
+            "work context",
+            &serde_json::json!({"memoryRefs":[]}),
+            None,
+            None,
+        )
+        .unwrap();
+        crate::audit::append_row(
+            &db,
+            "run-finance",
+            "task-finance",
+            "context",
+            "finance context",
+            &serde_json::json!({"memoryRefs":[]}),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let map = build(&db, Some("work"), false, Some("today")).unwrap();
+        assert_eq!(map.metrics.tasks_scanned, 1);
+        assert_eq!(map.metrics.traces_scanned, 1);
+        assert_eq!(map.metrics.activity_events, 1);
+        assert_eq!(map.activities.len(), 1);
+        assert_eq!(map.activities[0].task_id, "task-work");
+        assert!(map.nodes.iter().all(|node| {
+            node.domain
+                .as_deref()
+                .map_or(true, |domain| domain == "work")
+        }));
+
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn map_composes_from_the_real_registry_without_preview_nodes() {
         let db_path = std::env::temp_dir().join(format!(
@@ -1696,17 +2197,36 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let db = Db::open(&db_path).unwrap();
-        let map = build(&db, None, false).unwrap();
+        let map = build(&db, None, false, None).unwrap();
+        let top_level = map
+            .nodes
+            .iter()
+            .filter(|node| node.group_id.is_none())
+            .count();
+        let skill_groups = map
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "skill_group")
+            .count();
+        let application_groups = map
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "application_group")
+            .count();
         println!(
-            "MILESTONE2_ORBIT={{\"skills\":{},\"memories\":{},\"routines\":{},\"applications\":{},\"relations\":{},\"composeMs\":{:.3}}}",
+            "MILESTONE2_ORBIT={{\"skills\":{},\"memories\":{},\"routines\":{},\"applications\":{},\"relations\":{},\"topLevel\":{},\"skillGroups\":{},\"applicationGroups\":{},\"composeMs\":{:.3}}}",
             map.counts.skills,
             map.counts.memories,
             map.counts.routines,
             map.counts.applications,
             map.counts.relations,
+            top_level,
+            skill_groups,
+            application_groups,
             map.metrics.compose_ms,
         );
         assert!(map.nodes.iter().any(|node| node.id == "core:agentic-os"));
+        assert_eq!(map.activity_window, "today");
         assert_eq!(
             map.nodes
                 .iter()

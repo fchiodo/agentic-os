@@ -35,6 +35,7 @@ import {
   type MemorySearchOpts,
   type MemoryWriteProposal,
   type OrbitMap,
+  type OrbitActivityWindow,
   type ProposalDecideRequest,
   type ReindexResult,
   type RetrievalBenchmarkReport,
@@ -695,22 +696,25 @@ export async function memoryRetrievalEvalCaseSave(
 export async function memoryOrbitMap(
   domain?: string,
   includeSensitive = false,
+  activityWindow: OrbitActivityWindow = 'today',
 ): Promise<OrbitMap> {
   if (!isTauriRuntime()) {
     return orbitMapSchema.parse({
       generatedAt: new Date().toISOString(),
-      counts: { skills: 0, memories: 0, routines: 0, applications: 0, relations: 4 },
-      metrics: { composeMs: 0, tasksScanned: 0, tracesScanned: 0 },
+      activityWindow,
+      activities: [],
+      counts: { skills: 0, memories: 0, routines: 0, applications: 0, relations: 0 },
+      metrics: { composeMs: 0, tasksScanned: 0, tracesScanned: 0, activityEvents: 0 },
       nodes: [
         { id: 'core:agentic-os', kind: 'core', ring: 0, label: 'AgenticOS', subtitle: 'Local control plane', domain: null, sensitivity: null, status: 'active', operationalState: 'preview', catalogState: 'not_applicable', usageState: 'not_applicable', connectionState: 'not_applicable', domains: [], capabilities: [], lastActivityAt: null, sourcePath: null, sourceRef: 'runtime:agentic-os', groupId: null, count: 1, preview: 'Desktop data is loaded through Tauri.', updatedAt: null, actions: [], aggregate: false },
-        ...['skill_group', 'memory_domain', 'routine_group', 'application_group'].map((kind, index) => ({ id: `preview:${kind}`, kind, ring: index + 1, label: ['Skills', 'Work', 'Routines', 'Applications'][index], subtitle: 'Desktop registry', domain: kind === 'memory_domain' ? 'work' : null, sensitivity: null, status: 'preview', operationalState: 'preview', catalogState: kind === 'memory_domain' ? 'not_applicable' : 'registered', usageState: kind === 'memory_domain' ? 'not_applicable' : 'not_observed', connectionState: kind === 'application_group' ? 'unknown' : 'not_applicable', domains: [], capabilities: [], lastActivityAt: null, sourcePath: null, sourceRef: `preview:${kind}`, groupId: null, count: 0, preview: 'Run the Tauri desktop app to load the local registry.', updatedAt: null, actions: [], aggregate: true })),
       ],
-      edges: [1, 2, 3, 4].map((ring) => ({ id: `preview-edge:${ring}`, source: 'core:agentic-os', target: `preview:${['skill_group', 'memory_domain', 'routine_group', 'application_group'][ring - 1]}`, relation: 'registers', evidence: 'declared', weight: 1, activityAt: null, provenance: [{ kind: 'preview', reference: 'browser', detail: 'Desktop registry unavailable outside Tauri.', ts: null }] })),
+      edges: [],
     })
   }
   const payload = await invoke<OrbitMap>('memory_orbit_map', {
     domain: domain ?? null,
     includeSensitive,
+    activityWindow,
   })
   return orbitMapSchema.parse(payload)
 }

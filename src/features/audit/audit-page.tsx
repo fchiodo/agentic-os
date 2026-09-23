@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { SectionEmptyState } from '@/components/ui/section-empty-state'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { TraceTimeline } from '@/components/ui/trace-timeline'
@@ -27,9 +28,14 @@ function isKnownTaskStatus(value: string): value is TaskStatus {
 export function AuditPage() {
   const { data: runs } = useAuditRuns()
   const { data: chain } = useAuditChain()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
 
-  const effectiveRunId = selectedRunId ?? runs?.[0]?.runId ?? null
+  const requestedRunId = searchParams.get('run')
+  const effectiveRunId = runs?.find((run) => run.runId === requestedRunId)?.runId
+    ?? selectedRunId
+    ?? runs?.[0]?.runId
+    ?? null
   const { data: trace } = useAuditTrace(effectiveRunId)
 
   return (
@@ -64,7 +70,10 @@ export function AuditPage() {
                       ? 'workspace-row audit-run-row is-selected'
                       : 'workspace-row audit-run-row'
                   }
-                  onClick={() => setSelectedRunId(run.runId)}
+                  onClick={() => {
+                    setSelectedRunId(run.runId)
+                    setSearchParams({ run: run.runId })
+                  }}
                   type="button"
                 >
                   <div className="workspace-row-copy">

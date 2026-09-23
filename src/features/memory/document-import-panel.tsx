@@ -57,9 +57,11 @@ function sourcePreviewLabel(originalPath: string | null, qualityStatus: string):
 
 export function DocumentImportPanel({
   defaultDomain,
+  initialImportId,
   onClose,
 }: {
   defaultDomain?: string
+  initialImportId?: string | null
   onClose: () => void
 }) {
   const [domain, setDomain] = useState(defaultDomain ?? 'work')
@@ -72,7 +74,7 @@ export function DocumentImportPanel({
   const [sourceUrl, setSourceUrl] = useState('')
   const [fileName, setFileName] = useState('')
   const [fileError, setFileError] = useState<string | null>(null)
-  const [selectedImportId, setSelectedImportId] = useState<string | null>(null)
+  const [selectedImportId, setSelectedImportId] = useState<string | null>(initialImportId ?? null)
   const importMutation = useMemoryImportDocument()
   const historyQuery = useMemoryDocumentImports(domain)
   const sourceQuery = useMemoryDocumentSourceRead(selectedImportId)

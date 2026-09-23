@@ -541,9 +541,15 @@ pub fn memory_orbit_map(
     db: State<'_, Db>,
     domain: Option<String>,
     include_sensitive: Option<bool>,
+    activity_window: Option<String>,
 ) -> Result<crate::orbit::OrbitMap, String> {
-    crate::orbit::build(db.inner(), domain.as_deref(), include_sensitive.unwrap_or(false))
-        .map_err(|error| error.to_string())
+    crate::orbit::build(
+        db.inner(),
+        domain.as_deref(),
+        include_sensitive.unwrap_or(false),
+        activity_window.as_deref(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Distill a completed run into a candidate skill (MEMORY-SPEC §4 source 4).
