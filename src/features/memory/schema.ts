@@ -25,10 +25,13 @@ export const memoryFrontmatterSchema = z.object({
   created: z.string(),
   updated: z.string(),
   provenance: provenanceSchema,
+  sources: z.array(z.string()).optional().default([]),
   confidence: z.number(),
   sensitivity: sensitivitySchema,
   validFrom: z.string().nullable().optional(),
   validUntil: z.string().nullable().optional(),
+  supersedes: z.string().nullable().optional(),
+  supersededBy: z.string().nullable().optional(),
   staleAfterDays: z.number().nullable().optional(),
   lastConfirmed: z.string().nullable().optional(),
   confirmations: z.number().nullable().optional(),
@@ -136,6 +139,37 @@ export const reindexResultSchema = z.object({
 export const maintenanceResultSchema = z.object({
   expired: z.number(),
   markedStale: z.number(),
+  consolidationProposals: z.number(),
+  deferredExpirations: z.number(),
+})
+
+export const memoryOperationRecordSchema = z.object({
+  id: z.string(),
+  kind: z.string(),
+  entityId: z.string(),
+  stage: z.string(),
+  status: z.enum(['active', 'completed', 'rolled_back', 'needs_attention']),
+  error: z.string().nullable(),
+  startedAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().nullable(),
+})
+
+export const retrievalBenchmarkMetricsSchema = z.object({
+  topOneAccuracy: z.number().min(0).max(1),
+  sourceHitRateAtFive: z.number().min(0).max(1),
+  latencyP50Ms: z.number().nonnegative(),
+  latencyP95Ms: z.number().nonnegative(),
+  outboundCostUsd: z.number().nonnegative(),
+})
+
+export const retrievalBenchmarkReportSchema = z.object({
+  generatedAt: z.string(),
+  corpusKind: z.string(),
+  cases: z.number().int().nonnegative(),
+  baseline: retrievalBenchmarkMetricsSchema,
+  candidate: retrievalBenchmarkMetricsSchema,
+  notes: z.array(z.string()),
 })
 
 export const manualSaveRequestSchema = z.object({
@@ -274,6 +308,61 @@ export const memorySearchOptsSchema = z.object({
   limit: z.number().optional(),
 })
 
+export const orbitNodeSchema = z.object({
+  id: z.string(),
+  kind: z.string(),
+  ring: z.number().int().min(0).max(4),
+  label: z.string(),
+  subtitle: z.string().nullable(),
+  domain: z.string().nullable(),
+  sensitivity: z.string().nullable(),
+  status: z.string(),
+  sourcePath: z.string().nullable(),
+  sourceRef: z.string(),
+  groupId: z.string().nullable(),
+  count: z.number().int().nonnegative(),
+  preview: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+  actions: z.array(z.string()),
+  aggregate: z.boolean(),
+})
+
+export const orbitProvenanceSchema = z.object({
+  kind: z.string(),
+  reference: z.string(),
+  detail: z.string(),
+  ts: z.string().nullable(),
+})
+
+export const orbitEdgeSchema = z.object({
+  id: z.string(),
+  source: z.string(),
+  target: z.string(),
+  relation: z.string(),
+  evidence: z.enum(['declared', 'observed', 'inferred']),
+  weight: z.number().int().positive(),
+  activityAt: z.string().nullable(),
+  provenance: z.array(orbitProvenanceSchema),
+})
+
+export const orbitMapSchema = z.object({
+  generatedAt: z.string(),
+  nodes: z.array(orbitNodeSchema),
+  edges: z.array(orbitEdgeSchema),
+  counts: z.object({
+    skills: z.number().int().nonnegative(),
+    memories: z.number().int().nonnegative(),
+    routines: z.number().int().nonnegative(),
+    applications: z.number().int().nonnegative(),
+    relations: z.number().int().nonnegative(),
+  }),
+  metrics: z.object({
+    composeMs: z.number().nonnegative(),
+    tasksScanned: z.number().int().nonnegative(),
+    tracesScanned: z.number().int().nonnegative(),
+  }),
+})
+
 export type MemoryType = z.infer<typeof memoryTypeSchema>
 export type MemoryStatus = z.infer<typeof memoryStatusSchema>
 export type Sensitivity = z.infer<typeof sensitivitySchema>
@@ -288,6 +377,8 @@ export type ProposalStatus = z.infer<typeof proposalStatusSchema>
 export type MemoryWriteProposal = z.infer<typeof memoryWriteProposalSchema>
 export type ReindexResult = z.infer<typeof reindexResultSchema>
 export type MaintenanceResult = z.infer<typeof maintenanceResultSchema>
+export type MemoryOperationRecord = z.infer<typeof memoryOperationRecordSchema>
+export type RetrievalBenchmarkReport = z.infer<typeof retrievalBenchmarkReportSchema>
 export type ManualSaveRequest = z.infer<typeof manualSaveRequestSchema>
 export type MemoryAskRequest = z.infer<typeof memoryAskRequestSchema>
 export type MemoryCitation = z.infer<typeof memoryCitationSchema>
@@ -304,3 +395,6 @@ export type DocumentImportResult = z.infer<typeof documentImportResultSchema>
 export type DocumentSourceReadResult = z.infer<typeof documentSourceReadResultSchema>
 export type ProposalDecideRequest = z.infer<typeof proposalDecideRequestSchema>
 export type MemorySearchOpts = z.infer<typeof memorySearchOptsSchema>
+export type OrbitNode = z.infer<typeof orbitNodeSchema>
+export type OrbitEdge = z.infer<typeof orbitEdgeSchema>
+export type OrbitMap = z.infer<typeof orbitMapSchema>

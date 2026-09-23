@@ -166,11 +166,28 @@ pub fn apply_memory_proposal(
             .valid_from
             .clone()
             .or_else(|| Some(chrono::Utc::now().format("%Y-%m-%d").to_string()));
+        old_fm.superseded_by = Some(new_fm.id.clone());
         old_fm.updated = chrono::Utc::now().to_rfc3339();
         let replacement = frontmatter::serialize(&old_fm, &old_body);
         superseded_snapshot = Some((old_row.vault_path.clone(), old_content, old_row));
         superseded_document = Some((old_id.to_string(), replacement, old_fm, old_body));
     }
+
+    // Persist intent before touching either filesystem or Git. If the process
+    // dies after this point, startup recovery can distinguish the untouched
+    // base from the exact proposed content and either roll back or roll
+    // forward without guessing.
+    let operation_id = super::operations::begin(
+        db,
+        "proposal_apply",
+        &proposal.id,
+        &serde_json::json!({
+            "finalStatus": final_status,
+            "vaultPath": proposal.vault_path,
+            "newContentHash": crate::audit::compute_content_hash(&proposal.new_content),
+            "supersedesId": proposal.supersedes_id,
+        }),
+    )?;
 
     let result = (|| -> AppResult<()> {
         vault::write_file_atomic(&proposal.vault_path, &proposal.new_content)?;
@@ -182,6 +199,7 @@ pub fn apply_memory_proposal(
             debug_assert_eq!(old_fm.domain, proposal.domain);
             vault::write_file_atomic(old_path, replacement)?;
         }
+        super::operations::advance(db, &operation_id, "files_written")?;
 
         vault::git_commit(&format!(
             "mem({}): {} {} [{}]",
@@ -195,6 +213,7 @@ pub fn apply_memory_proposal(
                 .trim_end_matches(".md"),
             new_fm.provenance.source,
         ))?;
+        super::operations::advance(db, &operation_id, "git_committed")?;
 
         let new_row = row_from_document(
             &proposal.vault_path,
@@ -222,6 +241,7 @@ pub fn apply_memory_proposal(
             debug_assert_eq!(&stale_row.id, old_id);
             index::upsert(db, &stale_row, old_body, &old_fm.tags)?;
         }
+        super::operations::advance(db, &operation_id, "index_updated")?;
 
         let decided_at = chrono::Utc::now().to_rfc3339();
         db.with_conn(|conn| {
@@ -236,6 +256,7 @@ pub fn apply_memory_proposal(
             }
             Ok(())
         })?;
+        super::operations::advance(db, &operation_id, "state_updated")?;
 
         crate::audit::append_row(
             db,
@@ -255,6 +276,7 @@ pub fn apply_memory_proposal(
             None,
             None,
         )?;
+        super::operations::advance(db, &operation_id, "audit_written")?;
 
         Ok(())
     })();
@@ -292,8 +314,10 @@ pub fn apply_memory_proposal(
             "mem({}): rollback proposal {}",
             proposal.domain, proposal.id
         ));
+        let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
         return Err(error);
     }
 
+    super::operations::complete(db, &operation_id)?;
     Ok(())
 }

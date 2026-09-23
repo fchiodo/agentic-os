@@ -161,17 +161,18 @@ fn parse_lifecycle_date(value: &str) -> Option<chrono::NaiveDate> {
 }
 
 fn validate_lifecycle(request: &ManualSaveRequest) -> AppResult<()> {
-    let parse_optional = |label: &str, value: Option<&String>| -> AppResult<Option<chrono::NaiveDate>> {
-        value
-            .map(|value| {
-                parse_lifecycle_date(value).ok_or_else(|| {
-                    AppError::Io(std::io::Error::other(format!(
-                        "{label} must be an RFC 3339 timestamp or YYYY-MM-DD"
-                    )))
+    let parse_optional =
+        |label: &str, value: Option<&String>| -> AppResult<Option<chrono::NaiveDate>> {
+            value
+                .map(|value| {
+                    parse_lifecycle_date(value).ok_or_else(|| {
+                        AppError::Io(std::io::Error::other(format!(
+                            "{label} must be an RFC 3339 timestamp or YYYY-MM-DD"
+                        )))
+                    })
                 })
-            })
-            .transpose()
-    };
+                .transpose()
+        };
 
     let valid_from = parse_optional("validFrom", request.valid_from.as_ref())?;
     let valid_until = parse_optional("validUntil", request.valid_until.as_ref())?;
@@ -200,13 +201,64 @@ fn validate_lifecycle(request: &ManualSaveRequest) -> AppResult<()> {
     Ok(())
 }
 
+fn ask_answer_sources(db: &Db, source: &str) -> AppResult<(Vec<String>, Option<f64>)> {
+    let Some(answer_id) = source.strip_prefix("memory-ask:") else {
+        return Ok((Vec::new(), None));
+    };
+    let detail = db.with_conn(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT detail FROM audit
+             WHERE kind = 'memory_ask' AND task_id = ?1
+             ORDER BY id DESC LIMIT 1",
+        )?;
+        let value = statement.query_row(params![answer_id], |row| row.get::<_, String>(0));
+        match value {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    })?;
+    let detail = detail.ok_or_else(|| {
+        AppError::Io(std::io::Error::other(
+            "saved Ask answer has no auditable source response",
+        ))
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&detail)?;
+    let citations = value
+        .get("citations")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::other(
+                "saved Ask answer has no original citations",
+            ))
+        })?;
+    let mut sources = Vec::new();
+    let mut confidence_cap: Option<f64> = None;
+    for citation in citations {
+        if let Some(path) = citation.get("path").and_then(serde_json::Value::as_str) {
+            if !sources.iter().any(|source| source == path) {
+                sources.push(path.to_string());
+            }
+        }
+        if let Some(score) = citation.get("score").and_then(serde_json::Value::as_f64) {
+            confidence_cap = Some(confidence_cap.map_or(score, |current| current.min(score)));
+        }
+    }
+    if sources.is_empty() {
+        return Err(AppError::Io(std::io::Error::other(
+            "saved Ask answer has no original source paths",
+        )));
+    }
+    Ok((sources, confidence_cap))
+}
+
 /// Process a manual save request through the write pipeline.
 pub fn process_manual_save(
     db: &Db,
     request: &ManualSaveRequest,
     source: &str,
 ) -> AppResult<super::MemoryWriteProposal> {
-    process_manual_save_with_context(db, request, source, false, None)
+    process_manual_save_with_context(db, request, source, false, None, &[])
 }
 
 /// Imported document facts are untrusted extraction output. Even in domains
@@ -218,7 +270,18 @@ pub(crate) fn process_import_candidate(
     source: &str,
     import_id: &str,
 ) -> AppResult<super::MemoryWriteProposal> {
-    process_manual_save_with_context(db, request, source, true, Some(import_id))
+    process_manual_save_with_context(db, request, source, true, Some(import_id), &[])
+}
+
+/// Consolidated episode claims are derived content and therefore always stop
+/// at the approval boundary. Their source episode is retained in frontmatter.
+pub(crate) fn process_consolidation_candidate(
+    db: &Db,
+    request: &ManualSaveRequest,
+    source: &str,
+    episode_path: &str,
+) -> AppResult<super::MemoryWriteProposal> {
+    process_manual_save_with_context(db, request, source, true, None, &[episode_path.to_string()])
 }
 
 fn process_manual_save_with_context(
@@ -227,6 +290,7 @@ fn process_manual_save_with_context(
     source: &str,
     force_approval: bool,
     import_id: Option<&str>,
+    explicit_sources: &[String],
 ) -> AppResult<super::MemoryWriteProposal> {
     super::index::ensure_tables(db)?;
     let mem_type = MemoryType::parse(&request.mem_type)
@@ -263,6 +327,12 @@ fn process_manual_save_with_context(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(source);
+    let (mut ask_sources, ask_confidence_cap) = ask_answer_sources(db, provenance_source)?;
+    for source in explicit_sources {
+        if !ask_sources.contains(source) {
+            ask_sources.push(source.clone());
+        }
+    }
     let mut report = GateReport::new();
 
     let candidate_text = format!("{title}\n{body}");
@@ -424,6 +494,9 @@ fn process_manual_save_with_context(
         .or_else(|| old_parsed.as_ref().map(|(fm, _)| fm.confidence))
         .unwrap_or(0.8)
         .clamp(0.0, 1.0);
+    if let Some(cap) = ask_confidence_cap {
+        confidence = confidence.min(cap);
+    }
     let preference_is_inferred = mem_type == MemoryType::Preference
         && provenance_source != "manual"
         && !provenance_source.starts_with("meeting:");
@@ -440,7 +513,7 @@ fn process_manual_save_with_context(
         },
     );
 
-    let (id, vault_path, created, confirmations, tags, final_body) =
+    let (id, vault_path, created, confirmations, tags, sources, final_body) =
         if let (Some(existing), Some((old_fm, old_body))) =
             (update_target.as_ref(), old_parsed.as_ref())
         {
@@ -450,12 +523,19 @@ fn process_manual_save_with_context(
                     tags.push(tag);
                 }
             }
+            let mut sources = old_fm.sources.clone();
+            for source in &ask_sources {
+                if !sources.contains(source) {
+                    sources.push(source.clone());
+                }
+            }
             (
                 existing.id.clone(),
                 existing.vault_path.clone(),
                 old_fm.created.clone(),
                 old_fm.confirmations.unwrap_or(0) + 1,
                 tags,
+                sources,
                 merge_bodies(old_body, body, mem_type),
             )
         } else {
@@ -491,6 +571,7 @@ fn process_manual_save_with_context(
                 now.clone(),
                 1,
                 normalize_tags(&request.tags),
+                ask_sources,
                 body.to_string(),
             )
         };
@@ -529,6 +610,7 @@ fn process_manual_save_with_context(
             source: provenance_source.to_string(),
             ts: now.clone(),
         },
+        sources,
         confidence,
         sensitivity,
         valid_from: request.valid_from.clone().or_else(|| {
@@ -541,6 +623,16 @@ fn process_manual_save_with_context(
                 .as_ref()
                 .and_then(|(fm, _)| fm.valid_until.clone())
         }),
+        supersedes: if op == ProposalOp::Supersede {
+            supersedes_id.clone()
+        } else {
+            old_parsed
+                .as_ref()
+                .and_then(|(fm, _)| fm.supersedes.clone())
+        },
+        superseded_by: old_parsed
+            .as_ref()
+            .and_then(|(fm, _)| fm.superseded_by.clone()),
         stale_after_days: request
             .stale_after_days
             .or_else(|| old_parsed.as_ref().and_then(|(fm, _)| fm.stale_after_days))
@@ -763,7 +855,11 @@ pub fn process_skill_distill(
     let base_content_hash = existing_content
         .as_ref()
         .map(|content| crate::audit::compute_content_hash(content));
-    let skill_op = if existing_content.is_some() { "update" } else { "create" };
+    let skill_op = if existing_content.is_some() {
+        "update"
+    } else {
+        "create"
+    };
     let unified_diff = make_unified_diff(
         existing_content.as_deref().unwrap_or_default(),
         &content,

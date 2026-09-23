@@ -23,13 +23,41 @@ pub fn run_sweep(db: &Db) -> AppResult<MaintenanceResult> {
     super::index::ensure_tables(db)?;
     let now_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
+    // Episodes approaching TTL first yield governed fact/decision proposals.
+    // A pending or failed review defers archival, preserving the exact source
+    // until a human decision is durable.
+    let consolidation_proposals = super::consolidation::propose_due(db)?;
+    let deferred_expirations = db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(DISTINCT m.id)
+             FROM memories m
+             JOIN episode_consolidations c ON c.episode_id = m.id
+             WHERE m.mem_type = 'episode'
+               AND m.status = 'active'
+               AND m.expires_at IS NOT NULL
+               AND substr(m.expires_at, 1, 10) < ?1
+               AND c.status IN ('pending', 'needs_attention')",
+            params![now_date],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(Into::into)
+    })?;
+
     // 1. TTL sweep: episodes past expires_at → expired, move to archive.
     // substr(...,1,10) normalizes RFC 3339 timestamps to their date part so
     // the lexicographic comparison stays correct for both stored shapes.
     let expiry_rows = db.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT id, vault_path, domain, title FROM memories
-             WHERE mem_type = 'episode' AND expires_at IS NOT NULL AND substr(expires_at, 1, 10) < ?1 AND status != 'expired'",
+             WHERE mem_type = 'episode'
+               AND expires_at IS NOT NULL
+               AND substr(expires_at, 1, 10) < ?1
+               AND status != 'expired'
+               AND NOT EXISTS (
+                   SELECT 1 FROM episode_consolidations c
+                   WHERE c.episode_id = memories.id
+                     AND c.status IN ('pending', 'needs_attention')
+               )",
         )?;
 
         let rows = stmt
@@ -52,9 +80,7 @@ pub fn run_sweep(db: &Db) -> AppResult<MaintenanceResult> {
         let relative_archive = archived_path
             .strip_prefix(&root)
             .map_err(|_| {
-                crate::error::AppError::Io(std::io::Error::other(
-                    "archive path escaped vault root",
-                ))
+                crate::error::AppError::Io(std::io::Error::other("archive path escaped vault root"))
             })?
             .to_string_lossy()
             .to_string();
@@ -111,16 +137,20 @@ pub fn run_sweep(db: &Db) -> AppResult<MaintenanceResult> {
         expired += 1;
     }
 
-    // 2. Staleness sweep: fact/entity/preference past stale_after_days → stale
+    // 2. Staleness sweep: lifecycle windows apply to every memory type;
+    // type-specific stale_after_days remains the fallback freshness clock.
     let (marked_stale, stale_audit) = db.with_conn(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, last_confirmed_at, updated_at, created_at, stale_after_days FROM memories
-             WHERE mem_type IN ('fact', 'entity', 'preference')
-               AND status = 'active'
-               AND stale_after_days IS NOT NULL",
+            "SELECT id, last_confirmed_at, updated_at, created_at, stale_after_days, valid_until
+             FROM memories
+             WHERE status = 'active'
+               AND (valid_until IS NOT NULL OR (
+                    mem_type IN ('fact', 'entity', 'preference')
+                    AND stale_after_days IS NOT NULL
+               ))",
         )?;
 
-        let rows: Vec<(String, Option<String>, String, String, i64)> = stmt
+        let rows: Vec<(String, Option<String>, String, String, Option<i64>, Option<String>)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get(0)?,
@@ -128,32 +158,44 @@ pub fn run_sweep(db: &Db) -> AppResult<MaintenanceResult> {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut marked = 0i64;
         let mut audit_events = Vec::new();
-        for (id, last_confirmed, updated_at, created_at, stale_days) in &rows {
+        for (id, last_confirmed, updated_at, created_at, stale_days, valid_until) in &rows {
+            let today = chrono::Utc::now().date_naive();
+            let validity_ended = valid_until
+                .as_deref()
+                .and_then(parse_date_flexible)
+                .is_some_and(|date| today > date);
             let reference_date = last_confirmed
                 .as_deref()
                 .or_else(|| (!updated_at.is_empty()).then_some(updated_at.as_str()))
                 .unwrap_or(created_at);
 
-            if let Some(ref_dt) = parse_date_flexible(reference_date) {
-                let threshold = ref_dt + chrono::Duration::days(*stale_days);
-                let today = chrono::Utc::now().date_naive();
-                if today > threshold {
-                    conn.execute(
-                        "UPDATE memories SET status = 'stale' WHERE id = ?1 AND status = 'active'",
-                        params![id],
-                    )?;
-                    audit_events.push((
-                        id.clone(),
-                        serde_json::json!({"id": id, "staleAfterDays": stale_days}),
-                    ));
-                    marked += 1;
-                }
+            let freshness_ended = stale_days.is_some_and(|days| {
+                parse_date_flexible(reference_date)
+                    .map(|date| today > date + chrono::Duration::days(days))
+                    .unwrap_or(false)
+            });
+            if validity_ended || freshness_ended {
+                conn.execute(
+                    "UPDATE memories SET status = 'stale' WHERE id = ?1 AND status = 'active'",
+                    params![id],
+                )?;
+                audit_events.push((
+                    id.clone(),
+                    serde_json::json!({
+                        "id": id,
+                        "reason": if validity_ended { "validity_ended" } else { "freshness_window_elapsed" },
+                        "validUntil": valid_until,
+                        "staleAfterDays": stale_days,
+                    }),
+                ));
+                marked += 1;
             }
         }
         Ok::<_, crate::error::AppError>((marked, audit_events))
@@ -184,5 +226,7 @@ pub fn run_sweep(db: &Db) -> AppResult<MaintenanceResult> {
     Ok(MaintenanceResult {
         expired,
         marked_stale,
+        consolidation_proposals,
+        deferred_expirations,
     })
 }

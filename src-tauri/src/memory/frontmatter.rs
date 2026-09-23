@@ -36,6 +36,12 @@ pub fn serialize(fm: &MemoryFrontmatter, body: &str) -> String {
         escape_yaml(&fm.provenance.source)
     ));
     out.push_str(&format!("  ts: \"{}\"\n", escape_yaml(&fm.provenance.ts)));
+    if !fm.sources.is_empty() {
+        out.push_str("sources:\n");
+        for source in &fm.sources {
+            out.push_str(&format!("  - \"{}\"\n", escape_yaml(source)));
+        }
+    }
     out.push_str(&format!("confidence: {}\n", fm.confidence));
     out.push_str(&format!("sensitivity: {}\n", fm.sensitivity.as_str()));
     if let Some(ref v) = fm.valid_from {
@@ -43,6 +49,12 @@ pub fn serialize(fm: &MemoryFrontmatter, body: &str) -> String {
     }
     if let Some(ref v) = fm.valid_until {
         out.push_str(&format!("valid_until: {}\n", v));
+    }
+    if let Some(ref v) = fm.supersedes {
+        out.push_str(&format!("supersedes: \"{}\"\n", escape_yaml(v)));
+    }
+    if let Some(ref v) = fm.superseded_by {
+        out.push_str(&format!("superseded_by: \"{}\"\n", escape_yaml(v)));
     }
     if let Some(v) = fm.stale_after_days {
         out.push_str(&format!("stale_after_days: {}\n", v));
@@ -88,6 +100,17 @@ fn yaml_to_frontmatter(yaml: &Value) -> Option<MemoryFrontmatter> {
     if provenance.source.trim().is_empty() || provenance.ts.trim().is_empty() {
         return None;
     }
+    let sources = obj
+        .get("sources")
+        .and_then(|value| value.as_sequence())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(String::from))
+                .filter(|value| !value.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let confidence = obj
         .get("confidence")
@@ -114,6 +137,14 @@ fn yaml_to_frontmatter(yaml: &Value) -> Option<MemoryFrontmatter> {
     let valid_until = obj
         .get("valid_until")
         .and_then(|v| v.as_str())
+        .map(String::from);
+    let supersedes = obj
+        .get("supersedes")
+        .and_then(|value| value.as_str())
+        .map(String::from);
+    let superseded_by = obj
+        .get("superseded_by")
+        .and_then(|value| value.as_str())
         .map(String::from);
     let stale_after_days = obj.get("stale_after_days").and_then(|v| v.as_i64());
     let last_confirmed = obj
@@ -144,10 +175,13 @@ fn yaml_to_frontmatter(yaml: &Value) -> Option<MemoryFrontmatter> {
         created,
         updated,
         provenance,
+        sources,
         confidence,
         sensitivity,
         valid_from,
         valid_until,
+        supersedes,
+        superseded_by,
         stale_after_days,
         last_confirmed,
         confirmations,

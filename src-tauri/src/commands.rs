@@ -272,8 +272,9 @@ use crate::memory;
 use crate::memory::{
     DocumentImportRecord, DocumentImportRequest, DocumentImportResult, DocumentSourceReadResult,
     MaintenanceResult, ManualSaveRequest, MemoryAnswer, MemoryAnswerFeedbackRequest,
-    MemoryAskRequest, MemoryIngestRequest, MemoryIngestResult, MemoryReadResult, MemorySearchOpts,
-    MemoryWriteProposal, ProposalDecideRequest, ReindexResult, ScoredMemory, VaultNode,
+    MemoryAskRequest, MemoryIngestRequest, MemoryIngestResult, MemoryOperationRecord,
+    MemoryReadResult, MemorySearchOpts, MemoryWriteProposal, ProposalDecideRequest, ReindexResult,
+    RetrievalBenchmarkReport, ScoredMemory, VaultNode,
 };
 
 #[tauri::command]
@@ -448,6 +449,26 @@ pub fn memory_reindex(db: State<'_, Db>) -> Result<ReindexResult, String> {
 pub fn memory_maintenance_run(db: State<'_, Db>) -> Result<MaintenanceResult, String> {
     memory::vault::ensure_vault().map_err(|e| e.to_string())?;
     memory::maintenance::run_sweep(&db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_operations_list(db: State<'_, Db>) -> Result<Vec<MemoryOperationRecord>, String> {
+    memory::operations::list(&db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_retrieval_benchmark(db: State<'_, Db>) -> Result<RetrievalBenchmarkReport, String> {
+    memory::retrieval::benchmark(&db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn memory_orbit_map(
+    db: State<'_, Db>,
+    domain: Option<String>,
+    include_sensitive: Option<bool>,
+) -> Result<crate::orbit::OrbitMap, String> {
+    crate::orbit::build(db.inner(), domain.as_deref(), include_sensitive.unwrap_or(false))
+        .map_err(|error| error.to_string())
 }
 
 /// Distill a completed run into a candidate skill (MEMORY-SPEC §4 source 4).

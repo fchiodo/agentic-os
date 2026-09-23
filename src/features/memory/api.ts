@@ -4,11 +4,14 @@ import {
   documentImportResultSchema,
   documentSourceReadResultSchema,
   maintenanceResultSchema,
+  memoryOperationRecordSchema,
   memoryAnswerSchema,
   memoryIngestResultSchema,
   memoryReadResultSchema,
   memoryWriteProposalSchema,
+  orbitMapSchema,
   reindexResultSchema,
+  retrievalBenchmarkReportSchema,
   scoredMemorySchema,
   vaultNodeSchema,
   type DocumentImportRecord,
@@ -19,14 +22,17 @@ import {
   type MaintenanceResult,
   type MemoryAnswer,
   type MemoryAnswerFeedbackRequest,
+  type MemoryOperationRecord,
   type MemoryAskRequest,
   type MemoryIngestRequest,
   type MemoryIngestResult,
   type MemoryReadResult,
   type MemorySearchOpts,
   type MemoryWriteProposal,
+  type OrbitMap,
   type ProposalDecideRequest,
   type ReindexResult,
+  type RetrievalBenchmarkReport,
   type ScoredMemory,
   type VaultNode,
 } from '@/features/memory/schema'
@@ -114,6 +120,7 @@ const mockReadResult: MemoryReadResult = {
     created: '2026-07-20T09:12:00Z',
     updated: '2026-07-20T09:12:00Z',
     provenance: { source: 'task:4b1e', ts: '2026-07-20T09:12:00Z' },
+    sources: [],
     confidence: 0.9,
     sensitivity: 'normal',
     validFrom: null,
@@ -390,10 +397,54 @@ export async function memoryReindex(): Promise<ReindexResult> {
 
 export async function memoryMaintenanceRun(): Promise<MaintenanceResult> {
   if (!isTauriRuntime()) {
-    return { expired: 0, markedStale: 0 }
+    return { expired: 0, markedStale: 0, consolidationProposals: 0, deferredExpirations: 0 }
   }
   const payload = await invoke<MaintenanceResult>('memory_maintenance_run')
   return maintenanceResultSchema.parse(payload)
+}
+
+export async function memoryOperationsList(): Promise<MemoryOperationRecord[]> {
+  if (!isTauriRuntime()) return []
+  const payload = await invoke<MemoryOperationRecord[]>('memory_operations_list')
+  return memoryOperationRecordSchema.array().parse(payload)
+}
+
+export async function memoryRetrievalBenchmark(): Promise<RetrievalBenchmarkReport> {
+  if (!isTauriRuntime()) {
+    return retrievalBenchmarkReportSchema.parse({
+      generatedAt: new Date().toISOString(),
+      corpusKind: 'browser-preview',
+      cases: 0,
+      baseline: { topOneAccuracy: 0, sourceHitRateAtFive: 0, latencyP50Ms: 0, latencyP95Ms: 0, outboundCostUsd: 0 },
+      candidate: { topOneAccuracy: 0, sourceHitRateAtFive: 0, latencyP50Ms: 0, latencyP95Ms: 0, outboundCostUsd: 0 },
+      notes: ['Run the desktop app to benchmark the local corpus.'],
+    })
+  }
+  const payload = await invoke<RetrievalBenchmarkReport>('memory_retrieval_benchmark')
+  return retrievalBenchmarkReportSchema.parse(payload)
+}
+
+export async function memoryOrbitMap(
+  domain?: string,
+  includeSensitive = false,
+): Promise<OrbitMap> {
+  if (!isTauriRuntime()) {
+    return orbitMapSchema.parse({
+      generatedAt: new Date().toISOString(),
+      counts: { skills: 0, memories: 0, routines: 0, applications: 0, relations: 4 },
+      metrics: { composeMs: 0, tasksScanned: 0, tracesScanned: 0 },
+      nodes: [
+        { id: 'core:agentic-os', kind: 'core', ring: 0, label: 'AgenticOS', subtitle: 'Local control plane', domain: null, sensitivity: null, status: 'active', sourcePath: null, sourceRef: 'runtime:agentic-os', groupId: null, count: 1, preview: 'Desktop data is loaded through Tauri.', updatedAt: null, actions: [], aggregate: false },
+        ...['skill_group', 'memory_domain', 'routine_group', 'application_group'].map((kind, index) => ({ id: `preview:${kind}`, kind, ring: index + 1, label: ['Skills', 'Work', 'Routines', 'Applications'][index], subtitle: 'Desktop registry', domain: kind === 'memory_domain' ? 'work' : null, sensitivity: null, status: 'preview', sourcePath: null, sourceRef: `preview:${kind}`, groupId: null, count: 0, preview: 'Run the Tauri desktop app to load the local registry.', updatedAt: null, actions: [], aggregate: true })),
+      ],
+      edges: [1, 2, 3, 4].map((ring) => ({ id: `preview-edge:${ring}`, source: 'core:agentic-os', target: `preview:${['skill_group', 'memory_domain', 'routine_group', 'application_group'][ring - 1]}`, relation: 'registers', evidence: 'declared', weight: 1, activityAt: null, provenance: [{ kind: 'preview', reference: 'browser', detail: 'Desktop registry unavailable outside Tauri.', ts: null }] })),
+    })
+  }
+  const payload = await invoke<OrbitMap>('memory_orbit_map', {
+    domain: domain ?? null,
+    includeSensitive,
+  })
+  return orbitMapSchema.parse(payload)
 }
 
 export async function skillsDistill(taskId: string): Promise<MemoryWriteProposal> {

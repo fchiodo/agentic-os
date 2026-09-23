@@ -751,12 +751,46 @@ fn persist_source(
             return Err(io_error("document original path already exists"));
         }
     }
-    super::vault::write_file_atomic(source_path, snapshot)?;
+    let operation_id = super::operations::begin(
+        db,
+        "document_import",
+        id,
+        &serde_json::json!({
+            "domain": request.domain,
+            "title": request.title.trim(),
+            "inputKind": request.input_kind,
+            "sourceRef": source_ref,
+            "sourcePath": source_path,
+            "originalPath": original_path,
+            "contentHash": content_hash,
+            "snapshotHash": crate::audit::compute_content_hash(snapshot),
+            "byteCount": byte_count,
+            "createdAt": created_at,
+            "extractionEngine": extraction_engine,
+            "extractionVersion": extraction_version,
+            "extractionQualityScore": extraction_quality_score,
+            "extractionQualityStatus": extraction_quality_status,
+            "extractionQualityIssues": extraction_quality_issues,
+        }),
+    )?;
+    if let Err(error) = super::vault::write_file_atomic(source_path, snapshot) {
+        let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
+        return Err(error);
+    }
     if let Some(path) = original_path {
         if let Err(error) = super::vault::write_bytes_atomic(path, source_bytes) {
             let _ = super::vault::remove_file(source_path);
+            let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
             return Err(error);
         }
+    }
+    if let Err(error) = super::operations::advance(db, &operation_id, "files_written") {
+        let _ = super::vault::remove_file(source_path);
+        if let Some(path) = original_path {
+            let _ = super::vault::remove_file(path);
+        }
+        let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
+        return Err(error);
     }
     if let Err(error) =
         super::vault::git_commit(&format!("mem({}): import source {}", request.domain, id))
@@ -765,8 +799,10 @@ fn persist_source(
         if let Some(path) = original_path {
             let _ = super::vault::remove_file(path);
         }
+        let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
         return Err(error);
     }
+    super::operations::advance(db, &operation_id, "git_committed")?;
 
     let db_result = (|| -> AppResult<()> {
         db.with_conn(|conn| {
@@ -799,6 +835,7 @@ fn persist_source(
             )?;
             Ok(())
         })?;
+        super::operations::advance(db, &operation_id, "state_updated")?;
         crate::audit::append_row(
             db,
             &format!("document-import:{id}"),
@@ -822,7 +859,9 @@ fn persist_source(
             }),
             None,
             None,
-        )
+        )?;
+        super::operations::advance(db, &operation_id, "audit_written")?;
+        Ok(())
     })();
     if let Err(error) = db_result {
         let _ = super::index::remove_document_chunks(db, id);
@@ -835,8 +874,10 @@ fn persist_source(
             let _ = super::vault::remove_file(path);
         }
         let _ = super::vault::git_commit(&format!("mem({}): rollback import {id}", request.domain));
+        let _ = super::operations::rolled_back(db, &operation_id, Some(&error.to_string()));
         return Err(error);
     }
+    super::operations::complete(db, &operation_id)?;
     Ok(())
 }
 
@@ -953,7 +994,7 @@ fn serialize_snapshot(
     Ok(format!("---\n{yaml}---\n\n{body}"))
 }
 
-fn extract_candidates(
+pub(crate) fn extract_candidates(
     document_title: &str,
     input: &str,
     source_path: &str,

@@ -82,15 +82,18 @@ pub fn decide(db: &Db, id: &str, decision: &str) -> AppResult<MemoryWriteProposa
             // scanner picks them up with provenance in the frontmatter.
             let _write_guard = vault::lock_writes();
             let previous = vault::read_skill_file(&proposal.vault_path).ok();
-            let current = get_by_id(db, id)?.ok_or_else(|| {
-                AppError::Io(std::io::Error::other("proposal not found"))
-            })?;
+            let current = get_by_id(db, id)?
+                .ok_or_else(|| AppError::Io(std::io::Error::other("proposal not found")))?;
             if current.status != ProposalStatus::Pending.as_str() {
                 return Err(AppError::Io(std::io::Error::other(
                     "proposal is no longer pending",
                 )));
             }
-            match (proposal.op.as_str(), previous.as_ref(), proposal.base_content_hash.as_ref()) {
+            match (
+                proposal.op.as_str(),
+                previous.as_ref(),
+                proposal.base_content_hash.as_ref(),
+            ) {
                 ("create", Some(_), _) => {
                     return Err(AppError::Io(std::io::Error::other(
                         "skill changed after proposal creation; regenerate the proposal",
@@ -211,6 +214,7 @@ pub fn decide(db: &Db, id: &str, decision: &str) -> AppResult<MemoryWriteProposa
     if let Some(import_id) = decided.import_id.as_deref() {
         super::importer::refresh_status(db, import_id)?;
     }
+    super::consolidation::refresh_for_proposal(db, &decided.id, &decided.status)?;
     Ok(decided)
 }
 

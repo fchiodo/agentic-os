@@ -119,7 +119,6 @@ pub fn read_file(relative_path: &str) -> AppResult<(String, PathBuf)> {
 
 /// Read an exact binary artifact from the vault. Path validation is identical
 /// to Markdown reads, so callers cannot escape the local vault root.
-#[cfg(test)]
 pub fn read_bytes(relative_path: &str) -> AppResult<Vec<u8>> {
     let root = vault_root()?;
     let full = canonicalize_under(&root, relative_path)?;

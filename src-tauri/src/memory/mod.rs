@@ -1,11 +1,13 @@
+pub mod consolidation;
 pub mod context;
 pub mod frontmatter;
 pub mod importer;
 pub mod index;
 pub mod maintenance;
+pub mod operations;
+pub mod pdf_extraction;
 pub mod persist;
 pub mod pipeline;
-pub mod pdf_extraction;
 pub mod proposals;
 pub mod retrieval;
 pub mod vault;
@@ -139,12 +141,18 @@ pub struct MemoryFrontmatter {
     pub created: String,
     pub updated: String,
     pub provenance: Provenance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
     pub confidence: f64,
     pub sensitivity: Sensitivity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_after_days: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -332,6 +340,51 @@ pub struct ReindexResult {
 pub struct MaintenanceResult {
     pub expired: i64,
     pub marked_stale: i64,
+    pub consolidation_proposals: i64,
+    pub deferred_expirations: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryOperationRecord {
+    pub id: String,
+    pub kind: String,
+    pub entity_id: String,
+    pub stage: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub started_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRecoveryReport {
+    pub recovered: i64,
+    pub rolled_back: i64,
+    pub needs_attention: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalBenchmarkMetrics {
+    pub top_one_accuracy: f64,
+    pub source_hit_rate_at_five: f64,
+    pub latency_p50_ms: f64,
+    pub latency_p95_ms: f64,
+    pub outbound_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrievalBenchmarkReport {
+    pub generated_at: String,
+    pub corpus_kind: String,
+    pub cases: usize,
+    pub baseline: RetrievalBenchmarkMetrics,
+    pub candidate: RetrievalBenchmarkMetrics,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1026,6 +1079,11 @@ mod tests {
         assert_eq!(old_file_fm.valid_until.as_deref(), Some("2026-07-21"));
         let (new_fm, _) = frontmatter::parse(&proposal.new_content).unwrap();
         assert_ne!(new_fm.id, first_fm.id);
+        assert_eq!(new_fm.supersedes.as_deref(), Some(first_fm.id.as_str()));
+        assert_eq!(
+            old_file_fm.superseded_by.as_deref(),
+            Some(new_fm.id.as_str())
+        );
         assert_eq!(
             index::get_by_id(&db, &new_fm.id).unwrap().unwrap().status,
             "active"
@@ -1079,10 +1137,13 @@ mod tests {
                 source: "manual".to_string(),
                 ts: row.created_at.clone(),
             },
+            sources: Vec::new(),
             confidence: row.confidence,
             sensitivity: Sensitivity::Normal,
             valid_from: None,
             valid_until: None,
+            supersedes: None,
+            superseded_by: None,
             stale_after_days: Some(180),
             last_confirmed: Some(old),
             confirmations: Some(1),
@@ -1116,6 +1177,56 @@ mod tests {
         assert!(roots.vault.join(&expired.vault_path).exists());
         index::reindex(&db).unwrap();
         assert!(index::get_by_id(&db, &episode_fm.id).unwrap().is_some());
+        drop(roots);
+    }
+
+    #[test]
+    fn reindex_and_reopen_preserve_pending_proposals_and_import_history() {
+        let roots = EnvRoots::new("reindex-operational-state");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("agentic-os-reopen-{nonce}.db"));
+        let db = Db::open(&db_path).unwrap();
+        let mut request = ManualSaveRequest::basic(
+            "finance",
+            "fact",
+            "Quarterly planning window",
+            "The planning window closes at quarter end.",
+        );
+        request.sensitivity = Some("sensitive".to_string());
+        let proposal = pipeline::process_manual_save(&db, &request, "manual").unwrap();
+        assert_eq!(proposal.status, "pending");
+        let now = chrono::Utc::now().to_rfc3339();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO document_imports (
+                    id, domain, title, input_kind, source_ref, source_path,
+                    content_hash, byte_count, status, created_at, updated_at
+                 ) VALUES (?1,'finance','Planning source','text','manual:test',
+                           '_sources/finance/planning.md','hash',42,'pending',?2,?2)",
+                rusqlite::params!["import-preserved", now],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        index::reindex(&db).unwrap();
+        drop(db);
+        let reopened = Db::open(&db_path).unwrap();
+        index::reindex(&reopened).unwrap();
+        assert_eq!(
+            proposals::get_by_id(&reopened, &proposal.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+        assert!(importer::list(&reopened, Some("finance"))
+            .unwrap()
+            .iter()
+            .any(|item| item.id == "import-preserved"));
         drop(roots);
     }
 
@@ -1190,6 +1301,51 @@ mod tests {
     }
 
     #[test]
+    fn saved_ask_answer_keeps_original_sources_and_caps_confidence() {
+        let roots = EnvRoots::new("ask-save-provenance");
+        let db = temp_db("ask-save-provenance");
+        let answer_id = "00000000-0000-4000-8000-000000000124";
+        crate::audit::append_row(
+            &db,
+            &format!("memory-ask:{answer_id}"),
+            answer_id,
+            "memory_ask",
+            "Memory Ask produced a verified answer",
+            &serde_json::json!({
+                "answerId": answer_id,
+                "citations": [
+                    {"path": "work/memories/source-a.md", "score": 0.81},
+                    {"path": "_sources/work/source-b.md", "score": 0.62}
+                ]
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut request = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Saved grounded answer",
+            "The answer is retained with its original evidence.",
+        );
+        request.source = Some(format!("memory-ask:{answer_id}"));
+        request.confidence = Some(0.98);
+        let proposal = pipeline::process_manual_save(&db, &request, "manual").unwrap();
+        assert_eq!(proposal.status, "auto_applied");
+        let (content, _) = vault::read_file(&proposal.vault_path).unwrap();
+        let (frontmatter, _) = frontmatter::parse(&content).unwrap();
+        assert_eq!(
+            frontmatter.sources,
+            vec![
+                "work/memories/source-a.md".to_string(),
+                "_sources/work/source-b.md".to_string()
+            ]
+        );
+        assert!((frontmatter.confidence - 0.62).abs() < f64::EPSILON);
+        drop(roots);
+    }
+
+    #[test]
     fn connector_ingestion_is_bounded_and_isolates_rejected_candidates() {
         let roots = EnvRoots::new("ingest");
         let db = temp_db("ingest");
@@ -1230,7 +1386,10 @@ mod tests {
     fn ipc_contract_uses_camel_case_memory_type() {
         let request = ManualSaveRequest::basic("work", "fact", "Title", "Body");
         let value = serde_json::to_value(request).unwrap();
-        assert_eq!(value.get("memType").and_then(|value| value.as_str()), Some("fact"));
+        assert_eq!(
+            value.get("memType").and_then(|value| value.as_str()),
+            Some("fact")
+        );
         assert!(value.get("type").is_none());
     }
 
@@ -1276,7 +1435,10 @@ mod tests {
             "the newer file must not be overwritten"
         );
         assert_eq!(
-            proposals::get_by_id(&db, &pending.id).unwrap().unwrap().status,
+            proposals::get_by_id(&db, &pending.id)
+                .unwrap()
+                .unwrap()
+                .status,
             "pending"
         );
         drop(roots);
@@ -1350,13 +1512,8 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
         )
         .unwrap();
         assert!(before_approval.is_empty());
-        let source_hits = index::search_document_chunks(
-            &db,
-            "OAuth client credentials JWT",
-            "work",
-            8,
-        )
-        .unwrap();
+        let source_hits =
+            index::search_document_chunks(&db, "OAuth client credentials JWT", "work", 8).unwrap();
         assert_eq!(source_hits.len(), 1);
         assert_eq!(source_hits[0].source_path, result.import.source_path);
         assert!(source_hits[0].body.contains("short-lived JWT tokens"));
@@ -1402,7 +1559,10 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
 
         assert_eq!(result.import.byte_count, pdf.len() as i64);
         assert!(!result.proposals.is_empty());
-        assert_eq!(result.import.extraction_engine.as_deref(), Some("pdf-extract"));
+        assert_eq!(
+            result.import.extraction_engine.as_deref(),
+            Some("pdf-extract")
+        );
         assert_eq!(result.import.extraction_quality_status, "passed");
         assert!(result.import.extraction_quality_score.unwrap_or_default() >= 70);
         let original_path = result
@@ -1497,6 +1657,98 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
         assert!(result.is_err());
         assert!(importer::list(&db, None).unwrap().is_empty());
         assert!(!roots.vault.join("_sources").exists());
+        drop(roots);
+    }
+
+    #[test]
+    fn startup_recovery_rolls_forward_an_exact_journaled_proposal() {
+        let roots = EnvRoots::new("operation-recovery");
+        let db = temp_db("operation-recovery");
+        vault::ensure_vault().unwrap();
+        let mut request = ManualSaveRequest::basic(
+            "work",
+            "fact",
+            "Recovery invariant",
+            "The journaled file must be reconciled into Git, SQLite, and audit after a crash.",
+        );
+        request.sensitivity = Some("sensitive".to_string());
+        let proposal = pipeline::process_manual_save(&db, &request, "manual").unwrap();
+        assert_eq!(proposal.status, "pending");
+        let operation_id = operations::begin(
+            &db,
+            "proposal_apply",
+            &proposal.id,
+            &serde_json::json!({ "finalStatus": "approved" }),
+        )
+        .unwrap();
+
+        // Simulate a process kill immediately after the atomic file replace.
+        vault::write_file_atomic(&proposal.vault_path, &proposal.new_content).unwrap();
+        operations::advance(&db, &operation_id, "files_written").unwrap();
+
+        let report = operations::recover(&db).unwrap();
+        assert_eq!(report.recovered, 1);
+        assert_eq!(report.needs_attention, 0);
+        assert_eq!(
+            proposals::get_by_id(&db, &proposal.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "approved"
+        );
+        assert!(index::get_by_id(
+            &db,
+            &frontmatter::parse(&proposal.new_content).unwrap().0.id
+        )
+        .unwrap()
+        .is_some());
+        assert_eq!(
+            operations::list(&db)
+                .unwrap()
+                .into_iter()
+                .find(|operation| operation.id == operation_id)
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert!(crate::audit::verify_chain(&db).unwrap().ok);
+        drop(roots);
+    }
+
+    #[test]
+    fn expiring_episode_creates_approval_proposals_and_defers_archive() {
+        let roots = EnvRoots::new("episode-consolidation");
+        let db = temp_db("episode-consolidation");
+        vault::ensure_vault().unwrap();
+        let mut request = ManualSaveRequest::basic(
+            "work",
+            "episode",
+            "Newsletter production review",
+            "## Decision\n\nThe newsletter release must complete quality assurance before publication because production errors affect customers. The release owner is the Editorial Operations team.",
+        );
+        request.expires = Some(
+            (chrono::Utc::now() - chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string(),
+        );
+        let episode = pipeline::process_manual_save(&db, &request, "manual").unwrap();
+        assert_eq!(episode.status, "auto_applied");
+
+        let result = maintenance::run_sweep(&db).unwrap();
+        assert!(result.consolidation_proposals >= 1);
+        assert_eq!(result.expired, 0);
+        assert_eq!(result.deferred_expirations, 1);
+        let pending = proposals::list(&db, Some("pending")).unwrap();
+        assert!(pending.iter().any(|proposal| {
+            proposal.requires_approval
+                && proposal.provenance.contains("consolidation:")
+                && proposal.new_content.contains("sources:")
+        }));
+        let episode_id = frontmatter::parse(&episode.new_content).unwrap().0.id;
+        assert_eq!(
+            index::get_by_id(&db, &episode_id).unwrap().unwrap().status,
+            "active"
+        );
         drop(roots);
     }
 }

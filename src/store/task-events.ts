@@ -12,6 +12,7 @@ const EMPTY_EVENTS: TaskEvent[] = []
 type TaskEventsState = {
   eventsByTask: Record<string, TaskEvent[]>
   lastSeqByTask: Record<string, number>
+  lastEvent: TaskEvent | null
   pushEvents: (events: TaskEvent[]) => void
   clearTask: (taskId: string) => void
 }
@@ -19,6 +20,7 @@ type TaskEventsState = {
 export const useTaskEventsStore = create<TaskEventsState>((set) => ({
   eventsByTask: {},
   lastSeqByTask: {},
+  lastEvent: null,
   pushEvents: (incoming) => {
     if (incoming.length === 0) {
       return
@@ -42,7 +44,7 @@ export const useTaskEventsStore = create<TaskEventsState>((set) => ({
         }
       }
 
-      return { eventsByTask, lastSeqByTask }
+      return { eventsByTask, lastSeqByTask, lastEvent: incoming[incoming.length - 1] ?? state.lastEvent }
     })
   },
   clearTask: (taskId) => {

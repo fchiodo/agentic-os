@@ -127,6 +127,35 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
             CREATE INDEX IF NOT EXISTS idx_document_imports_domain
                 ON document_imports(domain, created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS memory_operations (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_operations_status
+                ON memory_operations(status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_memory_operations_entity
+                ON memory_operations(kind, entity_id, started_at DESC);
+
+            CREATE TABLE IF NOT EXISTS episode_consolidations (
+                id TEXT PRIMARY KEY,
+                episode_id TEXT NOT NULL,
+                proposal_id TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(episode_id, proposal_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_episode_consolidations_episode
+                ON episode_consolidations(episode_id, status);
+
             CREATE TABLE IF NOT EXISTS document_chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 import_id TEXT NOT NULL REFERENCES document_imports(id) ON DELETE CASCADE,
@@ -218,10 +247,7 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
                 "extraction_quality_status",
                 "TEXT NOT NULL DEFAULT 'not_applicable'",
             ),
-            (
-                "extraction_quality_json",
-                "TEXT NOT NULL DEFAULT '[]'",
-            ),
+            ("extraction_quality_json", "TEXT NOT NULL DEFAULT '[]'"),
         ] {
             if !import_columns.iter().any(|existing| existing == column) {
                 conn.execute(
@@ -442,9 +468,9 @@ fn walk_and_index(
                 upsert(db, &row, &body, &fm.tags)?;
                 *indexed += 1;
             } else {
-                return Err(crate::error::AppError::Io(std::io::Error::other(
-                    format!("invalid or missing memory frontmatter: {relative}"),
-                )));
+                return Err(crate::error::AppError::Io(std::io::Error::other(format!(
+                    "invalid or missing memory frontmatter: {relative}"
+                ))));
             }
         }
     }

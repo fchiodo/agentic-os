@@ -8,6 +8,7 @@ mod error;
 mod harness;
 mod memory;
 mod models;
+mod orbit;
 mod orchestrator;
 mod policy;
 mod snapshot;
@@ -37,6 +38,16 @@ pub fn run() {
                 .unwrap_or_else(|err| panic!("failed to open app database at {db_path:?}: {err}"));
             memory::vault::ensure_vault()
                 .unwrap_or_else(|err| panic!("failed to initialize memory vault: {err}"));
+            let recovery = memory::operations::recover(&db)
+                .unwrap_or_else(|err| panic!("failed to recover memory operations: {err}"));
+            if recovery.recovered > 0 || recovery.rolled_back > 0 || recovery.needs_attention > 0 {
+                log::info!(
+                    "memory recovery: {} recovered, {} rolled back, {} need attention",
+                    recovery.recovered,
+                    recovery.rolled_back,
+                    recovery.needs_attention
+                );
+            }
             memory::index::reindex(&db)
                 .unwrap_or_else(|err| panic!("failed to rebuild memory index: {err}"));
             app.manage(db.clone());
@@ -49,11 +60,17 @@ pub fn run() {
                 loop {
                     match memory::maintenance::run_sweep(&db) {
                         Ok(result) => {
-                            if result.expired > 0 || result.marked_stale > 0 {
+                            if result.expired > 0
+                                || result.marked_stale > 0
+                                || result.consolidation_proposals > 0
+                                || result.deferred_expirations > 0
+                            {
                                 log::info!(
-                                    "memory maintenance: {} expired, {} marked stale",
+                                    "memory maintenance: {} expired, {} marked stale, {} consolidation proposals, {} deferred",
                                     result.expired,
-                                    result.marked_stale
+                                    result.marked_stale,
+                                    result.consolidation_proposals,
+                                    result.deferred_expirations
                                 );
                             }
                         }
@@ -94,6 +111,9 @@ pub fn run() {
             commands::memory_confirm,
             commands::memory_reindex,
             commands::memory_maintenance_run,
+            commands::memory_operations_list,
+            commands::memory_retrieval_benchmark,
+            commands::memory_orbit_map,
             commands::skills_distill,
         ])
         .run(tauri::generate_context!())

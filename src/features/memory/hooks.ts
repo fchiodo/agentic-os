@@ -7,10 +7,13 @@ import {
   memoryAnswerFeedback,
   memoryConfirm,
   memoryMaintenanceRun,
+  memoryOperationsList,
+  memoryOrbitMap,
   memoryProposalsDecide,
   memoryProposalsList,
   memoryRead,
   memoryReindex,
+  memoryRetrievalBenchmark,
   memorySaveManual,
   memorySearch,
   memoryTree,
@@ -28,6 +31,8 @@ export const memoryTreeQueryKey = ['memory', 'tree'] as const
 export const memorySearchQueryKey = ['memory', 'search'] as const
 export const memoryProposalsQueryKey = ['memory', 'proposals'] as const
 export const memoryDocumentImportsQueryKey = ['memory', 'document-imports'] as const
+export const memoryOrbitQueryKey = ['memory', 'orbit'] as const
+export const memoryOperationsQueryKey = ['memory', 'operations'] as const
 
 export function useMemoryTree(domain?: string) {
   return useQuery({
@@ -100,6 +105,7 @@ export function useMemoryImportDocument() {
     mutationFn: (request: DocumentImportRequest) => memoryImportDocument(request),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoryDocumentImportsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryOrbitQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
     },
   })
@@ -114,6 +120,7 @@ export function useMemorySaveManual() {
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryDocumentImportsQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryOrbitQueryKey })
     },
   })
 }
@@ -124,6 +131,7 @@ export function useMemoryProposalsDecide() {
     mutationFn: (request: ProposalDecideRequest) => memoryProposalsDecide(request),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryOrbitQueryKey })
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
       void queryClient.invalidateQueries({ queryKey: memoryDocumentImportsQueryKey })
@@ -137,6 +145,7 @@ export function useMemoryConfirm() {
     mutationFn: (id: string) => memoryConfirm(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryOrbitQueryKey })
       void queryClient.invalidateQueries({ queryKey: ['memory', 'read'] })
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
     },
@@ -150,6 +159,7 @@ export function useMemoryReindex() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryOrbitQueryKey })
     },
   })
 }
@@ -161,7 +171,27 @@ export function useMemoryMaintenanceRun() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoryTreeQueryKey })
       void queryClient.invalidateQueries({ queryKey: memorySearchQueryKey })
+      void queryClient.invalidateQueries({ queryKey: memoryOrbitQueryKey })
     },
+  })
+}
+
+export function useMemoryOperations() {
+  return useQuery({
+    queryKey: memoryOperationsQueryKey,
+    queryFn: memoryOperationsList,
+    refetchInterval: 30_000,
+  })
+}
+
+export function useMemoryRetrievalBenchmark() {
+  return useMutation({ mutationFn: memoryRetrievalBenchmark })
+}
+
+export function useMemoryOrbitMap(domain?: string, includeSensitive = false) {
+  return useQuery({
+    queryKey: [...memoryOrbitQueryKey, domain, includeSensitive],
+    queryFn: () => memoryOrbitMap(domain, includeSensitive),
   })
 }
 

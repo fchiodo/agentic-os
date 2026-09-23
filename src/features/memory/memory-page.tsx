@@ -9,7 +9,9 @@ import {
   FileText,
   Flag,
   FolderOpen,
+  Gauge,
   MessageCircleQuestion,
+  Network,
   Plus,
   Save,
   Search,
@@ -20,7 +22,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
-import { type FormEvent, useCallback, useMemo, useState } from 'react'
+import { lazy, Suspense, type FormEvent, useCallback, useMemo, useState } from 'react'
 import { DiffView } from '@/components/ui/diff-view'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { DocumentImportPanel } from '@/features/memory/document-import-panel'
@@ -29,10 +31,12 @@ import {
   useMemoryAnswerFeedback,
   useMemoryConfirm,
   useMemoryMaintenanceRun,
+  useMemoryOperations,
   useMemoryProposals,
   useMemoryProposalsDecide,
   useMemoryRead,
   useMemoryReindex,
+  useMemoryRetrievalBenchmark,
   useMemorySaveManual,
   useMemorySearch,
   useMemoryTree,
@@ -45,6 +49,8 @@ import type {
   VaultNode,
 } from '@/features/memory/schema'
 import { formatCompactNumber, formatRelativeTime } from '@/lib/format'
+
+const OrbitMapView = lazy(() => import('@/features/memory/orbit-map').then((module) => ({ default: module.OrbitMapView })))
 
 const DOMAINS = ['work', 'planphysique', 'personal', 'family', 'finance', 'research'] as const
 
@@ -201,11 +207,16 @@ function MemoryReader({ path, onClose }: { path: string; onClose: () => void }) 
             <div><dt>Confirmations</dt><dd>{fm.confirmations ?? 0}</dd></div>
             <div><dt>Provenance</dt><dd>{fm.provenance.source}</dd></div>
             <div><dt>Created</dt><dd>{new Date(fm.created).toLocaleDateString()}</dd></div>
+            {fm.validFrom && <div><dt>Valid from</dt><dd>{fm.validFrom}</dd></div>}
+            {fm.validUntil && <div><dt>Valid until</dt><dd>{fm.validUntil}</dd></div>}
+            {fm.supersedes && <div><dt>Supersedes</dt><dd className="mono">{fm.supersedes}</dd></div>}
+            {fm.supersededBy && <div><dt>Superseded by</dt><dd className="mono">{fm.supersededBy}</dd></div>}
             {fm.staleAfterDays && <div><dt>Stale after</dt><dd>{fm.staleAfterDays}d</dd></div>}
             {fm.expires && <div><dt>Expires</dt><dd>{fm.expires}</dd></div>}
             {data.gitLastCommit && <div><dt>Git</dt><dd className="mono">{data.gitLastCommit}</dd></div>}
           </dl>
           {fm.tags.length > 0 && <div className="tag-row">{fm.tags.map((tag) => <span className="tag-chip" key={tag}>{tag}</span>)}</div>}
+          {fm.sources.length > 0 && <div className="memory-source-chain"><strong>Original sources</strong>{fm.sources.map((source) => <code key={source} title={source}>{source}</code>)}</div>}
         </>
       )}
 
@@ -452,6 +463,7 @@ function ProposalCard({ proposal, onDecide }: { proposal: MemoryWriteProposal; o
 }
 
 export function MemoryPage() {
+  const [view, setView] = useState<'library' | 'map'>('library')
   const [searchText, setSearchText] = useState('')
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [domainFilter, setDomainFilter] = useState<string | undefined>()
@@ -467,14 +479,38 @@ export function MemoryPage() {
   const decideMutation = useMemoryProposalsDecide()
   const reindexMutation = useMemoryReindex()
   const maintenanceMutation = useMemoryMaintenanceRun()
+  const operationsQuery = useMemoryOperations()
+  const benchmarkMutation = useMemoryRetrievalBenchmark()
 
   const pending = useMemo(() => proposalsQuery.data?.filter((proposal) => proposal.status === 'pending') ?? [], [proposalsQuery.data])
+  const operationsNeedingAttention = useMemo(() => operationsQuery.data?.filter((operation) => operation.status === 'needs_attention') ?? [], [operationsQuery.data])
   const activity = useMemo(() => proposalsQuery.data?.filter((proposal) => proposal.status !== 'pending') ?? [], [proposalsQuery.data])
   const visibleProposals = railTab === 'pending' ? pending : activity
-  const selectPath = useCallback((path: string) => { setSelectedPath(path); setShowComposer(false); setShowImporter(false) }, [])
+  const selectPath = useCallback((path: string) => {
+    setSelectedPath(path)
+    setShowComposer(false)
+    setShowImporter(false)
+    setView('library')
+  }, [])
+  const closeReader = () => {
+    setSelectedPath(null)
+  }
+
+  const selectView = (nextView: 'library' | 'map') => {
+    setView(nextView)
+  }
 
   return (
     <section className="page-section memory-page">
+      <div className="surface memory-view-header">
+        <div><p className="eyebrow">Second Brain</p><h2>{view === 'map' ? 'Operational map' : 'Governed memory'}</h2></div>
+        <div className="memory-view-switch" aria-label="Memory view">
+          <button className={view === 'library' ? 'is-active' : ''} onClick={() => selectView('library')} type="button"><Brain aria-hidden="true" size={15} />Library</button>
+          <button className={view === 'map' ? 'is-active' : ''} onClick={() => selectView('map')} type="button"><Network aria-hidden="true" size={15} />Map</button>
+        </div>
+      </div>
+      {operationsNeedingAttention.length > 0 && <div className="inline-error" role="alert">{operationsNeedingAttention.length} interrupted memory operation{operationsNeedingAttention.length === 1 ? '' : 's'} need attention. The journal has preserved the exact stage and no conflicting state was guessed.</div>}
+      {view === 'map' ? <Suspense fallback={<div className="orbit-loading"><Network aria-hidden="true" size={34} /><p>Loading graph renderer…</p></div>}><OrbitMapView onOpenMemory={selectPath} /></Suspense> : (
       <div className="memory-layout">
         <aside className="memory-sidebar surface">
           <div className="panel-heading">
@@ -497,14 +533,17 @@ export function MemoryPage() {
           <div className="memory-sidebar-tools">
             <button disabled={reindexMutation.isPending} onClick={() => reindexMutation.mutate()} type="button"><ArchiveRestore aria-hidden="true" size={14} />{reindexMutation.isPending ? 'Indexing…' : 'Reindex'}</button>
             <button disabled={maintenanceMutation.isPending} onClick={() => maintenanceMutation.mutate()} type="button"><Wrench aria-hidden="true" size={14} />{maintenanceMutation.isPending ? 'Running…' : 'Maintenance'}</button>
+            <button disabled={benchmarkMutation.isPending} onClick={() => benchmarkMutation.mutate()} type="button"><Gauge aria-hidden="true" size={14} />{benchmarkMutation.isPending ? 'Measuring…' : 'Benchmark'}</button>
           </div>
-          {(reindexMutation.data || maintenanceMutation.data) && <div className="memory-maintenance-result" role="status">{reindexMutation.data && `${reindexMutation.data.indexed} indexed · ${reindexMutation.data.drifted} drifted · ${reindexMutation.data.orphaned} orphaned`}{maintenanceMutation.data && `${maintenanceMutation.data.expired} archived · ${maintenanceMutation.data.markedStale} stale`}</div>}
+          {(reindexMutation.data || maintenanceMutation.data) && <div className="memory-maintenance-result" role="status">{reindexMutation.data && `${reindexMutation.data.indexed} indexed · ${reindexMutation.data.drifted} drifted · ${reindexMutation.data.orphaned} orphaned`}{maintenanceMutation.data && `${maintenanceMutation.data.expired} archived · ${maintenanceMutation.data.markedStale} stale · ${maintenanceMutation.data.consolidationProposals} consolidation proposals · ${maintenanceMutation.data.deferredExpirations} deferred`}</div>}
           {(reindexMutation.error || maintenanceMutation.error) && <div className="inline-error" role="alert">{errorMessage(reindexMutation.error ?? maintenanceMutation.error)}</div>}
+          {benchmarkMutation.data && <div className="memory-maintenance-result" role="status">{benchmarkMutation.data.cases} cases · FTS hit@5 {(benchmarkMutation.data.baseline.sourceHitRateAtFive * 100).toFixed(0)}% → candidate {(benchmarkMutation.data.candidate.sourceHitRateAtFive * 100).toFixed(0)}% · p95 {benchmarkMutation.data.baseline.latencyP95Ms.toFixed(1)} → {benchmarkMutation.data.candidate.latencyP95Ms.toFixed(1)} ms</div>}
+          {benchmarkMutation.error && <div className="inline-error" role="alert">{errorMessage(benchmarkMutation.error)}</div>}
           <div className="memory-sidebar-footer"><span className="row-subtle">{formatCompactNumber(proposalsQuery.data?.length ?? 0)} writes</span>{pending.length > 0 && <StatusBadge label={`${pending.length} pending`} tone="warning" />}</div>
         </aside>
 
         <main className="memory-main">
-          {showImporter ? <DocumentImportPanel defaultDomain={domainFilter} onClose={() => setShowImporter(false)} /> : showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={() => setSelectedPath(null)} path={selectedPath} /> : (
+          {showImporter ? <DocumentImportPanel defaultDomain={domainFilter} onClose={() => setShowImporter(false)} /> : showComposer ? <SaveMemoryForm defaultDomain={domainFilter} onClose={() => setShowComposer(false)} /> : selectedPath ? <MemoryReader onClose={closeReader} path={selectedPath} /> : (
             <>
               <div className="surface memory-mode-bar">
                 <div className="memory-mode-switch"><button className={mode === 'search' ? 'is-active' : ''} onClick={() => setMode('search')} type="button"><Search aria-hidden="true" size={15} />Search</button><button className={mode === 'ask' ? 'is-active' : ''} onClick={() => setMode('ask')} type="button"><MessageCircleQuestion aria-hidden="true" size={15} />Ask</button></div>
@@ -536,6 +575,7 @@ export function MemoryPage() {
           </div>
         </aside>
       </div>
+      )}
     </section>
   )
 }
