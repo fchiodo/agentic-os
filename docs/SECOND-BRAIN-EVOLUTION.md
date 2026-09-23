@@ -75,7 +75,12 @@ Sources:
   prove execution. A catalog relation becomes `observed` only from an
   executor-emitted `executionRefs` envelope containing `catalogId`, `kind`,
   `operation`, `outcome` and a valid RFC 3339 `occurredAt`. Incomplete envelopes
-  are ignored as observations.
+  are ignored as observations. The Codex harness now produces that envelope
+  for terminal structured `mcp_tool_call` events when the emitted server name
+  resolves to exactly one MCP catalog entry. Ambiguous names fail closed. The
+  same envelope is stored in the hash-chained audit and becomes a direct
+  observed AgenticOS-to-application relation; text-derived command matches stay
+  inferred.
 
 Domain and sensitivity filtering happens in Rust before memory nodes, edges,
 previews and memory counts are returned. Sensitive memory is hidden by default.
@@ -110,7 +115,9 @@ from every new graph structure, so expansion, collapse and refresh preserve the
 selected node and use its current neighbors. With `prefers-reduced-motion`,
 layout and camera changes are applied immediately. Ring guides are graph
 geometry, so they pan and zoom with the nodes instead of being an unrelated CSS
-background. No continuous animation was added.
+background. Focus reads normalized node display coordinates from Sigma and is
+requested only by a node selection; a data refresh therefore preserves manual
+pan and zoom. No continuous animation was added.
 
 ## Promotion gates for retrieval experiments
 
@@ -151,7 +158,10 @@ reports that state rather than fabricating title-as-query examples.
 The deterministic Ask suite separately covers citation presence, negation,
 number/date and named-subject substitutions, same-token role reversals, numbers
 attached to the wrong subject, and role reversal for predicates outside the
-small recognized relation vocabulary. Progressive retrieval is excluded from
+small recognized relation vocabulary. For an unrecognized relation, ordered
+overlap only locates a candidate sentence: Ask exposes the complete source
+sentence or abstains, preserving attribution and modal uncertainty such as
+“said” and “might”. Progressive retrieval is excluded from
 the zero-outbound-cost benchmark and remains measurable from audited Ask runs
 because it may add model tokens.
 

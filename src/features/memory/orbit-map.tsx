@@ -240,6 +240,7 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
   const [search, setSearch] = useState('')
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string>('core:agentic-os')
+  const [focusRequest, setFocusRequest] = useState<{ id: string; aggregate: boolean } | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [livePulse, setLivePulse] = useState(false)
   const [reducedMotion, setReducedMotion] = useState(
@@ -336,6 +337,7 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
       if (node.startsWith('__')) return
       const selected = nodeByIdRef.current.get(node)
       setSelectedId(node)
+      setFocusRequest({ id: node, aggregate: Boolean(selected?.aggregate) })
       setSelectedEdgeId(null)
       if (selected?.aggregate) {
         setExpandedGroups((current) => {
@@ -469,13 +471,18 @@ export function OrbitMapView({ onOpenMemory }: { onOpenMemory: (path: string) =>
   }, [activeSelectedId, livePulse, nextGraph])
 
   useEffect(() => {
+    if (!focusRequest) return
     const renderer = rendererRef.current
-    if (!renderer || !nextGraph.hasNode(activeSelectedId)) return
-    const attributes = nextGraph.getNodeAttributes(activeSelectedId)
-    const target = { x: Number(attributes.x), y: Number(attributes.y), ratio: selectedNode?.aggregate ? 0.72 : 0.55 }
+    if (!renderer) return
+    const display = renderer.getNodeDisplayData(focusRequest.id)
+    if (!display) return
+    // Sigma's camera consumes framed/normalized graph coordinates. Display
+    // data has already passed through Sigma's normalization function; raw
+    // radial layout coordinates (11..41) have not.
+    const target = { x: display.x, y: display.y, ratio: focusRequest.aggregate ? 0.72 : 0.55 }
     if (reducedMotion) renderer.getCamera().setState(target)
     else renderer.getCamera().animate(target, { duration: 260 })
-  }, [activeSelectedId, nextGraph, reducedMotion, selectedNode?.aggregate])
+  }, [focusRequest, reducedMotion])
 
   const relations = useMemo(() => {
     if (!orbitQuery.data || !selectedNode) return []

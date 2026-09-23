@@ -42,7 +42,9 @@ cargo test memory::retrieval::tests::benchmark_uses_confirmed_questions_and_the_
 The deterministic Ask suite additionally rejects uncited claims, polarity
 reversals, changed subjects/numbers/dates, same-token role reversals, a number
 attached to the wrong subject, and role reversal for predicates outside the
-recognized relation list. The orbital suite proves that text-derived catalog
-references remain inferred and only complete executor envelopes become
-observed. Full native and frontend verification for this run: 60 Rust tests and
-7 Vitest tests passed; TypeScript build and ESLint also passed.
+recognized relation list. It also verifies that attribution and uncertainty are
+retained by returning the full source sentence for unknown predicates. The
+orbital suite proves that text-derived catalog references remain inferred and
+includes an execution-to-audit-to-observed-relation test for a completed MCP
+tool event. Full native and frontend verification for this run: 62 Rust tests
+and 8 Vitest tests passed; TypeScript build and ESLint also passed.

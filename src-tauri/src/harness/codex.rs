@@ -577,7 +577,8 @@ fn record(
     tokens: Option<i64>,
     cost_usd: Option<f64>,
 ) {
-    let detail = enrich_structured_refs(detail, audit_kind);
+    let occurred_at = chrono::Utc::now().to_rfc3339();
+    let detail = enrich_structured_refs(detail, audit_kind, &occurred_at);
     let seq = match orchestrator::append_event(db, task_id, event_kind, detail.clone()) {
         Ok(seq) => seq,
         Err(err) => {
@@ -595,7 +596,7 @@ fn record(
     let event = crate::control_models::TaskEvent {
         task_id: task_id.to_string(),
         seq,
-        ts: chrono::Utc::now().to_rfc3339(),
+        ts: occurred_at,
         kind: event_kind.to_string(),
         payload: detail,
     };
@@ -605,7 +606,21 @@ fn record(
     }
 }
 
-fn enrich_structured_refs(mut detail: Value, audit_kind: &str) -> Value {
+fn enrich_structured_refs(detail: Value, audit_kind: &str, occurred_at: &str) -> Value {
+    let catalog = EVENT_CATALOG.get_or_init(|| {
+        crate::discovery::discover()
+            .map(|discovery| discovery.catalog.items)
+            .unwrap_or_default()
+    });
+    enrich_structured_refs_with_catalog(detail, audit_kind, catalog, occurred_at)
+}
+
+pub(crate) fn enrich_structured_refs_with_catalog(
+    mut detail: Value,
+    audit_kind: &str,
+    catalog: &[crate::models::CatalogItem],
+    occurred_at: &str,
+) -> Value {
     if audit_kind != "tool_call" {
         return detail;
     }
@@ -624,11 +639,7 @@ fn enrich_structured_refs(mut detail: Value, audit_kind: &str) -> Value {
     // These are catalog lookup hints only. Even an exact path can appear in a
     // command that merely prints or inspects it, so this adapter must never
     // manufacture an observed execution reference from command text.
-    let catalog = EVENT_CATALOG.get_or_init(|| {
-        crate::discovery::discover()
-            .map(|discovery| discovery.catalog.items)
-            .unwrap_or_default()
-    });
+    let execution_refs = executor_execution_refs(object, catalog, occurred_at);
     let mut refs = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for item in catalog {
@@ -672,7 +683,68 @@ fn enrich_structured_refs(mut detail: Value, audit_kind: &str) -> Value {
     if !refs.is_empty() {
         object.insert("catalogRefs".to_string(), Value::Array(refs));
     }
+    if !execution_refs.is_empty() {
+        let stored = object
+            .entry("executionRefs".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(stored) = stored.as_array_mut() {
+            stored.extend(execution_refs);
+        }
+    }
     detail
+}
+
+/// Convert only a terminal, structured MCP execution event into observed
+/// catalog evidence. Command/path text never enters this path. Ambiguous
+/// server names fail closed instead of claiming that a connector ran.
+fn executor_execution_refs(
+    object: &serde_json::Map<String, Value>,
+    catalog: &[crate::models::CatalogItem],
+    occurred_at: &str,
+) -> Vec<Value> {
+    let root_type = detail_pointer_string(object, "/type").unwrap_or_default();
+    let item_type = detail_pointer_string(object, "/item/type").unwrap_or_default();
+    if root_type != "item.completed" || item_type != "mcp_tool_call" {
+        return Vec::new();
+    }
+    let Some(server) = ["/item/server", "/item/serverName", "/item/server_name"]
+        .iter()
+        .find_map(|pointer| detail_pointer_string(object, pointer))
+    else {
+        return Vec::new();
+    };
+    let Some(tool) = ["/item/tool", "/item/toolName", "/item/name"]
+        .iter()
+        .find_map(|pointer| detail_pointer_string(object, pointer))
+    else {
+        return Vec::new();
+    };
+    let matches = catalog
+        .iter()
+        .filter(|item| item.kind == crate::models::CatalogKind::Mcp)
+        .filter(|item| {
+            item.name.eq_ignore_ascii_case(&server)
+                || item.display_name.eq_ignore_ascii_case(&server)
+        })
+        .collect::<Vec<_>>();
+    let [item] = matches.as_slice() else {
+        return Vec::new();
+    };
+    let status = detail_pointer_string(object, "/item/status").unwrap_or_default();
+    let outcome = if matches!(status.as_str(), "failed" | "failure" | "error") {
+        "failed"
+    } else {
+        "succeeded"
+    };
+    vec![json!({
+        "catalogId": item.id,
+        "kind": "application",
+        "operation": format!("mcp_tool:{tool}"),
+        "outcome": outcome,
+        "occurredAt": occurred_at,
+        "executionId": detail_pointer_string(object, "/item/id"),
+        "producer": "codex_harness",
+    })]
 }
 
 fn detail_pointer_string(object: &serde_json::Map<String, Value>, pointer: &str) -> Option<String> {

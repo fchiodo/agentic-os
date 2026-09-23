@@ -957,6 +957,7 @@ Answer the QUESTION in the same language as the question. Return exactly one JSO
 Rules:
 - Every claim must directly answer the question and must cite at least one evidence id.
 - Preserve names, numbers, dates, endpoint categories, and technical terms exactly.
+- Preserve attribution and uncertainty exactly (for example: said, reported, may, might, could).
 - Prefer a concise synthesis over copying whole passages.
 - Do not include citation markers in claim text; the application adds them.
 - Return at most {MAX_CLAIMS} claims, each under {MAX_CLAIM_CHARS} characters.
@@ -1020,15 +1021,15 @@ fn verify_synthesis(
             .into_iter()
             .filter(|id| *id > 0 && *id <= evidence.len())
             .collect::<BTreeSet<_>>();
-        if text.is_empty()
-            || text.chars().count() > MAX_CLAIM_CHARS
-            || citation_ids.is_empty()
-            || !claim_supported(text, &citation_ids, evidence)
-        {
+        if text.is_empty() || text.chars().count() > MAX_CLAIM_CHARS || citation_ids.is_empty() {
             rejected_claims += 1;
             continue;
         }
-        accepted.push((text.to_string(), citation_ids));
+        let Some(verified_text) = verified_claim_text(text, &citation_ids, evidence) else {
+            rejected_claims += 1;
+            continue;
+        };
+        accepted.push((verified_text, citation_ids));
     }
 
     if accepted.is_empty() {
@@ -1129,14 +1130,33 @@ fn verify_synthesis(
     }
 }
 
+#[cfg(test)]
 fn claim_supported(
     claim: &str,
     citation_ids: &BTreeSet<usize>,
     evidence: &[EvidencePassage],
 ) -> bool {
+    verified_claim_text(claim, citation_ids, evidence).is_some_and(|verified| {
+        verified.trim_end_matches(|character: char| {
+            character.is_whitespace() || ".!?".contains(character)
+        }) == claim.trim().trim_end_matches(|character: char| {
+            character.is_whitespace() || ".!?".contains(character)
+        })
+    })
+}
+
+/// Return only text that is safe to expose in the answer. A claim with a
+/// recognized relation can keep its verified wording. For relations outside
+/// the deterministic vocabulary, the model paraphrase is replaced with the
+/// complete source sentence so attribution and modality cannot disappear.
+fn verified_claim_text(
+    claim: &str,
+    citation_ids: &BTreeSet<usize>,
+    evidence: &[EvidencePassage],
+) -> Option<String> {
     let claim_terms = support_terms(claim);
     if claim_terms.is_empty() {
-        return false;
+        return None;
     }
     let evidence_terms = citation_ids
         .iter()
@@ -1144,7 +1164,7 @@ fn claim_supported(
         .flat_map(|passage| support_terms(&passage.text))
         .collect::<BTreeSet<_>>();
     if !claim_terms.is_subset(&evidence_terms) {
-        return false;
+        return None;
     }
 
     let claim_numbers = numeric_tokens(claim);
@@ -1156,26 +1176,34 @@ fn claim_supported(
         .iter()
         .filter_map(|id| evidence.get(id - 1))
         .flat_map(|passage| evidence_sentences(&passage.text))
-        .any(|sentence| {
+        .find_map(|sentence| {
             let sentence_terms = support_terms(sentence);
             let covered_terms = claim_terms.intersection(&sentence_terms).count();
             let coverage = covered_terms as f64 / claim_terms.len().max(1) as f64;
-            coverage >= 0.5
+            let common_constraints_hold = coverage >= 0.5
                 && claim_numbers.is_subset(&numeric_tokens(sentence))
                 && claim_subjects.is_subset(&subject_tokens(sentence))
-                && claim_is_negative == has_negation(sentence)
-                && (if claim_frames.is_empty() {
-                    // An unknown predicate is not evidence-free. Require the
-                    // meaningful claim tokens to occur in source order so a
-                    // lexical bag-of-words match cannot reverse its roles.
-                    is_ordered_subsequence(&claim_sequence, &support_sequence(sentence))
-                } else {
-                    claim_frames.iter().all(|claim_frame| {
+                && claim_is_negative == has_negation(sentence);
+            if !common_constraints_hold {
+                return None;
+            }
+            if claim_frames.is_empty() {
+                // Ordered overlap selects a source sentence; it is not treated
+                // as semantic proof. Expose that sentence verbatim (or abstain
+                // when it exceeds the answer claim limit).
+                (is_ordered_subsequence(&claim_sequence, &support_sequence(sentence))
+                    && sentence.chars().count() <= MAX_CLAIM_CHARS)
+                    .then(|| sentence.trim().to_string())
+            } else {
+                claim_frames
+                    .iter()
+                    .all(|claim_frame| {
                         relation_frames(sentence)
                             .iter()
                             .any(|evidence_frame| evidence_frame.supports(claim_frame))
                     })
-                })
+                    .then(|| claim.trim().to_string())
+            }
         })
 }
 
@@ -1265,7 +1293,7 @@ fn frame_terms(tokens: &[String]) -> BTreeSet<String> {
 
 fn evidence_sentences(value: &str) -> impl Iterator<Item = &str> {
     value
-        .split(['\n', '.', '!', '?', ';'])
+        .split_inclusive(|character: char| matches!(character, '\n' | '.' | '!' | '?' | ';'))
         .map(str::trim)
         .filter(|sentence| !sentence.is_empty())
 }
@@ -1797,6 +1825,48 @@ mod tests {
             &BTreeSet::from([1]),
             &evidence,
         ));
+    }
+
+    #[test]
+    fn verifier_preserves_attribution_and_modality_for_unknown_relations() {
+        for (source, expected) in [
+            ("Alice said Carol paid Bob.", "Alice said Carol paid Bob."),
+            ("Alice might have paid Bob.", "Alice might have paid Bob."),
+        ] {
+            let evidence = vec![passage(
+                "source:1:10",
+                "_sources/work/payments.md",
+                source,
+                0.91,
+            )];
+            let citations = BTreeSet::from([1]);
+            assert!(!claim_supported("Alice paid Bob.", &citations, &evidence));
+            assert_eq!(
+                verified_claim_text("Alice paid Bob.", &citations, &evidence).as_deref(),
+                Some(expected),
+            );
+
+            let answer = verify_synthesis(
+                "00000000-0000-4000-8000-000000000099",
+                &request(),
+                "2026-09-23T12:00:00Z",
+                &evidence,
+                RawSynthesis {
+                    abstained: false,
+                    claims: vec![RawClaim {
+                        text: "Alice paid Bob.".to_string(),
+                        citations: vec![1],
+                    }],
+                },
+                &mut Vec::new(),
+            );
+            assert!(!answer.abstained);
+            assert_eq!(
+                answer.answer,
+                format!("{} [1].", expected.trim_end_matches('.'))
+            );
+            assert!(!answer.answer.starts_with("Alice paid Bob ["));
+        }
     }
 
     #[test]

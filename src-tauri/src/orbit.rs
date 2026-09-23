@@ -559,6 +559,45 @@ fn add_observed_relations(
         })
         .collect::<HashMap<_, _>>();
 
+    // Executor-qualified events are observable even when the task cannot be
+    // attributed to a catalog routine. Keep that fact as a direct AgenticOS
+    // relation; routine-specific relations below still require both endpoints
+    // to be identified independently.
+    for trace in traces.iter().filter(|trace| trace.kind == "tool_call") {
+        for (relation, kind, items) in [
+            ("executed", "skill", skills),
+            ("executed", "routine", routines),
+            ("used", "application", applications),
+        ] {
+            for reference in execution_refs(&trace.detail, kind) {
+                let Some(item) = items.iter().find(|item| item.id == reference.catalog_id) else {
+                    continue;
+                };
+                let target = format!("{kind}:{}", item.id);
+                if !nodes.iter().any(|node| node.id == target) {
+                    continue;
+                }
+                merge_edge(
+                    edges,
+                    &mut edge_index,
+                    "core:agentic-os",
+                    &target,
+                    relation,
+                    "observed",
+                    OrbitProvenance {
+                        kind: "execution_event".to_string(),
+                        reference: format!("audit:{}", trace.run_id),
+                        detail: format!(
+                            "{}: {} ({})",
+                            reference.operation, item.display_name, reference.outcome
+                        ),
+                        ts: Some(reference.occurred_at),
+                    },
+                );
+            }
+        }
+    }
+
     for task in tasks {
         let task_traces = traces
             .iter()
@@ -1339,6 +1378,55 @@ mod tests {
         }
     }
 
+    fn application() -> CatalogItem {
+        CatalogItem {
+            id: "research-mcp".to_string(),
+            kind: CatalogKind::Mcp,
+            name: "research-server".to_string(),
+            display_name: "Research server".to_string(),
+            summary: None,
+            path: "/vault/connectors/research.json".to_string(),
+            origin: "workspace".to_string(),
+            group: "Research".to_string(),
+            tags: vec!["domain:research".to_string()],
+            version: None,
+            category: Some("search".to_string()),
+            updated_at: None,
+            provider: "local".to_string(),
+            detector: "test".to_string(),
+            entrypoint: None,
+            confidence: 1.0,
+        }
+    }
+
+    fn core_node() -> OrbitNode {
+        OrbitNode {
+            id: "core:agentic-os".to_string(),
+            kind: "core".to_string(),
+            ring: 0,
+            label: "AgenticOS".to_string(),
+            subtitle: None,
+            domain: None,
+            sensitivity: None,
+            status: "active".to_string(),
+            operational_state: "ready".to_string(),
+            catalog_state: "not_applicable".to_string(),
+            usage_state: "not_applicable".to_string(),
+            connection_state: "not_applicable".to_string(),
+            domains: Vec::new(),
+            capabilities: Vec::new(),
+            last_activity_at: None,
+            source_path: None,
+            source_ref: "runtime:agentic-os".to_string(),
+            group_id: None,
+            count: 1,
+            preview: None,
+            updated_at: None,
+            actions: Vec::new(),
+            aggregate: false,
+        }
+    }
+
     fn task() -> TaskRecord {
         TaskRecord {
             id: "task-1".to_string(),
@@ -1410,6 +1498,79 @@ mod tests {
             }]
         });
         assert!(execution_refs(&detail, "routine").is_empty());
+    }
+
+    #[test]
+    fn completed_mcp_execution_flows_through_audit_to_an_observed_relation() {
+        let db_path = std::env::temp_dir().join(format!(
+            "agentic-os-orbit-observed-execution-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Db::open(&db_path).unwrap();
+        let application = application();
+        let occurred_at = "2026-09-23T10:00:00Z";
+        let detail = crate::harness::codex::enrich_structured_refs_with_catalog(
+            serde_json::json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "mcp-call-1",
+                    "type": "mcp_tool_call",
+                    "server": "research-server",
+                    "tool": "search",
+                    "status": "completed"
+                }
+            }),
+            "tool_call",
+            std::slice::from_ref(&application),
+            occurred_at,
+        );
+        crate::audit::append_row(
+            &db,
+            "run-1",
+            "task-1",
+            "tool_call",
+            "MCP search completed",
+            &detail,
+            None,
+            None,
+        )
+        .unwrap();
+        let persisted = crate::audit::read_trace(&db, "run-1").unwrap();
+        assert_eq!(
+            persisted[0].detail["executionRefs"][0]["catalogId"],
+            "research-mcp"
+        );
+
+        let mut nodes = vec![core_node()];
+        let mut edges = Vec::new();
+        add_catalog_ring(
+            &mut nodes,
+            &mut edges,
+            std::slice::from_ref(&application),
+            4,
+            "application",
+        );
+        let traces = load_traces(&db).unwrap();
+        add_observed_relations(
+            &nodes,
+            &[],
+            &[],
+            std::slice::from_ref(&application),
+            &[],
+            &traces,
+            &mut edges,
+        )
+        .unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.source == "core:agentic-os"
+                && edge.target == "application:research-mcp"
+                && edge.relation == "used"
+                && edge.evidence == "observed"
+                && edge.provenance[0].ts.as_deref() == Some(occurred_at)
+        }));
+
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]
