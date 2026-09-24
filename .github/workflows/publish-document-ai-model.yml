@@ -25,8 +25,9 @@ jobs:
       - name: Create draft release
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            is_draft="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .draft)"
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | jq -r --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag) | .id')"
+          if [[ -n "$release_id" ]]; then
+            is_draft="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq .draft)"
             if [[ "$is_draft" != "true" ]]; then
               echo "Release $RELEASE_TAG is already published; refusing to overwrite it."
               exit 1
@@ -83,10 +84,20 @@ jobs:
         run: |
           set -euo pipefail
           manifest="tools/ocr-sidecar/model-manifest.json"
-          expected="$(jq -er --arg model "$MODEL_KEY" '.models[$model].files | length' "$manifest")"
-          actual="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.assets | length')"
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | jq -er --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag) | .id')"
+          expected="$(jq -cS --arg model "$MODEL_KEY" '[.models[$model].files[] | {name: .path, size: .sizeBytes}] | sort_by(.name)' "$manifest")"
+          actual="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '[.assets[] | {name, size}] | sort_by(.name)')"
           if [[ "$actual" != "$expected" ]]; then
-            echo "Release inventory mismatch: expected $expected assets, found $actual"
+            echo "Release inventory does not match the pinned manifest."
             exit 1
           fi
-          gh release edit "$RELEASE_TAG" --draft=false --latest=false
+          pending="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '[.assets[] | select(.state != "uploaded")] | length')"
+          if [[ "$pending" != "0" ]]; then
+            echo "Release contains assets that have not finished uploading."
+            exit 1
+          fi
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false \
+            -f make_latest=false >/dev/null
