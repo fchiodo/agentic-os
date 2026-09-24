@@ -2195,6 +2195,9 @@ button.catalog-row:hover {
 .memory-page {
   display: grid;
   gap: 18px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
   padding: 0;
 }
 
@@ -2306,6 +2309,8 @@ button.catalog-row:hover {
   display: grid;
   gap: 20px;
   align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
   min-height: 100%;
   transition: grid-template-columns 220ms ease;
 }
@@ -2405,6 +2410,8 @@ button.catalog-row:hover {
   gap: 16px;
   align-content: start;
   min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
@@ -3378,6 +3385,9 @@ button.catalog-row:hover {
 .memory-ask {
   display: grid;
   gap: 16px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .memory-ask-form {
@@ -3469,6 +3479,9 @@ button.catalog-row:hover {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
   padding: 22px;
   border: 1px solid #e7e2d7;
   border-radius: 14px;
@@ -3490,8 +3503,22 @@ button.catalog-row:hover {
 
 .memory-answer-header,
 .memory-answer-footer {
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
+}
+
+.memory-answer-header,
+.memory-answer-footer,
+.memory-answer-title,
+.memory-answer-flow,
+.memory-answer-claim,
+.memory-answer-copy,
+.memory-answer-warning,
+.memory-citations,
+.memory-citations button {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .memory-answer-title {
@@ -3541,6 +3568,8 @@ button.catalog-row:hover {
 .memory-answer-copy {
   margin: 0;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   color: #2c2822;
   font-size: 15.5px;
   line-height: 1.62;
@@ -3556,6 +3585,8 @@ button.catalog-row:hover {
   position: relative;
   margin: 0;
   padding-left: 18px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   color: #2c2822;
   font-size: 15.5px;
   line-height: 1.62;
@@ -3581,6 +3612,9 @@ button.catalog-row:hover {
   background: #f0ece2;
   font-family: var(--mono);
   font-size: 0.85em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .memory-cite-chip {
@@ -3625,6 +3659,7 @@ sup:has(> .memory-cite-chip) {
   background: rgba(179, 121, 31, 0.09);
   color: var(--slate-medium);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .memory-citations {
@@ -3646,6 +3681,7 @@ sup:has(> .memory-cite-chip) {
   display: flex;
   align-items: center;
   gap: 12px;
+  overflow: hidden;
   padding: 12px 14px;
   min-width: 0;
   border: 1px solid #ece6da;
@@ -3693,6 +3729,7 @@ sup:has(> .memory-cite-chip) {
 }
 
 .memory-citation-score {
+  flex: 0 0 auto;
   color: #7d9068;
   font-size: 12px;
   font-weight: 650;
@@ -3704,7 +3741,10 @@ sup:has(> .memory-cite-chip) {
 }
 
 .memory-answer-actions {
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .memory-answer-actions button {
@@ -3714,9 +3754,11 @@ sup:has(> .memory-cite-chip) {
 }
 
 .memory-answer-footer > span {
+  min-width: 0;
   color: #a49e90;
   font-size: 12px;
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 900px) {
