@@ -2507,6 +2507,22 @@ mod tests {
         }
     }
 
+    fn ask_audit_detail(db: &Db, answer_id: &str) -> serde_json::Value {
+        let detail = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT detail FROM audit
+                     WHERE kind = 'memory_ask' AND task_id = ?1
+                     ORDER BY id DESC LIMIT 1",
+                    rusqlite::params![answer_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .expect("Ask must append a terminal audit row");
+        serde_json::from_str(&detail).expect("Ask audit detail must be valid JSON")
+    }
+
     fn passage(id: &str, path: &str, text: &str, score: f64) -> EvidencePassage {
         EvidencePassage {
             id: id.to_string(),
@@ -2658,10 +2674,10 @@ mod tests {
     #[ignore = "requires the authorized local vault and corporate Codex provider"]
     async fn live_ask_covers_expected_list_items() {
         let db_path = std::env::var("AGENTIC_OS_LIVE_DB").expect("AGENTIC_OS_LIVE_DB");
-        let expected_path =
-            std::env::var("AGENTIC_OS_LIVE_EXPECTED_ITEMS").expect("AGENTIC_OS_LIVE_EXPECTED_ITEMS");
-        let expected_source =
-            std::env::var("AGENTIC_OS_LIVE_EXPECTED_SOURCE").expect("AGENTIC_OS_LIVE_EXPECTED_SOURCE");
+        let expected_path = std::env::var("AGENTIC_OS_LIVE_EXPECTED_ITEMS")
+            .expect("AGENTIC_OS_LIVE_EXPECTED_ITEMS");
+        let expected_source = std::env::var("AGENTIC_OS_LIVE_EXPECTED_SOURCE")
+            .expect("AGENTIC_OS_LIVE_EXPECTED_SOURCE");
         let runs = std::env::var("AGENTIC_OS_LIVE_RUNS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -2673,6 +2689,10 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(str::to_lowercase)
             .collect::<Vec<_>>();
+        assert!(
+            !expected.is_empty(),
+            "AGENTIC_OS_LIVE_EXPECTED_ITEMS must contain the manually reviewed source items"
+        );
         let db = Db::open(std::path::Path::new(&db_path)).unwrap();
 
         for run in 1..=runs {
@@ -2694,15 +2714,29 @@ mod tests {
                 .iter()
                 .filter(|item| normalized.contains(item.as_str()))
                 .count();
-            println!(
-                "LIVE_MEMORY_ASK={{\"run\":{run},\"durationMs\":{},\"expected\":{},\"covered\":{},\"abstained\":{},\"citations\":{},\"sources\":{}}}",
-                started.elapsed().as_millis(),
-                expected.len(),
-                covered,
-                answer.abstained,
-                answer.citations.len(),
-                answer.source_count,
-            );
+            let audit = ask_audit_detail(&db, &answer.id);
+            let summary = json!({
+                "run": run,
+                "durationMs": started.elapsed().as_millis(),
+                "expected": expected.len(),
+                "covered": covered,
+                "abstained": answer.abstained,
+                "citations": answer.citations.len(),
+                "sources": answer.source_count,
+                "pipelineVersion": audit.pointer("/pipelineVersion"),
+                "evidenceCandidates": audit
+                    .pointer("/retrievalTrace/evidenceCandidates")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len),
+                "rawClaims": audit.pointer("/verificationTrace/rawClaims"),
+                "acceptedClaims": audit.pointer("/verificationTrace/acceptedClaims"),
+                "rejectedClaims": audit.pointer("/verificationTrace/rejectedClaims"),
+                "outputTruncated": audit.pointer("/verificationTrace/outputTruncated"),
+                "modelCalls": audit.pointer("/modelUsage/calls"),
+                "tokens": audit.pointer("/modelUsage/tokens"),
+                "phaseLatencyMs": audit.pointer("/modelUsage/latencyMs"),
+            });
+            println!("LIVE_MEMORY_ASK={summary}");
             assert!(
                 !answer.abstained,
                 "run {run} abstained with warnings: {:?}",
@@ -3151,16 +3185,7 @@ mod tests {
             &trace,
         )
         .unwrap();
-        let detail = db
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT detail FROM audit WHERE kind = 'memory_ask' ORDER BY id DESC LIMIT 1",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(Into::into)
-            })
-            .unwrap();
+        let detail = serde_json::to_string(&ask_audit_detail(&db, &outcome.result.id)).unwrap();
 
         assert!(detail.contains(r#""pipelineVersion":"ask-p0.1""#));
         assert!(detail.contains(r#""evidenceId":"source:1:10""#));
