@@ -1,7 +1,7 @@
 # Document Converter — Phase 1/2 spike results
 
 Date: 2026-09-24
-Status: **Phase 1 and Phase 2 evidence collected; Phase 3 is gated**
+Status: **Phase 1/2 evidence collected; application integration implemented; external release gates remain**
 
 ## Decision before implementation
 
@@ -19,14 +19,22 @@ sidecar instead of starting that service. This is the only architectural
 deviation made in Phase 1/2. PaddleOCR's full document pipeline and
 PP-DocLayoutV3 were not embedded or replaced.
 
-No Tauri command, route, migration, capability, or `externalBin` entry was
-added in this phase. Enabling a half-validated binary in every desktop build
-would break the critical-gate rule and enlarge existing builds by about
-160 MiB before the model lifecycle exists.
+After the spike evidence was reviewed, the user explicitly requested complete
+application integration. The repository now includes the Tauri commands,
+route, SQLite migration, model/job managers, `OcrEngine` adapter, canonical
+model/renderers, lifecycle ownership and OCR `externalBin`. This does not turn
+unexecuted hardware or clean-machine release gates into passes.
 
 The existing Vite scripts listened on `0.0.0.0` without a documented LAN use
 case. They now bind to `127.0.0.1`, and Tauri's `devUrl` uses the same explicit
 loopback address, preserving the repository's no-exposed-ports constraint.
+
+The repository still declared Rust 1.77.2, but its already-locked Tauri 2.11.2
+dependency graph contains Edition 2024 crates that Cargo 1.77.2 cannot parse.
+That exact command was tested and failed at manifest parsing before compiling
+Agentic OS. The developer toolchain is therefore pinned to the actually tested
+Rust/Cargo 1.98.1 in `rust-toolchain.toml`; bootstrap rejects drift instead of
+silently using whichever compiler happens to be installed.
 
 ## Environment actually tested
 
@@ -82,8 +90,10 @@ Italian lines.
   6.178 seconds warm for the capped comparison.
 
 These are engineering baselines, not a statistically meaningful quality
-benchmark. Digital, mixed, multipage, rotated, corrupted/encrypted, complex
-tables, formulas, and multicolumn golden fixtures remain untested.
+benchmark. Synthetic multipage PDF parsing, invalid/unsupported inputs,
+classifier heuristics and output structure now have automated tests. Mixed,
+rotated, complex tables/formulas and multicolumn quality still need the manual
+release corpus.
 
 ## Memory observations
 
@@ -114,18 +124,27 @@ resource-tracker traceback during shutdown. Adding
   architecture, target triple, and Python version;
 - prints `OCR sidecar up to date — skipping build` on a cache hit.
 
-The one-file executable has not yet been validated on a clean second Mac,
-inside a signed/notarized `.app`, or through Apple's Hardened Runtime. Native
-libraries still require recursive signing validation.
+The one-file executable has not yet been validated on a clean second Mac or
+inside a Developer ID-signed and notarized `.app`. Native libraries still
+require that release-identity validation before distribution.
+
+Local ad-hoc Hardened Runtime validation initially reproduced a library
+validation failure when the one-file sidecar extracted its private Python
+framework. The final bundle applies the narrow
+`com.apple.security.cs.disable-library-validation` entitlement, signs both
+sidecars before sealing the app, and re-runs health from the signed `.app`.
+Developer ID signing, notarization and a clean second Mac remain external
+release gates.
 
 The current machine selected the MLX wheel tagged for macOS 26. Inspection of
 the embedded source library with `otool` reports `libmlx.dylib` minimum OS
 26.2, even though the outer PyInstaller executable reports 11.0 and the Python
 framework reports 14.0. The wrapper's deployment target is therefore not the
 effective runtime requirement. This development binary cannot be treated as a
-macOS 14 release artifact. A release build must select the oldest supported
-MLX wheel on a pinned build host and inspect every bundled Mach-O before
-signing. The final minimum macOS version remains unresolved.
+macOS 14 release artifact. The current v1 bundle now declares macOS 26.2 as
+its minimum. A future attempt to lower that requirement must select an older
+compatible MLX wheel on a pinned build host and inspect every bundled Mach-O
+before signing.
 
 ## Local-only validation
 
@@ -139,6 +158,28 @@ This proves that the tested conversion did not require network access. It is
 not a substitute for the required end-to-end test with Wi-Fi disabled, app
 restart, Model Manager storage, and Tauri UI.
 
+## Application integration result
+
+Implemented after the original spike:
+
+- autonomous Document Converter route and sidebar entry;
+- first-use model install/repair/remove UX with manifest-derived size;
+- Rust model manager with HTTPS, disk preflight, per-file size/SHA-256 and
+  atomic install;
+- versioned typed JSONL protocol and sidecar health compatibility checks;
+- one-job OCR queue, batch selection, real process cancellation, idle unload
+  and startup recovery;
+- digital/OCR/hybrid routing, source hash and deterministic fingerprint;
+- canonical document JSON schema v1 plus Markdown renderer and atomic package;
+- SQLite history, duplicates, retry, preview, Finder and Memory import;
+- safe React Markdown preview without raw HTML or implicit remote loads;
+- frontend, Rust and Python tests, generic CI and self-hosted ARM64 workflows.
+
+On 2026-09-24 the updated 0.2.1 sidecar rebuilt as a 163 MiB arm64 one-file
+executable. Its health check and 13 Python tests passed, including a synthetic
+two-page scanned PDF. Fourteen Document Converter Rust tests and 31 frontend
+tests also passed. Full commands and current limitations are in the runbook.
+
 ## Model and licensing observations
 
 The pinned PaddleOCR-VL 1.6 snapshot contains 1,930,426,592 bytes across the
@@ -146,9 +187,9 @@ files required by the spike; `model.safetensors` is 1,917,255,968 bytes. The
 model card and repository declare Apache-2.0. MLX and MLX-VLM declare MIT.
 
 The model snapshot contains executable Python modeling/processing files. The
-future Model Manager must verify every pinned file before load, not only the
-weights file. A complete third-party-notice and commercial redistribution
-review is still required before release.
+implemented Model Manager verifies every pinned file before load, not only the
+weights file. `THIRD_PARTY_NOTICES.md` records the identified licenses; a
+commercial redistribution review is still required before release.
 
 ## PP-DocLayoutV3 finding
 
@@ -169,12 +210,12 @@ reason to fake bounding boxes or derive structure from OCR text heuristics.
 |---|---|---|
 | A — acceptable document quality | **PARTIAL** | Simple bilingual scan/table/formula succeeded; layout model and representative corpus not validated. |
 | B — stable on M4 Pro 24 GB | **NOT RUN** | Only M2/8 GB was available. |
-| C — self-contained distribution | **PARTIAL PASS** | One-file binary runs without Python on the build Mac; current MLX native code has minimum OS 26.2, and clean Mac, codesigning, notarization, `.app` and `.dmg` are not tested. |
-| D — offline after model install | **SPIKE PASS** | Real inference succeeded under OS-level network denial; full app lifecycle is not implemented. |
+| C — self-contained distribution | **PARTIAL PASS** | One-file binary runs without Python; a Tauri `.app` and 216 MiB DMG were built, recursively ad-hoc signed with Hardened Runtime, verified, and the signed bundled sidecar passed health. Developer ID signing, notarization and a clean second Mac are not tested. |
+| D — offline after model install | **SPIKE PASS** | Real inference succeeded under OS-level network denial; full app UI/restart acceptance remains NOT RUN. |
 | E — Mac A → GitHub → Mac B | **NOT RUN** | No second clean Mac/runner was available. |
 
-Per the requested gate policy, Phase 3 backend, UI, database migration, and
-Memory integration must not be described as implemented. The next safe step
-is to validate PP-DocLayoutV3 (or the official direct Paddle pipeline without a
-listening service), run the test corpus on the target M4 Pro/24 GB machine, and
-perform a clean-machine packaging/signing trial.
+Backend, UI, database migration and Memory integration are now implemented by
+explicit user direction. Gate A quality depth, Gate B reference hardware,
+clean-Mac Gate C, full lifecycle Gate D and Gate E remain accurately marked;
+the next release work is representative-corpus validation on M4 Pro/24 GB and
+a clean-machine signed/notarized DMG trial.

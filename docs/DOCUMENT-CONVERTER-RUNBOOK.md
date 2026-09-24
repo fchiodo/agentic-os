@@ -1,155 +1,211 @@
 # Document Converter runbook
 
-Status: Phase 1/2 spike only. The Tauri feature is intentionally not enabled
-until the critical gates in `docs/ocr-spike-results.md` are closed.
-
-## Current architecture
+## Architecture
 
 ```text
-test/client
-    │ versioned JSONL over stdio
-    ▼
-OCR sidecar (private Python 3.10 runtime)
-    │ direct library call; offline mode forced
-    ▼
-MLX-VLM 0.7.2 + MLX 0.32.2
-    │ verified local path only
-    ▼
-PaddleOCR-VL 1.6 model snapshot
+React Document Converter / Memory import
+                │ typed Tauri commands + events
+                ▼
+Rust DocumentConversionService
+  ├─ Job Manager (one active OCR job, SQLite history, cancellation)
+  ├─ Model Manager (HTTPS, size/SHA-256, atomic install)
+  ├─ Document Classifier (digital / OCR / hybrid)
+  └─ OcrEngine → PaddleOcrEngine
+                    │ protocol v1 JSON Lines over stdio
+                    ▼
+             OCR sidecar 0.2.1
+                    │ direct local library calls, no server
+                    ▼
+       MLX-VLM 0.7.2 + MLX 0.32.2
+                    │ verified local snapshot only
+                    ▼
+              PaddleOCR-VL 1.6
 ```
 
-The planned production control plane is React → Tauri IPC → Rust
-`DocumentConversionService` → engine adapter/sidecar. The sidecar never
-downloads a model and is not allowed to decide output paths.
+Rust is the control plane. React never starts Python, sees a PID, chooses an
+engine, or writes conversion packages. The sidecar never downloads models and
+never chooses a final output path. The existing MarkItDown sidecar remains
+separate and unchanged.
 
-## Developer prerequisites
+Document data, rendered pages, OCR output and assets stay inside this local
+pipeline. The only Document Converter network operation is the explicit model
+installation performed by the Rust Model Manager. There is no cloud fallback.
 
-- Apple Silicon Mac, currently macOS 14 or newer for source builds. The final
-  deployment target is not approved yet; the spike host selected native MLX
-  libraries with minimum OS 26.2.
-- Node.js 20 or newer and pnpm.
-- Rust/Cargo 1.77.2 or newer for Agentic OS.
-- Native arm64 CPython 3.10.19 for building the OCR sidecar. The exact version
-  is pinned in `tools/ocr-sidecar/.python-version`; set
-  `AGENTIC_OS_OCR_PYTHON` if it is not on `PATH`.
+## Requirements
 
-The final `.app` user will not need any of these developer tools.
+Developer builds require:
 
-## Bootstrap
+- Apple Silicon (`arm64`);
+- macOS 26.2 or newer for the pinned MLX wheel selected by this build;
+- Node 25.2.1 and pnpm 11.25.0;
+- repository-pinned Rust/Cargo 1.98.1;
+- native arm64 CPython 3.10.19 only to build the sidecar.
+
+The distributed `.app` does not require Node, pnpm, Rust, Python, pip,
+Homebrew, Git, Codex, or a listening service.
+
+Generic GitHub-hosted macOS CI clears `externalBin` only for Rust compile/test,
+because those runners are Intel and cannot package the v1 MLX runtime. The
+self-hosted ARM64 workflow performs the actual sidecar and desktop bundle
+build; it never substitutes an Intel OCR binary.
+
+## Bootstrap and daily development
 
 ```bash
 ./scripts/bootstrap-macos.sh
+pnpm dev:desktop
 ```
 
-The script is designed to be idempotent: it verifies prerequisites, installs
-the locked project dependencies, and prepares both sidecars. It does not
-install system software silently. On a cache hit the OCR build is skipped. A
-full second bootstrap could not be tested on this host because Rust is absent.
+Bootstrap is idempotent, verifies prerequisites, installs locked JavaScript
+dependencies and prepares both sidecars. It never installs system software or
+packages into global Python. Set `AGENTIC_OS_OCR_PYTHON` when the pinned
+interpreter is not on `PATH`.
 
-To build only OCR:
+Sidecar builds use `src-tauri/target/ocr-sidecar/venv/`. A fingerprint covers
+source files, lockfile, build configuration, architecture and Python version.
+An unchanged run prints `OCR sidecar up to date — skipping build`.
 
-```bash
-AGENTIC_OS_OCR_PYTHON=/absolute/path/to/python3.10 pnpm prepare:ocr
-pnpm check:ocr
+## Model lifecycle
+
+The source of truth is `tools/ocr-sidecar/model-manifest.json`. The model is
+installed under the Tauri application-data directory:
+
+```text
+models/paddleocr-vl/1.6/
 ```
 
-Build state is under `src-tauri/target/ocr-sidecar/`. The generated Tauri
-binary is `src-tauri/binaries/ocr-sidecar-aarch64-apple-darwin` and is ignored
-by Git.
+Installation performs disk preflight, HTTPS-only per-file download, declared
+size and SHA-256 validation, a verified marker write, and an atomic rename.
+Partial files live under `models/.downloads/` and never count as installed.
+Cancel, Remove and Repair operate only below the managed model root and reject
+symlinks/path traversal. Removing the `.app` does not remove model data;
+“Remove Document AI” does.
+
+## Commands and events
+
+Primary IPC commands use the `document_converter_*` prefix and cover status,
+model install/cancel/remove/repair, file inspection, job create/get/list/retry,
+cancellation, history, preview, assets, Finder and Memory import.
+
+Events:
+
+- `document-converter:model-progress`
+- `document-converter:conversion-progress`
+- `document-converter:conversion-completed`
+- `document-converter:conversion-failed`
+
+Sidecar commands are `health`, `capabilities`, `load-model`, `convert`,
+`convert-image` (developer smoke), `cancel` and `shutdown`. Conversion
+cancellation is enforced by Rust terminating the process, so it interrupts
+active inference even when the MLX call itself is not cooperative.
+
+## Output and persistence
+
+For `AnnualReport.pdf`, the service writes into a UUID staging directory on
+the destination filesystem, validates files, then atomically renames it:
+
+```text
+AnnualReport/
+  AnnualReport.md
+  document.json
+  assets/
+```
+
+Collisions use `AnnualReport-2`, `AnnualReport-3`, and so on. SQLite table
+`document_conversion_jobs` stores provenance, state, progress, errors and
+paths, never source blobs or duplicate Markdown. On startup active jobs become
+`failed / CONVERSION_INTERRUPTED`, queued jobs become cancelled, and known
+temporary roots are cleaned.
 
 ## Tests
 
-Fast protocol tests do not load the model:
-
 ```bash
+pnpm lint
+pnpm test
+pnpm check:native
 pnpm test:ocr
+pnpm build
+pnpm build:desktop
 ```
 
-The opt-in real test requires an already installed, verified snapshot:
+`pnpm test:ocr` builds or reuses the self-contained sidecar, runs its health
+check and exercises synthetic single-image and scanned multipage PDF paths
+with a fake inference adapter. Real model inference is opt-in:
 
 ```bash
-AGENTIC_OS_OCR_MODEL=/absolute/path/to/model pnpm test:ocr:integration
+AGENTIC_OS_OCR_MODEL=/absolute/verified/model \
+  pnpm test:ocr:integration
 ```
 
-It creates a synthetic non-sensitive image in a temporary directory, launches
-the packaged sidecar with a minimal environment, performs real inference, and
-checks expected text. It does not download anything.
+The reproducible performance suite uses synthetic datasets A–E and reports
+model-load time, cold and warm time, seconds per page, selected processing
+route, and sampled peak RSS as JSON. It never downloads a model:
 
-## Model lifecycle (production target)
+```bash
+pnpm benchmark:ocr -- --model /absolute/verified/model \
+  --output /tmp/agentic-os-ocr-benchmark.json
+```
 
-The source-of-truth manifest is
-`tools/ocr-sidecar/model-manifest.json`. A future Rust Model Manager must:
+## Offline acceptance test
 
-1. check disk space for download, temporary data, installation, and margin;
-2. download every file from the pinned HTTPS revision into an app-controlled
-   temporary directory;
-3. validate declared size and SHA-256 for every file;
-4. fsync/close and atomically rename the verified directory into
-   `~/Library/Application Support/Agentic OS/models/paddleocr-vl/<version>/`;
-5. never load a partial or mismatched version;
-6. remove only paths proven to be descendants of its managed root and never
-   follow an untrusted symlink during repair/cleanup.
+1. Open Document Converter while online and install Document AI.
+2. Confirm diagnostics show checksum `valid`.
+3. Quit Agentic OS and disconnect all network interfaces.
+4. Restart Agentic OS.
+5. Convert a scanned PDF and verify `.md`, `document.json`, and assets.
+6. Confirm no outbound connection was required.
 
-The sidecar itself accepts only the resulting local directory. Removing the
-`.app` will not remove models; the future `Remove Document AI` action must do
-that explicitly.
+The direct packaged-sidecar inference has passed an OS-level deny-network
+profile. The complete UI lifecycle test must still be recorded on release
+hardware; do not infer it from unit tests.
 
-## Clean rebuild
-
-Generated state may be removed from the narrow build directory and rebuilt:
+## Clean rebuild and repair
 
 ```bash
 rm -rf src-tauri/target/ocr-sidecar
 pnpm prepare:ocr
 ```
 
-Do not remove broader workspace, application-support, or model directories as
-part of a build cleanup.
+Do not manually delete broad Application Support directories. Use Repair or
+Remove Document AI in the app so cleanup stays inside the managed root.
 
-## Protocol diagnostics
+## Troubleshooting
 
-`pnpm check:ocr` reports architecture, protocol, sidecar version, MLX-VLM
-version, MLX version, and required model revision. stdout is JSONL only;
-warnings and diagnostics use stderr. Full OCR text must never be written to
-normal application logs.
+- `MODEL_NOT_INSTALLED`: install Document AI from the page.
+- `MODEL_CHECKSUM_FAILED`: use Repair; the invalid model is never loaded.
+- `PROTOCOL_MISMATCH`: rebuild the sidecar and update app/model together.
+- `ENCRYPTED_PDF`: password entry is not supported in v1.
+- `INVALID_PDF`: the input failed PDF parsing before inference.
+- `INSUFFICIENT_DISK_SPACE`: free enough space for download, installation,
+  temporary files and the safety margin.
+- `SIDECAR_CRASHED`: copy diagnostics; no OCR text is logged.
 
-Current commands are `health`, `capabilities`, `load-model`, `convert-image`,
-and `shutdown`. `cancel` deliberately returns `NOT_IMPLEMENTED` in the spike;
-real cancellation and lifecycle ownership belong to the Rust Job Manager.
+## Threat model
 
-## Minimum threat model
-
-| Threat | Required mitigation |
+| Threat | Mitigation |
 |---|---|
-| Malicious filename / traversal | Rust-generated UUID temp paths, filename sanitization, descendant checks, no shell interpolation. |
-| Symlink attack during cleanup | Operate only below canonical managed roots; reject symlinks and never recursively remove an unresolved user path. |
-| Malicious/corrupt PDF | Bounded page/image inspection, explicit encrypted/invalid errors, isolated rendering, resource limits. |
-| Malicious Markdown | Disable raw HTML, sanitize output, block implicit remote loads and arbitrary `file://` access. |
-| Corrupted model download | Pinned HTTPS revision plus size and SHA-256 for every file; atomic install only after validation. |
-| Unexpected sidecar output | Versioned schema validation, bounded line/output sizes, fail closed on unknown/incompatible messages. |
-| Resource exhaustion | One OCR job, page-oriented processing, disk preflight, configurable page/pixel/asset limits, idle unload. |
-| Sidecar compromise | Signed bundle, structured stdio, no shell, no listening port, local verified model only, narrow filesystem inputs. |
+| Malicious filename/path traversal | Canonical inputs, sanitized stems, UUID temp paths, descendant validation, no shell interpolation. |
+| Symlink cleanup attack | Managed-root proof and symlink rejection before recursive removal. |
+| Corrupt/encrypted PDF | Explicit classifier errors before generic OCR failure. |
+| Malicious Markdown | React-only renderer, no raw HTML, no automatic remote loads, local assets through validated IPC. |
+| Corrupt model/supply chain | Pinned revision, HTTPS, per-file size/SHA-256, atomic verified marker. |
+| Unexpected sidecar output | Protocol version, typed fields, maximum line size, fail-closed parsing. |
+| Resource exhaustion | 2,000-page and 80 MP guards, 4 GB source guard, page rendering, one active OCR job, idle unload. |
+| Data exfiltration | Offline runtime flags, no cloud fallback, no document content in logs/telemetry. |
 
-The spike implements the versioned stdio boundary, local-only model path,
-offline environment, and fixed prompt set. Remaining mitigations belong to the
-Rust control plane and are Phase 3 work.
+## Signing notes
 
-## Offline test
+The PyInstaller one-file sidecar extracts its private Python/MLX runtime before
+loading it. `src-tauri/Entitlements.plist` therefore grants the narrow
+`com.apple.security.cs.disable-library-validation` entitlement to the signed
+bundle executables; without it, Hardened Runtime rejects the extracted Python
+framework because it does not carry the outer application's Team ID. Tauri
+signs both sidecars before sealing the `.app`. Release signing still requires
+the Developer ID and notarization secrets documented in the release workflow.
 
-The full acceptance test remains:
+## Mac A → Mac B release gate
 
-1. install the model while online;
-2. disconnect the Mac from the Internet;
-3. restart Agentic OS;
-4. convert a scanned PDF;
-5. validate Markdown, JSON, and assets.
-
-For the spike, the packaged sidecar was additionally run under a macOS sandbox
-profile denying all network access and completed real OCR from the local model.
-
-## Mac A → Mac B test
-
-This is not complete until it is performed on a genuinely separate clean Mac:
+This must be executed on a genuinely separate clean Apple Silicon Mac:
 
 ```bash
 git clone <repository>
@@ -158,33 +214,20 @@ cd agentic-os
 pnpm dev:desktop
 ```
 
-No `.venv`, binary, model cache, hidden environment, or local build output may
-be copied from Mac A. Record OS/hardware, command logs, model verification,
-offline conversion, and failure details in `docs/ocr-spike-results.md`.
+Install the model through the UI and convert a scanned PDF. Do not copy venvs,
+model caches, binaries or hidden files. Record hardware, OS, commands and
+result in `docs/ocr-spike-results.md`. Until then, report this gate as NOT RUN.
 
-## Signing notes
+## Signing and release
 
-The spike binary is not a release artifact. Before `.app`/`.dmg` release:
+Generic CI runs frontend and Rust checks. Self-hosted ARM64 workflows package
+the OCR sidecar and Tauri app. The release workflow expects GitHub Secrets
+`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+`APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`; `AGENTIC_OS_OCR_PYTHON` is a
+runner variable. No credentials live in Git.
 
-- enable the sidecar in `externalBin` only after the backend lifecycle exists;
-- recursively inspect and sign the sidecar and extracted native libraries with
-  Hardened Runtime-compatible entitlements;
-- inspect `LC_BUILD_VERSION` for every bundled Mach-O. The outer executable's
-  minimum version is insufficient evidence because embedded MLX libraries can
-  require a newer macOS;
-- run `codesign --verify --deep --strict`, notarize, staple, and test on a Mac
-  without developer tools;
-- verify model files remain external persistent data and are never modified by
-  an application update.
-
-## Troubleshooting
-
-- `requires native Apple Silicon`: do not build through Rosetta.
-- `requires Python 3.10`: use an arm64 3.10 interpreter and set
-  `AGENTIC_OS_OCR_PYTHON`; never install packages into global Python.
-- `MODEL_NOT_INSTALLED`: the passed directory is missing one of the required
-  model files. Repair through the future Model Manager, not pip/Hugging Face
-  auto-download.
-- `PROTOCOL_MISMATCH`: rebuild the sidecar and verify the app/model versions.
-- Registry HTTP 429 during model research is not an OCR failure; the production
-  downloader needs explicit retry/backoff and resumable, verified artifacts.
+Before release, inspect and sign every Mach-O nested in the app/sidecar, run
+`codesign --verify --deep --strict`, notarize, staple the DMG, and test it on a
+Mac without developer tools. The current MLX native library declares macOS
+26.2; changing supported OS requires rebuilding with a compatible pinned wheel
+and re-running all packaging checks.

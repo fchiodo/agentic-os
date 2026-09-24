@@ -148,7 +148,7 @@ Supervisor–specialist, no free agent-to-agent chat (v0.1 was right). Concretel
 - **Domain agents are configurations, not processes**: a named bundle of (system prompt, skills subset, tool grants, memory scope, model capability, policy profile) executed on a harness adapter. `Executive`, `Engineering`, `PlanPhysique`, `Research`, `Finance`, `PersonalOps` are rows in the registry, not services.
 - **Reviewer is a workflow step**, not a standing agent: a second model pass (different model where it matters) checking completeness, groundedness, citations, policy compliance before an artifact reaches Fabio or a side effect executes.
 
-### Document Converter target (gated after Phase 2)
+### Document Converter
 
 Document Converter is a local document-processing subsystem, not a harness or
 agent workflow. Its content trust boundary is separate from Codex and all
@@ -180,8 +180,10 @@ flowchart TD
 Rust owns validation, SHA-256 source identity, classification, queueing,
 process lifecycle, model installation/verification, SQLite history, atomic
 output, and cancellation. The sidecar owns only local model initialization and
-inference. MarkItDown remains the fast digital extraction path; the backend,
-not React or Memory, chooses digital, OCR, or hybrid processing.
+inference. The existing MarkItDown sidecar remains separate and unchanged.
+Document Converter currently uses native `pdf-extract` for good digital text
+and Paddle for OCR/hybrid work; the backend, not React or Memory, owns routing.
+A future MarkItDown adapter can sit behind the same public service and IPC.
 
 The Canonical Document Model is the stable boundary. Paddle-specific output is
 adapted into versioned `Document`, `Page`, and typed `Block` values before the
@@ -193,9 +195,10 @@ this local pipeline and must never enter Codex, provider, connector, telemetry,
 or cloud fallback paths. Network is allowed only while the Rust Model Manager
 installs a pinned model over HTTPS with declared sizes and SHA-256 checks.
 
-This section describes the approved target, not current completion. Phase 1/2
-evidence and unresolved gates are recorded in `docs/ocr-spike-results.md`; no
-production command/route is enabled until those gates close.
+The subsystem is implemented under `src-tauri/src/document_converter/` and
+`src/features/document-converter/`. Remaining hardware, representative-corpus,
+clean-Mac, signing, and notarization evidence is tracked separately in
+`docs/ocr-spike-results.md` and is not implied by source completion.
 
 ## 4. Harness strategy (the core bet)
 

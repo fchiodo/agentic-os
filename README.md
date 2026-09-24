@@ -8,7 +8,7 @@ Desktop control plane for local agents, skills, routines, and Codex usage data.
 - React + TypeScript + Vite for the UI
 - TanStack Query for native data hydration
 - Zustand for persisted workbench state
-- Rusqlite for read-only access to local Codex databases
+- Rusqlite for the local Agentic OS system of record and Codex data reads
 
 ## What is already wired
 
@@ -20,10 +20,11 @@ Desktop control plane for local agents, skills, routines, and Codex usage data.
 - Usage and activity reads from:
   - `~/.codex/state_5.sqlite`
   - `~/.codex/logs_2.sqlite`
-- Three primary views:
+- Primary views:
   - `Catalog`
   - `Runner`
   - `Memory`
+  - `Document Converter`
   - `Usage`
 
 ## Project layout
@@ -36,6 +37,7 @@ src/
     catalog/            inventory browsing
     dashboard/          native data contract and query
     runner/             prompt/routine staging surface
+    document-converter/ local conversion UI, typed IPC schemas, preview
     usage/              token and workspace telemetry
   lib/                  formatting and platform helpers
   store/                persisted UI state
@@ -43,6 +45,7 @@ src/
 src-tauri/
   src/
     commands.rs         Tauri commands exposed to the UI
+    document_converter/ jobs, models, classifier, OCR engine, storage
     discovery.rs        local file and plugin inventory
     models.rs           shared response payloads
     snapshot.rs         database reads + composed dashboard snapshot
@@ -59,12 +62,17 @@ pnpm check:native
 pnpm build:desktop
 ```
 
-## Document Converter development status
+## Document Converter
 
-The local PaddleOCR-VL/MLX work is currently at the completed technical and
-packaging spike stage, not yet exposed in the application UI. The sidecar is
-Apple Silicon-only and can be built reproducibly with hash-locked Python
-dependencies:
+Document Converter is a native feature with a React page, typed Tauri IPC, a
+Rust control plane, SQLite history, an atomic model manager, and a separate
+self-contained OCR sidecar. It routes good digital PDFs through local text
+extraction and scanned/image/poor-text documents through PaddleOCR-VL on MLX.
+The output is a versioned package containing Markdown, `document.json`, and
+optional local assets.
+
+The v1 runtime is Apple Silicon-only. The currently pinned MLX wheel requires
+macOS 26.2 or newer; that constraint is explicit in the Tauri bundle.
 
 ```bash
 ./scripts/bootstrap-macos.sh
@@ -73,17 +81,23 @@ pnpm check:ocr
 pnpm test:ocr
 ```
 
-The OCR model is not committed or bundled. The real integration test is
-opt-in and requires a verified local model directory:
+The model is not committed or bundled. It is installed on demand from the
+Document Converter page and verified file-by-file against the pinned manifest.
+The direct real-inference smoke test remains available for developers:
 
 ```bash
 AGENTIC_OS_OCR_MODEL=/absolute/path/to/model pnpm test:ocr:integration
+pnpm benchmark:ocr -- --model /absolute/path/to/model
 ```
 
-See [the spike report](docs/ocr-spike-results.md) and
-[Document Converter runbook](docs/DOCUMENT-CONVERTER-RUNBOOK.md). Phase 3 is
-intentionally gated on layout quality, M4 Pro/24 GB validation, clean-Mac
-packaging/signing, and Mac A → Mac B reproduction.
+See [the evidence report](docs/ocr-spike-results.md) and
+[Document Converter runbook](docs/DOCUMENT-CONVERTER-RUNBOOK.md). The current
+[implementation report](docs/DOCUMENT-CONVERTER-IMPLEMENTATION-REPORT.md)
+records executed tests and unresolved external gates. Clean-Mac,
+M4 Pro/24 GB, Developer ID signing/notarization, and true Mac A → Mac B checks
+remain external release gates and are never reported as passed without
+execution. A local ad-hoc Hardened Runtime `.app` and DMG are validated by the
+current build workflow.
 
 ## Next increments
 
