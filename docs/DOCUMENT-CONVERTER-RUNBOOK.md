@@ -37,9 +37,10 @@ Developer builds require:
 
 - Apple Silicon (`arm64`);
 - macOS 26.2 or newer for the pinned MLX wheel selected by this build;
-- Node 25.2.1 and pnpm 11.25.0;
+- Node 20.19+ or 22.12+ and pnpm 11.25.0;
 - repository-pinned Rust/Cargo 1.98.1;
-- native arm64 CPython 3.10.19 only to build the sidecar.
+- Internet access during the first bootstrap to fetch the pinned private
+  CPython 3.10.19 arm64 build runtime and locked Python dependencies.
 
 The distributed `.app` does not require Node, pnpm, Rust, Python, pip,
 Homebrew, Git, Codex, or a listening service.
@@ -58,8 +59,11 @@ pnpm dev:desktop
 
 Bootstrap is idempotent, verifies prerequisites, installs locked JavaScript
 dependencies and prepares both sidecars. It never installs system software or
-packages into global Python. Set `AGENTIC_OS_OCR_PYTHON` when the pinned
-interpreter is not on `PATH`.
+packages into global Python. It downloads the build-only CPython runtime
+declared in `tools/ocr-sidecar/python-runtime.json`, verifies its byte size and
+SHA-256, and installs it under `.build/ocr-python/`. No Homebrew Python is
+required. `AGENTIC_OS_OCR_PYTHON` remains an optional advanced override and is
+accepted only when it points to native arm64 CPython 3.10.19.
 
 Sidecar builds use `src-tauri/target/ocr-sidecar/venv/`. A fingerprint covers
 source files, lockfile, build configuration, architecture and Python version.
@@ -223,8 +227,9 @@ result in `docs/ocr-spike-results.md`. Until then, report this gate as NOT RUN.
 Generic CI runs frontend and Rust checks. Self-hosted ARM64 workflows package
 the OCR sidecar and Tauri app. The release workflow expects GitHub Secrets
 `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
-`APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`; `AGENTIC_OS_OCR_PYTHON` is a
-runner variable. No credentials live in Git.
+`APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`. The build uses the pinned
+private Python runtime automatically; `AGENTIC_OS_OCR_PYTHON` is only an
+optional runner override. No credentials live in Git.
 
 Before release, inspect and sign every Mach-O nested in the app/sidecar, run
 `codesign --verify --deep --strict`, notarize, staple the DMG, and test it on a

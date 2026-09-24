@@ -42,17 +42,8 @@ required_rust="1.98.1"
 actual_rust="$(rustc --version | awk '{print $2}')"
 [[ "$actual_rust" == "$required_rust" ]] || fail "Rust $required_rust is required for reproducible builds. Found $actual_rust. With rustup, run: rustup toolchain install $required_rust"
 
-ocr_python="${AGENTIC_OS_OCR_PYTHON:-}"
-if [[ -z "$ocr_python" ]]; then
-  ocr_python="$(command -v python3.10 || true)"
-fi
-[[ -n "$ocr_python" ]] || fail "Native arm64 Python 3.10 is required to build the OCR sidecar. Set AGENTIC_OS_OCR_PYTHON to its path."
-required_python="$(tr -d '[:space:]' < tools/ocr-sidecar/.python-version)"
-"$ocr_python" -c 'import platform, sys; assert platform.python_version() == sys.argv[1] and platform.machine() == "arm64"' "$required_python" \
-  || fail "OCR Python must be native arm64 Python $required_python."
-
-export AGENTIC_OS_OCR_PYTHON="$ocr_python"
-echo "Prerequisites verified: macOS $(sw_vers -productVersion), Node $(node --version), pnpm $(pnpm --version), $(rustc --version), Python $("$ocr_python" --version 2>&1)."
+echo "Prerequisites verified: macOS $(sw_vers -productVersion), Node $(node --version), pnpm $(pnpm --version), $(rustc --version)."
 pnpm install --frozen-lockfile
+pnpm prepare:ocr-python
 pnpm prepare:sidecars
 echo "Agentic OS bootstrap complete. Run: pnpm dev:desktop"

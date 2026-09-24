@@ -11,6 +11,7 @@
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "dev:desktop": "tauri dev",
     "prepare:markitdown": "node scripts/build-markitdown-sidecar.mjs",
+    "prepare:ocr-python": "node scripts/prepare-ocr-python.mjs",
     "prepare:ocr": "node scripts/build-ocr-sidecar.mjs",
     "prepare:sidecars": "pnpm prepare:markitdown && pnpm prepare:ocr",
     "bootstrap:mac": "./scripts/bootstrap-macos.sh",
@@ -22,7 +23,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:ocr": "pnpm prepare:ocr && src-tauri/target/ocr-sidecar/venv/bin/python -m unittest discover -s tools/ocr-sidecar/tests -p 'test_*.py' -v",
-    "test:ocr:integration": "python3.10 tools/ocr-sidecar/tests/run_real_smoke.py",
+    "test:ocr:integration": "pnpm prepare:ocr && src-tauri/target/ocr-sidecar/venv/bin/python tools/ocr-sidecar/tests/run_real_smoke.py",
     "benchmark:ocr": "src-tauri/target/ocr-sidecar/venv/bin/python tools/ocr-sidecar/tests/benchmark.py",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort"
   },

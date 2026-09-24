@@ -13,6 +13,8 @@ authoritative for exact versions.
 | pypdfium2 / PDFium | 5.13.0 | BSD-3-Clause / Apache-2.0 and dependency licenses | Bundled PDF renderer |
 | Pillow | 12.3.0 | HPND | Bundled image processing |
 | PyInstaller | 6.21.0 | GPL-2.0-or-later with bootloader exception | Build/packaging tool and bootloader |
+| CPython | 3.10.19 | PSF-2.0 | Private build runtime; embedded in the packaged sidecar |
+| python-build-standalone | build 20260211 | MPL-2.0 | Provider of the checksum-pinned developer build runtime |
 
 Source and license references:
 
@@ -23,6 +25,8 @@ Source and license references:
 - pypdfium2: https://github.com/pypdfium2-team/pypdfium2
 - Pillow: https://github.com/python-pillow/Pillow
 - PyInstaller: https://github.com/pyinstaller/pyinstaller
+- CPython: https://www.python.org/downloads/release/python-31019/
+- python-build-standalone: https://github.com/astral-sh/python-build-standalone
 
 This inventory is an engineering notice, not legal advice. Before commercial
 release, generate a complete SBOM/notices bundle for all transitive Rust and

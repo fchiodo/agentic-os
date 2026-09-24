@@ -13,6 +13,11 @@ import {
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync, spawnSync } from 'node:child_process'
+import {
+  ensureManagedOcrPython,
+  getOcrPythonManifest,
+  inspectOcrPython,
+} from './prepare-ocr-python.mjs'
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const root = resolve(scriptDir, '..')
@@ -22,6 +27,7 @@ const binariesDir = join(root, 'src-tauri', 'binaries')
 const requirements = join(sourceDir, 'requirements.lock')
 const entrypoint = join(sourceDir, 'main.py')
 const requiredPythonVersion = readFileSync(join(sourceDir, '.python-version'), 'utf8').trim()
+const pythonRuntimeManifest = getOcrPythonManifest()
 const triple = 'aarch64-apple-darwin'
 const destination = join(binariesDir, `ocr-sidecar-${triple}`)
 
@@ -45,26 +51,17 @@ function assertAppleSilicon() {
 }
 
 function findPython() {
-  const candidates = process.env.AGENTIC_OS_OCR_PYTHON
-    ? [process.env.AGENTIC_OS_OCR_PYTHON]
-    : ['python3.10', '/opt/homebrew/bin/python3.10', 'python3']
-  for (const candidate of candidates) {
-    try {
-      const details = JSON.parse(run(candidate, [
-        '-c',
-        'import json, platform, sys; print(json.dumps({"version": platform.python_version(), "major": sys.version_info.major, "minor": sys.version_info.minor, "machine": platform.machine()}))',
-      ], { capture: true }))
-      if (details.version === requiredPythonVersion && details.machine === 'arm64') {
-        return { executable: candidate, version: details.version }
-      }
-    } catch {
-      // Try the next explicitly supported interpreter.
+  if (process.env.AGENTIC_OS_OCR_PYTHON) {
+    const configured = inspectOcrPython(process.env.AGENTIC_OS_OCR_PYTHON)
+    if (!configured) {
+      throw new Error(
+        `AGENTIC_OS_OCR_PYTHON must point to native arm64 Python ${requiredPythonVersion}.`,
+      )
     }
+    return configured
   }
-  throw new Error(
-    `OCR sidecar build requires native arm64 Python ${requiredPythonVersion}. ` +
-    'Set AGENTIC_OS_OCR_PYTHON to its absolute path.',
-  )
+
+  return ensureManagedOcrPython()
 }
 
 function sourceFiles(directory) {
@@ -116,12 +113,18 @@ for (const file of [
 ]) {
   fingerprint.update(readFileSync(file))
 }
-fingerprint.update(`${process.platform}:${process.arch}:${triple}:python-${python.version}`)
+const pythonRuntimeIdentity = python.managed
+  ? `managed:${pythonRuntimeManifest.sha256}`
+  : `configured:${resolve(python.executable)}`
+fingerprint.update(
+  `${process.platform}:${process.arch}:${triple}:python-${python.version}:${pythonRuntimeIdentity}`,
+)
+fingerprint.update(JSON.stringify(pythonRuntimeManifest))
 const expectedFingerprint = fingerprint.digest('hex')
 const stamp = join(buildRoot, 'fingerprint')
 const dependencyFingerprint = createHash('sha256')
   .update(readFileSync(requirements))
-  .update(`${process.platform}:${process.arch}:${python.version}`)
+  .update(`${process.platform}:${process.arch}:${python.version}:${pythonRuntimeIdentity}`)
   .digest('hex')
 const dependencyStamp = join(buildRoot, 'dependency-fingerprint')
 

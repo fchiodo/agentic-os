@@ -81,6 +81,11 @@ pnpm check:ocr
 pnpm test:ocr
 ```
 
+The bootstrap downloads a pinned, checksum-verified CPython 3.10.19 arm64
+runtime into `.build/ocr-python/`. It does not install Python globally and does
+not require Homebrew. `pnpm dev:desktop` performs the same preparation on
+demand when the private runtime is not present.
+
 The model is not committed or bundled. It is installed on demand from the
 Document Converter page and verified file-by-file against the pinned manifest.
 The direct real-inference smoke test remains available for developers:
