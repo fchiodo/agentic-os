@@ -30,6 +30,7 @@ const MAX_LINK_EXPANSIONS: usize = 3;
 const LINK_SCORE_DAMPING: f64 = 0.6;
 const MAX_CLAIMS: usize = 8;
 const MAX_CLAIM_CHARS: usize = 600;
+const ASK_PIPELINE_VERSION: &str = "ask-p0.1";
 
 #[derive(Debug, Clone, Copy)]
 struct RetrievalProfile {
@@ -104,6 +105,79 @@ struct QueryPlanOutcome {
     queries: Vec<String>,
     tokens: Option<i64>,
     latency_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ClaimDecisionCode {
+    Accepted,
+    ModelAbstained,
+    EmptyClaim,
+    ClaimTooLong,
+    MissingCitation,
+    UnknownSource,
+    InsufficientSupport,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaimVerificationTrace {
+    claim_index: usize,
+    code: ClaimDecisionCode,
+    citation_ids: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationTrace {
+    raw_claims: usize,
+    accepted_claims: usize,
+    rejected_claims: usize,
+    output_truncated: bool,
+    claims: Vec<ClaimVerificationTrace>,
+}
+
+struct VerificationOutcome {
+    result: MemoryAnswer,
+    trace: VerificationTrace,
+}
+
+impl std::ops::Deref for VerificationOutcome {
+    type Target = MemoryAnswer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceTrace {
+    evidence_id: String,
+    path: String,
+    source_kind: String,
+    chunk_index: Option<i64>,
+    score: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AskTrace {
+    queries: Vec<String>,
+    evidence: Vec<EvidenceTrace>,
+    verification: Option<VerificationTrace>,
+}
+
+fn evidence_trace(evidence: &[EvidencePassage]) -> Vec<EvidenceTrace> {
+    evidence
+        .iter()
+        .map(|passage| EvidenceTrace {
+            evidence_id: passage.id.clone(),
+            path: passage.vault_path.clone(),
+            source_kind: passage.source_kind.clone(),
+            chunk_index: None,
+            score: passage.score,
+        })
+        .collect()
 }
 
 fn handle_progressive_retry_error(
@@ -789,6 +863,7 @@ pub async fn ask(
 ) -> AppResult<MemoryAnswer> {
     let ask_started = std::time::Instant::now();
     let mut metrics = AskRunMetrics::default();
+    let mut trace = AskTrace::default();
     let emit = |stage: &str, label: String, transient: bool| {
         on_progress(MemoryAskProgress {
             stage: stage.to_string(),
@@ -842,6 +917,7 @@ pub async fn ask(
             queries.push(query);
         }
     }
+    trace.queries = queries.clone();
     if queries.len() > 1 {
         progress(
             "retrieval",
@@ -873,6 +949,7 @@ pub async fn ask(
             );
         }
     }
+    trace.evidence = evidence_trace(&evidence);
     if evidence.is_empty() {
         let answer = insufficient_answer(
             &answer_id,
@@ -887,6 +964,7 @@ pub async fn ask(
             &answer,
             &metrics,
             ask_started.elapsed().as_secs_f64() * 1000.0,
+            &trace,
         )?;
         return Ok(answer);
     }
@@ -971,7 +1049,7 @@ pub async fn ask(
             return Err(error);
         }
     };
-    let mut answer = verify_synthesis(
+    let verified = verify_synthesis(
         &answer_id,
         request,
         &generated_at,
@@ -979,12 +1057,15 @@ pub async fn ask(
         raw,
         &mut warnings,
     );
+    trace.verification = Some(verified.trace.clone());
+    let mut answer = verified.result;
     if answer.abstained && progressive {
         let (broader, broader_warnings) = retrieve_evidence(db, request, &queries, true)?;
         let has_new_evidence = broader
             .iter()
             .any(|candidate| !evidence.iter().any(|existing| existing.id == candidate.id));
         if has_new_evidence {
+            trace.evidence = evidence_trace(&broader);
             warnings.extend(broader_warnings);
             warnings.push(
                 "La prima verifica non era sufficiente; è stato eseguito un recupero progressivo."
@@ -1006,7 +1087,7 @@ pub async fn ask(
                     metrics.retry_tokens = retry_output.tokens;
                     match parse_synthesis_json(&retry_output.text) {
                         Ok(retry_raw) => {
-                            answer = verify_synthesis(
+                            let retry_verified = verify_synthesis(
                                 &answer_id,
                                 request,
                                 &generated_at,
@@ -1014,6 +1095,8 @@ pub async fn ask(
                                 retry_raw,
                                 &mut warnings,
                             );
+                            trace.verification = Some(retry_verified.trace.clone());
+                            answer = retry_verified.result;
                         }
                         Err(error) => warnings.push(format!(
                             "Il secondo passaggio non ha prodotto dati verificabili ({error})."
@@ -1042,6 +1125,7 @@ pub async fn ask(
         &answer,
         &metrics,
         ask_started.elapsed().as_secs_f64() * 1000.0,
+        &trace,
     )?;
     Ok(answer)
 }
@@ -1370,59 +1454,106 @@ fn verify_synthesis(
     evidence: &[EvidencePassage],
     raw: RawSynthesis,
     warnings: &mut Vec<String>,
-) -> MemoryAnswer {
+) -> VerificationOutcome {
+    let raw_claims = raw.claims.len();
+    let mut trace = VerificationTrace {
+        raw_claims,
+        output_truncated: raw_claims > MAX_CLAIMS,
+        ..VerificationTrace::default()
+    };
     if raw.abstained {
-        return insufficient_answer(
-            answer_id,
-            request,
-            generated_at,
-            warnings.clone(),
-            "Le fonti recuperate non contengono informazioni sufficienti per rispondere con affidabilità.",
-            Some("Codex".to_string()),
-        );
+        trace.rejected_claims = raw_claims;
+        trace.claims.push(ClaimVerificationTrace {
+            claim_index: 0,
+            code: ClaimDecisionCode::ModelAbstained,
+            citation_ids: Vec::new(),
+        });
+        return VerificationOutcome {
+            result: insufficient_answer(
+                answer_id,
+                request,
+                generated_at,
+                warnings.clone(),
+                "Le fonti recuperate non contengono informazioni sufficienti per rispondere con affidabilità.",
+                Some("Codex".to_string()),
+            ),
+            trace,
+        };
     }
 
     let mut accepted = Vec::new();
-    let mut rejected_claims = 0usize;
-    for claim in raw.claims.into_iter().take(MAX_CLAIMS) {
+    for (claim_index, claim) in raw.claims.into_iter().take(MAX_CLAIMS).enumerate() {
         let text = claim.text.trim();
-        let citation_ids = claim
-            .citations
-            .into_iter()
-            .filter(|id| *id > 0 && *id <= evidence.len())
-            .collect::<BTreeSet<_>>();
-        if text.is_empty() || text.chars().count() > MAX_CLAIM_CHARS || citation_ids.is_empty() {
-            rejected_claims += 1;
+        let citation_ids = claim.citations.into_iter().collect::<BTreeSet<_>>();
+        let decision = if text.is_empty() {
+            Some(ClaimDecisionCode::EmptyClaim)
+        } else if text.chars().count() > MAX_CLAIM_CHARS {
+            Some(ClaimDecisionCode::ClaimTooLong)
+        } else if citation_ids.is_empty() {
+            Some(ClaimDecisionCode::MissingCitation)
+        } else if citation_ids
+            .iter()
+            .any(|id| *id == 0 || *id > evidence.len())
+        {
+            Some(ClaimDecisionCode::UnknownSource)
+        } else {
+            None
+        };
+        if let Some(code) = decision {
+            trace.claims.push(ClaimVerificationTrace {
+                claim_index,
+                code,
+                citation_ids: citation_ids.into_iter().collect(),
+            });
             continue;
         }
         let Some(verified_text) = verified_claim_text(text, &citation_ids, evidence) else {
-            rejected_claims += 1;
+            trace.claims.push(ClaimVerificationTrace {
+                claim_index,
+                code: ClaimDecisionCode::InsufficientSupport,
+                citation_ids: citation_ids.into_iter().collect(),
+            });
             continue;
         };
+        trace.claims.push(ClaimVerificationTrace {
+            claim_index,
+            code: ClaimDecisionCode::Accepted,
+            citation_ids: citation_ids.iter().copied().collect(),
+        });
         accepted.push((verified_text, citation_ids));
     }
+    trace.accepted_claims = accepted.len();
+    trace.rejected_claims = trace
+        .claims
+        .iter()
+        .filter(|claim| claim.code != ClaimDecisionCode::Accepted)
+        .count();
 
     if accepted.is_empty() {
         let mut insufficient_warnings = warnings.clone();
-        if rejected_claims > 0 {
+        if trace.rejected_claims > 0 {
             insufficient_warnings.push(
                 "La verifica locale ha scartato affermazioni non sufficientemente supportate."
                     .to_string(),
             );
         }
-        return insufficient_answer(
-            answer_id,
-            request,
-            generated_at,
-            insufficient_warnings,
-            "Le fonti recuperate non consentono una risposta verificabile.",
-            Some("Codex".to_string()),
-        );
+        return VerificationOutcome {
+            result: insufficient_answer(
+                answer_id,
+                request,
+                generated_at,
+                insufficient_warnings,
+                "Le fonti recuperate non consentono una risposta verificabile.",
+                Some("Codex".to_string()),
+            ),
+            trace,
+        };
     }
 
-    if rejected_claims > 0 {
+    if trace.rejected_claims > 0 {
         warnings.push(format!(
-            "{rejected_claims} affermazione/i del modello sono state escluse dalla verifica locale."
+            "{} affermazione/i del modello sono state escluse dalla verifica locale.",
+            trace.rejected_claims
         ));
     }
 
@@ -1502,19 +1633,22 @@ fn verify_synthesis(
         "low"
     };
 
-    MemoryAnswer {
-        id: answer_id.to_string(),
-        question: request.question.trim().to_string(),
-        domain: request.domain.clone(),
-        answer,
-        citations,
-        warnings: warnings.clone(),
-        abstained: false,
-        confidence: confidence.to_string(),
-        confidence_score,
-        source_count,
-        model: Some("Codex".to_string()),
-        generated_at: generated_at.to_string(),
+    VerificationOutcome {
+        result: MemoryAnswer {
+            id: answer_id.to_string(),
+            question: request.question.trim().to_string(),
+            domain: request.domain.clone(),
+            answer,
+            citations,
+            warnings: warnings.clone(),
+            abstained: false,
+            confidence: confidence.to_string(),
+            confidence_score,
+            source_count,
+            model: Some("Codex".to_string()),
+            generated_at: generated_at.to_string(),
+        },
+        trace,
     }
 }
 
@@ -1925,6 +2059,7 @@ fn audit_answer(
     answer: &MemoryAnswer,
     metrics: &AskRunMetrics,
     latency_ms: f64,
+    trace: &AskTrace,
 ) -> AppResult<()> {
     crate::audit::append_row(
         db,
@@ -1937,6 +2072,7 @@ fn audit_answer(
             "Memory Ask produced a verified answer"
         },
         &json!({
+            "pipelineVersion": ASK_PIPELINE_VERSION,
             "answerId": answer.id,
             "question": answer.question,
             "domain": answer.domain,
@@ -1968,6 +2104,11 @@ fn audit_answer(
                 "semanticBackend": "not_configured",
                 "progressive": feature_enabled("AGENTIC_OS_MEMORY_PROGRESSIVE"),
             },
+            "retrievalTrace": {
+                "queries": &trace.queries,
+                "evidenceCandidates": &trace.evidence,
+            },
+            "verificationTrace": &trace.verification,
             "citations": answer.citations.iter().map(|citation| json!({
                 "number": citation.number,
                 "path": citation.vault_path,
@@ -2328,6 +2469,121 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("scartato")));
+    }
+
+    #[test]
+    fn verification_trace_records_claim_decisions_without_draft_text() {
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            "Dynamic hero selection: Choose the most relevant story for each customer. Internal-only source tail marker.",
+            0.9,
+        )];
+        let outcome = verify_synthesis(
+            "00000000-0000-4000-8000-000000000201",
+            &request(),
+            "2026-09-24T12:00:00Z",
+            &evidence,
+            RawSynthesis {
+                abstained: false,
+                claims: vec![
+                    RawClaim {
+                        text: "Dynamic hero selection: Choose the most relevant story for each customer."
+                            .to_string(),
+                        citations: vec![1],
+                    },
+                    RawClaim {
+                        text: "Invented lunar targeting is available.".to_string(),
+                        citations: vec![1],
+                    },
+                ],
+            },
+            &mut Vec::new(),
+        );
+
+        assert_eq!(outcome.trace.raw_claims, 2);
+        assert_eq!(outcome.trace.accepted_claims, 1);
+        assert_eq!(outcome.trace.rejected_claims, 1);
+        assert_eq!(outcome.trace.claims[0].code, ClaimDecisionCode::Accepted);
+        assert_eq!(
+            outcome.trace.claims[1].code,
+            ClaimDecisionCode::InsufficientSupport
+        );
+        let serialized = serde_json::to_string(&outcome.trace).unwrap();
+        assert!(!serialized.contains("Invented lunar targeting"));
+    }
+
+    #[test]
+    fn answer_audit_persists_metadata_only_ask_trace() {
+        let db_path =
+            std::env::temp_dir().join(format!("agentic-os-ask-trace-{}.db", Uuid::new_v4()));
+        let db = Db::open(&db_path).unwrap();
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            "Dynamic hero selection: Choose the most relevant story for each customer.",
+            0.9,
+        )];
+        let outcome = verify_synthesis(
+            "00000000-0000-4000-8000-000000000202",
+            &request(),
+            "2026-09-24T12:00:00Z",
+            &evidence,
+            RawSynthesis {
+                abstained: false,
+                claims: vec![
+                    RawClaim {
+                        text: "Dynamic hero selection: Choose the most relevant story for each customer."
+                            .to_string(),
+                        citations: vec![1],
+                    },
+                    RawClaim {
+                        text: "Invented lunar targeting is available.".to_string(),
+                        citations: vec![1],
+                    },
+                ],
+            },
+            &mut Vec::new(),
+        );
+        let trace = AskTrace {
+            queries: vec!["movable ink use cases".to_string()],
+            evidence: vec![EvidenceTrace {
+                evidence_id: evidence[0].id.clone(),
+                path: evidence[0].vault_path.clone(),
+                source_kind: evidence[0].source_kind.clone(),
+                chunk_index: None,
+                score: evidence[0].score,
+            }],
+            verification: Some(outcome.trace.clone()),
+        };
+
+        audit_answer(
+            &db,
+            &outcome.result,
+            &AskRunMetrics::default(),
+            42.0,
+            &trace,
+        )
+        .unwrap();
+        let detail = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT detail FROM audit WHERE kind = 'memory_ask' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+
+        assert!(detail.contains(r#""pipelineVersion":"ask-p0.1""#));
+        assert!(detail.contains(r#""evidenceId":"source:1:10""#));
+        assert!(detail.contains(r#""code":"accepted""#));
+        assert!(detail.contains(r#""code":"insufficient_support""#));
+        assert!(!detail.contains("Internal-only source tail marker"));
+        assert!(!detail.contains("Invented lunar targeting"));
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]

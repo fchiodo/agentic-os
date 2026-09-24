@@ -32,7 +32,7 @@
 - Produces: `VerificationOutcome { answer: MemoryAnswer, trace: VerificationTrace }` from `verify_synthesis`.
 - Consumes: existing `EvidencePassage`, `RawSynthesis`, `AskRunMetrics`, and append-only `audit_answer` flow.
 
-- [ ] **Step 1: Write failing tests for rejection codes and metadata-only audit detail**
+- [x] **Step 1: Write failing tests for rejection codes and metadata-only audit detail**
 
 Add tests that construct one supported and one unsupported claim, call `verify_synthesis`, and assert the trace contains stable snake-case codes without claim text:
 
@@ -82,7 +82,7 @@ fn verification_trace_records_claim_decisions_without_draft_text() {
 
 Add an audit test using a temporary `Db`, append one result through `audit_answer`, read the newest `detail`, and assert it contains `pipelineVersion`, selected evidence identifiers, counts, and codes while excluding evidence text and draft claim text.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run:
 
@@ -92,7 +92,7 @@ cargo test memory::retrieval::tests::verification_trace_records_claim_decisions_
 
 Expected: compilation fails because `VerificationOutcome`, trace types, and decision codes do not exist.
 
-- [ ] **Step 3: Implement trace types and return a verification outcome**
+- [x] **Step 3: Implement trace types and return a verification outcome**
 
 Add private serializable types near `AskRunMetrics`:
 
@@ -154,7 +154,7 @@ struct VerificationOutcome {
 
 Change `verify_synthesis` to classify each claim before accepting it. Do not silently discard invalid citation numbers: any cited id outside `1..=evidence.len()` produces `UnknownSource`. Keep citation ids but never store claim text in `VerificationTrace`.
 
-- [ ] **Step 4: Attach the trace to every terminal audit row**
+- [x] **Step 4: Attach the trace to every terminal audit row**
 
 Build `AskTrace` inside `ask`, populate `queries` after planning, populate `evidence` immediately after retrieval, and set `verification` from `VerificationOutcome`. Extend `audit_answer` with `trace: &AskTrace` and serialize:
 
@@ -169,7 +169,7 @@ Build `AskTrace` inside `ask`, populate `queries` after planning, populate `evid
 
 Use an empty/default trace for the no-evidence path. Keep the existing audit hash chain and existing answer/citation fields unchanged.
 
-- [ ] **Step 5: Run focused and full Rust tests**
+- [x] **Step 5: Run focused and full Rust tests**
 
 Run:
 
