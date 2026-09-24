@@ -319,7 +319,7 @@ git commit -m "fix(memory): verify hard-wrapped list evidence"
 - Changes: `synthesis_prompt` requires exactly one source list item per claim for enumeration questions.
 - Produces: `VerificationTrace.output_truncated = true` whenever the model returns more than `MAX_CLAIMS` claims.
 
-- [ ] **Step 1: Write failing tests for a 14-item answer and prompt contract**
+- [x] **Step 1: Write failing tests for a 14-item answer and prompt contract**
 
 Create 14 `RawClaim` values from the synthetic fixture, one per bullet, and assert all 14 survive verification. Assert the generated prompt contains both of these requirements:
 
@@ -330,7 +330,7 @@ Never combine two separate list items into one claim to fit the claim limit.
 
 Add a 17-claim test and assert `output_truncated` is true and the user-facing warnings include an explicit partial-output warning rather than silently omitting the overflow.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -341,7 +341,7 @@ cargo test memory::retrieval::tests::claim_overflow_is_reported
 
 Expected: the first test accepts only eight claims and the overflow trace/warning does not exist.
 
-- [ ] **Step 3: Raise the transitional limit and update the prompt**
+- [x] **Step 3: Raise the transitional limit and update the prompt**
 
 Set `MAX_CLAIMS` to `16`. Add the exact atomic-list instructions to `synthesis_prompt`. Keep `MAX_CLAIM_CHARS` at 600. Before consuming claims, compare `raw.claims.len()` with the cap; set `output_truncated` and add:
 
@@ -351,7 +351,7 @@ La risposta del modello superava il limite operativo di 16 elementi; il risultat
 
 Do not merge overflow claims and do not claim complete coverage.
 
-- [ ] **Step 4: Run verifier and regression tests**
+- [x] **Step 4: Run verifier and regression tests**
 
 Run:
 
@@ -365,7 +365,7 @@ cargo test
 
 Expected: list tests pass and adversarial safety tests remain green.
 
-- [ ] **Step 5: Commit Task 3**
+- [x] **Step 5: Commit Task 3**
 
 ```bash
 git add src-tauri/src/memory/retrieval.rs
@@ -385,7 +385,7 @@ git commit -m "fix(memory): synthesize one claim per list item"
 - Consumes environment variables `AGENTIC_OS_LIVE_DB`, `AGENTIC_OS_LIVE_EXPECTED_ITEMS`, `AGENTIC_OS_LIVE_EXPECTED_SOURCE`, and optional `AGENTIC_OS_LIVE_RUNS`.
 - Produces one ignored live test that runs the real local Ask pipeline and prints a JSON summary per run.
 
-- [ ] **Step 1: Add a generic ignored live test without private fixture data**
+- [x] **Step 1: Add a generic ignored live test without private fixture data**
 
 Add:
 
@@ -450,7 +450,7 @@ async fn live_ask_covers_expected_list_items() {
 
 The expected-item file remains under ignored `output/` and is never committed.
 
-- [ ] **Step 2: Run deterministic CI-equivalent checks**
+- [x] **Step 2: Run deterministic CI-equivalent checks**
 
 Run:
 
@@ -465,6 +465,9 @@ git diff --check
 
 Expected: every command succeeds; the live test remains ignored in ordinary CI.
 
+Verified on 24 September 2026: 116 Rust tests and 33 frontend tests passed;
+lint, frontend build, native check, and whitespace validation also passed.
+
 - [ ] **Step 3: Run the authorized real case five times**
 
 Create `output/movable-ink-expected-items.txt` locally with the manually reviewed list-item headings from the real source. Then run:
@@ -478,6 +481,10 @@ cargo test memory::retrieval::tests::live_ask_covers_expected_list_items -- --ig
 ```
 
 Expected: five successful runs, zero abstentions, complete manually annotated item coverage, and at least one citation to the real source.
+
+Blocked on the verification Mac: the local desktop database contains no
+document imports or chunks and the private expected-item annotation is absent.
+See `docs/benchmarks/MEMORY-ASK-P0-2026-09-24.md` for the exact handoff.
 
 - [ ] **Step 4: Write the benchmark report**
 
@@ -494,13 +501,13 @@ git commit -m "test(memory): verify the live Movable Ink Ask path"
 
 ## Completion Gate
 
-- [ ] `cargo test` passes with zero failures.
-- [ ] `pnpm vitest run`, `pnpm lint`, `pnpm build`, and `pnpm check:native` pass.
-- [ ] Existing role-reversal, negation, numeric, modality, and citation tests remain green.
-- [ ] Audit trace records evidence metadata and per-claim codes without raw drafts or source text.
-- [ ] Synthetic multiline bullets reflow within an item and never fuse adjacent items.
-- [ ] Fourteen supported list items survive as fourteen atomic claims.
-- [ ] More than sixteen items produces an explicit partial warning.
+- [x] `cargo test` passes with zero failures.
+- [x] `pnpm vitest run`, `pnpm lint`, `pnpm build`, and `pnpm check:native` pass.
+- [x] Existing role-reversal, negation, numeric, modality, and citation tests remain green.
+- [x] Audit trace records evidence metadata and per-claim codes without raw drafts or source text.
+- [x] Synthetic multiline bullets reflow within an item and never fuse adjacent items.
+- [x] Fourteen supported list items survive as fourteen atomic claims.
+- [x] More than sixteen items produces an explicit partial warning.
 - [ ] The real Movable Ink case succeeds in five controlled runs with all manually annotated items and a real source citation.
 - [ ] The report distinguishes retrieval coverage, answer coverage, accepted/rejected claims, and latency.
-- [ ] Planner adaptation, semantic retrieval, persistent-memory evolution, and map changes remain outside this branch.
+- [x] Planner adaptation, semantic retrieval, persistent-memory evolution, and map changes remain outside this branch.
