@@ -50,6 +50,7 @@ impl RetrievalProfile {
 #[derive(Debug, Clone)]
 pub(crate) struct EvidencePassage {
     id: String,
+    chunk_index: Option<i64>,
     title: String,
     vault_path: String,
     status: String,
@@ -174,7 +175,7 @@ fn evidence_trace(evidence: &[EvidencePassage]) -> Vec<EvidenceTrace> {
             evidence_id: passage.id.clone(),
             path: passage.vault_path.clone(),
             source_kind: passage.source_kind.clone(),
-            chunk_index: None,
+            chunk_index: passage.chunk_index,
             score: passage.score,
         })
         .collect()
@@ -1275,6 +1276,7 @@ pub(crate) fn retrieve_evidence(
         }
         evidence.push(EvidencePassage {
             id: format!("memory:{}", result.row.id),
+            chunk_index: None,
             title: result.row.title,
             vault_path: result.row.vault_path,
             status: result.row.status,
@@ -1313,6 +1315,7 @@ pub(crate) fn retrieve_evidence(
             .unwrap_or(content);
         evidence.push(EvidencePassage {
             id: format!("memory:{}", row.id),
+            chunk_index: None,
             title: row.title,
             vault_path: row.vault_path,
             status: row.status,
@@ -1350,6 +1353,7 @@ pub(crate) fn retrieve_evidence(
     for hit in chunk_hits.into_iter().take(source_passage_limit) {
         evidence.push(EvidencePassage {
             id: format!("source:{}:{}", hit.import_id, hit.id),
+            chunk_index: Some(hit.chunk_index),
             title: hit.title,
             vault_path: hit.source_path,
             status: "active".to_string(),
@@ -1696,18 +1700,16 @@ fn verified_claim_text(
     let claim_is_negative = has_negation(claim);
     let claim_frames = relation_frames(claim);
     let claim_sequence = support_sequence(claim);
-    citation_ids
-        .iter()
-        .filter_map(|id| evidence.get(id - 1))
-        .flat_map(|passage| evidence_sentences(&passage.text))
+    verification_units(citation_ids, evidence)
+        .into_iter()
         .find_map(|sentence| {
-            let sentence_terms = support_terms(sentence);
+            let sentence_terms = support_terms(&sentence);
             let covered_terms = claim_terms.intersection(&sentence_terms).count();
             let coverage = covered_terms as f64 / claim_terms.len().max(1) as f64;
             let common_constraints_hold = coverage >= 0.5
-                && claim_numbers.is_subset(&numeric_tokens(sentence))
-                && claim_subjects.is_subset(&subject_tokens(sentence))
-                && claim_is_negative == has_negation(sentence);
+                && claim_numbers.is_subset(&numeric_tokens(&sentence))
+                && claim_subjects.is_subset(&subject_tokens(&sentence))
+                && claim_is_negative == has_negation(&sentence);
             if !common_constraints_hold {
                 return None;
             }
@@ -1715,11 +1717,11 @@ fn verified_claim_text(
                 // Ordered overlap selects a source sentence; it is not treated
                 // as semantic proof. Expose that sentence verbatim (or abstain
                 // when it exceeds the answer claim limit).
-                (is_ordered_subsequence(&claim_sequence, &support_sequence(sentence))
+                (is_ordered_subsequence(&claim_sequence, &support_sequence(&sentence))
                     && sentence.chars().count() <= MAX_CLAIM_CHARS)
                     .then(|| sentence.trim().to_string())
             } else {
-                let evidence_frames = relation_frames(sentence);
+                let evidence_frames = relation_frames(&sentence);
                 let supported = claim_frames.iter().all(|claim_frame| {
                     evidence_frames
                         .iter()
@@ -1733,7 +1735,7 @@ fn verified_claim_text(
                 // modality, or a condition before the first clause can govern
                 // every later clause. Only keep the model wording when no
                 // meaningful source token was omitted.
-                if sentence_scope_sequence(claim) == sentence_scope_sequence(sentence) {
+                if sentence_scope_sequence(claim) == sentence_scope_sequence(&sentence) {
                     Some(claim.trim().to_string())
                 } else {
                     (sentence.chars().count() <= MAX_CLAIM_CHARS)
@@ -1844,11 +1846,132 @@ fn frame_terms(tokens: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
-fn evidence_sentences(value: &str) -> impl Iterator<Item = &str> {
-    value
-        .split_inclusive(|character: char| matches!(character, '\n' | '.' | '!' | '?' | ';'))
-        .map(str::trim)
-        .filter(|sentence| !sentence.is_empty())
+fn verification_units(
+    citation_ids: &BTreeSet<usize>,
+    evidence: &[EvidencePassage],
+) -> Vec<String> {
+    let mut units = Vec::new();
+    let mut chunk_groups: BTreeMap<&str, Vec<(i64, &str)>> = BTreeMap::new();
+    for passage in citation_ids.iter().filter_map(|id| evidence.get(id - 1)) {
+        match passage.chunk_index {
+            Some(chunk_index) => chunk_groups
+                .entry(&passage.vault_path)
+                .or_default()
+                .push((chunk_index, &passage.text)),
+            None => units.extend(text_verification_units(&passage.text)),
+        }
+    }
+
+    for mut chunks in chunk_groups.into_values() {
+        chunks.sort_by_key(|(chunk_index, _)| *chunk_index);
+        let mut sequence_index = None;
+        let mut sequence = String::new();
+        for (chunk_index, text) in chunks {
+            match sequence_index {
+                Some(previous) if chunk_index == previous + 1 => {
+                    if let Some(merged) = merge_overlapping_chunks(&sequence, text) {
+                        sequence = merged;
+                    } else {
+                        units.extend(text_verification_units(&sequence));
+                        sequence = text.to_string();
+                    }
+                }
+                Some(_) => {
+                    units.extend(text_verification_units(&sequence));
+                    sequence = text.to_string();
+                }
+                None => sequence = text.to_string(),
+            }
+            sequence_index = Some(chunk_index);
+        }
+        if !sequence.is_empty() {
+            units.extend(text_verification_units(&sequence));
+        }
+    }
+
+    units.sort();
+    units.dedup();
+    units
+}
+
+fn merge_overlapping_chunks(left: &str, right: &str) -> Option<String> {
+    const MIN_OVERLAP_CHARS: usize = 24;
+    let left_chars = left.chars().collect::<Vec<_>>();
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let max_overlap = left_chars.len().min(right_chars.len()).min(512);
+    for overlap in (MIN_OVERLAP_CHARS..=max_overlap).rev() {
+        if left_chars[left_chars.len() - overlap..] == right_chars[..overlap] {
+            let suffix = right_chars[overlap..].iter().collect::<String>();
+            return Some(format!("{left}{suffix}"));
+        }
+    }
+    None
+}
+
+fn text_verification_units(value: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    for raw_line in value.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if is_bullet_start(line) && !current.is_empty() {
+            blocks.push(std::mem::take(&mut current));
+        }
+        let line = trim_bullet_marker(line);
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(line);
+        if !is_bullet_start(raw_line) && ends_verification_sentence(line) {
+            blocks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+
+    let mut units = Vec::new();
+    for block in blocks {
+        let normalized = block.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.chars().count() <= MAX_CLAIM_CHARS {
+            units.push(normalized.clone());
+        }
+        units.extend(
+            normalized
+                .split_inclusive(|character: char| matches!(character, '.' | '!' | '?' | ';'))
+                .map(str::trim)
+                .filter(|sentence| {
+                    !sentence.is_empty() && sentence.chars().count() <= MAX_CLAIM_CHARS
+                })
+                .map(str::to_string),
+        );
+    }
+    units
+}
+
+fn is_bullet_start(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    trimmed.starts_with('●')
+        || trimmed.starts_with('•')
+        || trimmed.starts_with('○')
+        || trimmed.starts_with("- ")
+}
+
+fn trim_bullet_marker(value: &str) -> &str {
+    let trimmed = value.trim_start();
+    if trimmed.starts_with("- ") {
+        return trimmed[2..].trim_start();
+    }
+    trimmed
+        .strip_prefix(['●', '•', '○'])
+        .unwrap_or(trimmed)
+        .trim_start()
+}
+
+fn ends_verification_sentence(value: &str) -> bool {
+    value.ends_with(['.', '!', '?', ';'])
 }
 
 fn numeric_tokens(value: &str) -> BTreeSet<String> {
@@ -2264,6 +2387,7 @@ mod tests {
     fn passage(id: &str, path: &str, text: &str, score: f64) -> EvidencePassage {
         EvidencePassage {
             id: id.to_string(),
+            chunk_index: None,
             title: "Admin API - Sierra".to_string(),
             vault_path: path.to_string(),
             status: "active".to_string(),
@@ -2271,6 +2395,19 @@ mod tests {
             text: text.to_string(),
             score,
             source_kind: "source".to_string(),
+        }
+    }
+
+    fn passage_with_chunk(
+        id: &str,
+        path: &str,
+        chunk_index: i64,
+        text: &str,
+        score: f64,
+    ) -> EvidencePassage {
+        EvidencePassage {
+            chunk_index: Some(chunk_index),
+            ..passage(id, path, text, score)
         }
     }
 
@@ -2511,6 +2648,120 @@ mod tests {
         );
         let serialized = serde_json::to_string(&outcome.trace).unwrap();
         assert!(!serialized.contains("Invented lunar targeting"));
+    }
+
+    #[test]
+    fn verifier_reflows_wrapped_lines_inside_one_bullet() {
+        let evidence = vec![passage_with_chunk(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            0,
+            "● Dynamic hero selection: Choose the most relevant lead or secondary\n\nstory for each customer using browsing and purchase history.",
+            0.9,
+        )];
+        let citations = BTreeSet::from([1]);
+
+        assert!(verified_claim_text(
+            "Dynamic hero selection: Choose the most relevant lead or secondary story for each customer using browsing and purchase history.",
+            &citations,
+            &evidence,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn verifier_never_fuses_adjacent_bullets() {
+        let evidence = vec![passage_with_chunk(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            0,
+            "● Dynamic hero selection: Choose a story.\n\n● Regional context: Choose a location.",
+            0.9,
+        )];
+        let citations = BTreeSet::from([1]);
+
+        assert!(verified_claim_text(
+            "Dynamic hero selection and Regional context choose a story and a location.",
+            &citations,
+            &evidence,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn verifier_keeps_every_hard_wrapped_bullet_as_its_own_unit() {
+        let fixture = include_str!("fixtures/multiline-use-cases.txt");
+        let evidence = vec![passage_with_chunk(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            0,
+            fixture,
+            0.9,
+        )];
+        let units = verification_units(&BTreeSet::from([1]), &evidence);
+
+        let labels = [
+            "Dynamic hero selection",
+            "Audience targeting",
+            "Live inventory",
+            "Loyalty personalization",
+            "Category affinity",
+            "Regional context",
+            "Continuous testing",
+            "Signal enhancement",
+            "Promotion optimization",
+            "Broader content support",
+            "Modular assembly",
+            "Planning insights",
+            "Send time and frequency",
+            "Deployment scale",
+        ];
+
+        for label in labels {
+            assert!(
+                units.iter().any(|unit| unit.starts_with(label)),
+                "missing or merged bullet: {label} in {units:#?}"
+            );
+        }
+        assert!(!units
+            .iter()
+            .any(|unit| unit.contains("Dynamic hero selection")
+                && unit.contains("Audience targeting")));
+        assert!(units
+            .iter()
+            .any(|unit| unit.contains("Dynamic hero selection")
+                && unit.contains("using browsing and purchase history")));
+    }
+
+    #[test]
+    fn verifier_reassembles_only_consecutive_cited_chunks() {
+        let evidence = vec![
+            passage_with_chunk(
+                "source:1:10",
+                "_sources/work/use-cases.md",
+                0,
+                "● Live inventory: Show recently viewed products while suppressing",
+                0.9,
+            ),
+            passage_with_chunk(
+                "source:1:11",
+                "_sources/work/use-cases.md",
+                1,
+                "recently viewed products while suppressing out-of-stock items.",
+                0.88,
+            ),
+            passage_with_chunk(
+                "source:1:12",
+                "_sources/work/use-cases.md",
+                3,
+                "Unrelated non-consecutive text.",
+                0.2,
+            ),
+        ];
+        let claim = "Live inventory: Show recently viewed products while suppressing out-of-stock items.";
+
+        assert!(verified_claim_text(claim, &BTreeSet::from([1, 2]), &evidence).is_some());
+        assert!(verified_claim_text(claim, &BTreeSet::from([1, 3]), &evidence).is_none());
     }
 
     #[test]

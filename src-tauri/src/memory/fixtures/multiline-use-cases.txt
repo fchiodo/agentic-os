@@ -1,0 +1,33 @@
+Recommended Use Cases
+
+● Dynamic hero selection: Choose the most relevant lead or secondary
+
+story for each customer using browsing and purchase history.
+
+● Audience targeting: Analyze content and customer attributes to select
+an audience at an individual level.
+
+● Live inventory: Show recently viewed products while suppressing
+out-of-stock items.
+
+● Loyalty personalization: Include rewards, points balance, and birthday offers.
+
+● Category affinity: Tailor campaigns to the categories a customer prefers.
+
+● Regional context: Adjust content for weather, location, and nearby stores.
+
+● Continuous testing: Test subject lines and creative variants while content is active.
+
+● Signal enhancement: Add existing affinity scores as supplemental signals.
+
+● Promotion optimization: Shift exposure toward stronger-performing creative.
+
+● Broader content support: Keep community and educational stories available.
+
+● Modular assembly: Build messages from approved reusable modules.
+
+● Planning insights: Measure which assets and offers drive engagement.
+
+● Send time and frequency: Identify the optimal cadence for each customer.
+
+● Deployment scale: Launch relevant sends without adding the same production work.

@@ -13,6 +13,7 @@ use super::{MemoryRow, ReindexResult};
 pub struct DocumentChunkHit {
     pub id: i64,
     pub import_id: String,
+    pub chunk_index: i64,
     pub title: String,
     pub source_path: String,
     pub body: String,
@@ -628,7 +629,7 @@ pub fn search_document_chunks(
     let query_terms = searchable_terms(query);
     let raw = db.with_conn(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.import_id, c.title, c.source_path, c.body
+            "SELECT c.id, c.import_id, c.chunk_index, c.title, c.source_path, c.body
              FROM document_chunks_fts f
              JOIN document_chunks c ON c.id = f.rowid
              JOIN document_imports i ON i.id = c.import_id
@@ -645,9 +646,10 @@ pub fn search_document_chunks(
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )?
@@ -658,7 +660,7 @@ pub fn search_document_chunks(
     let mut hits = raw
         .into_iter()
         .enumerate()
-        .map(|(position, (id, import_id, title, source_path, body))| {
+        .map(|(position, (id, import_id, chunk_index, title, source_path, body))| {
             let body_terms = searchable_terms(&body);
             let coverage = if query_terms.is_empty() {
                 0.0
@@ -669,6 +671,7 @@ pub fn search_document_chunks(
             DocumentChunkHit {
                 id,
                 import_id,
+                chunk_index,
                 title,
                 source_path,
                 body,
