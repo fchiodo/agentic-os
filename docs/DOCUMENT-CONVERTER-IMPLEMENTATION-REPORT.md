@@ -130,10 +130,12 @@ reported as manual passes.
 
 ## MAC A → MAC B
 
-- **NOT RUN**. No second clean Apple Silicon Mac or equivalent clean ARM64
-  runner was available. No `.venv`, model cache, generated sidecar, or hidden
-  environment was copied as a substitute. The bootstrap and self-hosted ARM64
-  workflow are prepared for this gate.
+- Mac A commit and push to `origin/master`: **PASS**.
+- Clean Mac B clone/bootstrap/model-install/conversion: **NOT RUN**. No second
+  clean Apple Silicon Mac or equivalent clean ARM64 runner was available. No
+  `.venv`, model cache, generated sidecar, or hidden environment was copied as
+  a substitute. The bootstrap and self-hosted ARM64 workflow are prepared for
+  this gate.
 
 ## OFFLINE OCR
 
