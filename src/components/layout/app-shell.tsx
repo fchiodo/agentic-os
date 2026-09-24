@@ -4,6 +4,7 @@ import {
   BrainCircuit,
   Blocks,
   FolderOpen,
+  FileScan,
   History,
   PanelLeftClose,
   PanelLeftOpen,
@@ -59,6 +60,12 @@ const navigation = [
     to: '/memory',
   },
   {
+    icon: FileScan,
+    label: 'Document Converter',
+    summary: 'Local PDF and image OCR',
+    to: '/document-converter',
+  },
+  {
     icon: History,
     label: 'Audit',
     summary: 'Run traces and hash chain',
@@ -87,6 +94,7 @@ function waitForNextPaint() {
 
 export function AppShell() {
   const location = useLocation()
+  const isDocumentConverter = location.pathname.startsWith('/document-converter')
   const queryClient = useQueryClient()
   const { data, error, isFetching, isLoading } = useDashboardSnapshot()
   const { data: controlStatus } = useControlStatus()
@@ -292,12 +300,20 @@ export function AppShell() {
       <div className="workspace">
         <header className="topbar">
           <div className="topbar-copy">
-            <p className="eyebrow">Desktop inventory</p>
-            <h2>Agents, skills, MCP, workflows, and telemetry in one place</h2>
+            <p className="eyebrow">
+              {isDocumentConverter ? 'Local document workspace' : 'Desktop inventory'}
+            </p>
+            <h2>
+              {isDocumentConverter
+                ? 'Private conversion, model management, and document history'
+                : 'Agents, skills, MCP, workflows, and telemetry in one place'}
+            </h2>
           </div>
 
           <div className="topbar-actions">
-            {isLoading ? (
+            {isDocumentConverter ? (
+              <StatusBadge label="Local only" tone="success" />
+            ) : isLoading ? (
               <StatusBadge label="Scanning" tone="neutral" />
             ) : error ? (
               <StatusBadge label="Source issue" tone="danger" />
@@ -309,33 +325,35 @@ export function AppShell() {
               <StatusBadge label="Healthy" tone="success" />
             )}
 
-            <button
-              className="icon-button"
-              disabled={isRefreshing}
-              onClick={() => {
-                void handleRefreshClick()
-              }}
-              type="button"
-            >
-              <span
-                className={
-                  isManualRefreshActive
-                    ? 'refresh-button-icon is-spinning'
-                    : 'refresh-button-icon'
-                }
+            {!isDocumentConverter && (
+              <button
+                className="icon-button"
+                disabled={isRefreshing}
+                onClick={() => {
+                  void handleRefreshClick()
+                }}
+                type="button"
               >
-                <RefreshCw
-                  aria-hidden="true"
-                  className="refresh-button-glyph"
-                  size={16}
-                />
-              </span>
-              <span>Refresh</span>
-            </button>
+                <span
+                  className={
+                    isManualRefreshActive
+                      ? 'refresh-button-icon is-spinning'
+                      : 'refresh-button-icon'
+                  }
+                >
+                  <RefreshCw
+                    aria-hidden="true"
+                    className="refresh-button-glyph"
+                    size={16}
+                  />
+                </span>
+                <span>Refresh</span>
+              </button>
+            )}
           </div>
         </header>
 
-        {!location.pathname.startsWith('/memory') && (
+        {!location.pathname.startsWith('/memory') && !isDocumentConverter && (
           <section className="metric-strip" aria-label="Runtime metrics">
             {metrics.map((metric) => (
               <MetricCard
