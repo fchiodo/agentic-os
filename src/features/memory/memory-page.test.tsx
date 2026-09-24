@@ -49,9 +49,22 @@ describe('MemoryPage', () => {
     expect(await screen.findByText('1 of 6 active')).toBeInTheDocument()
   })
 
-  it('renders the governance rail with a pending proposal card', async () => {
+  it('keeps governance closed by default and opens the pending proposal rail on request', async () => {
     renderPage()
 
+    const openGovernance = screen.getByRole('button', { name: 'Expand governance' })
+    expect(openGovernance).toHaveAttribute('aria-expanded', 'false')
+    const governanceRail = screen
+      .getByText('Governance', { selector: '.memory-governance-title' })
+      .closest('aside')
+    expect(governanceRail).toHaveAttribute('aria-hidden', 'true')
+    expect(governanceRail).toHaveAttribute('inert')
+
+    fireEvent.click(openGovernance)
+
+    expect(screen.getByRole('button', { name: 'Collapse governance' })).toHaveAttribute('aria-expanded', 'true')
+    expect(governanceRail).toHaveAttribute('aria-hidden', 'false')
+    expect(governanceRail).not.toHaveAttribute('inert')
     expect(
       await screen.findByText('1 write is waiting for review before it reaches the vault.'),
     ).toBeInTheDocument()

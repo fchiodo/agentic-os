@@ -19,7 +19,7 @@ import {
   useDashboardSnapshot,
 } from '@/features/dashboard/use-dashboard-snapshot'
 import { useControlStatus } from '@/features/control/use-control-status'
-import { formatCompactNumber, formatRelativeTime } from '@/lib/format'
+import { formatCompactNumber } from '@/lib/format'
 
 const navigation = [
   {
@@ -66,7 +66,7 @@ export function AppShell() {
   const location = useLocation()
   const isDocumentConverter = location.pathname.startsWith('/document-converter')
   const queryClient = useQueryClient()
-  const { data, error, isFetching, isLoading } = useDashboardSnapshot()
+  const { error, isFetching, isLoading } = useDashboardSnapshot()
   const { data: controlStatus } = useControlStatus()
   const [isManualRefreshActive, setIsManualRefreshActive] = useState(false)
   const [refreshToast, setRefreshToast] = useState<RefreshToast | null>(null)
@@ -204,33 +204,6 @@ export function AppShell() {
           })}
         </nav>
 
-        {!sidebarCollapsed && (
-          <section className="sidebar-section">
-            <div className="panel-heading">
-              <h2>Runtime</h2>
-            </div>
-            <dl className="meta-list">
-              <div>
-                <dt>Platform</dt>
-                <dd>{data?.runtime.platform ?? 'Loading'}</dd>
-              </div>
-              <div>
-                <dt>Home</dt>
-                <dd>{data?.runtime.codexHome ?? 'Unavailable'}</dd>
-              </div>
-              <div>
-                <dt>Last scan</dt>
-                <dd>
-                  {data ? formatRelativeTime(data.generatedAt) : 'Waiting for scan'}
-                </dd>
-              </div>
-              <div>
-                <dt>View</dt>
-                <dd>{location.pathname.replace('/', '') || 'catalog'}</dd>
-              </div>
-            </dl>
-          </section>
-        )}
       </aside>
 
       <div className="workspace">

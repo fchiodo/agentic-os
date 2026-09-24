@@ -104,6 +104,11 @@ describe('AppShell', () => {
     renderShell()
 
     expect(screen.queryByText('Data sources')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Runtime' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Platform')).not.toBeInTheDocument()
+    expect(screen.queryByText('~/.codex')).not.toBeInTheDocument()
+    expect(screen.queryByText('Last scan')).not.toBeInTheDocument()
+    expect(screen.queryByText('View')).not.toBeInTheDocument()
     expect(screen.getByText('Catalog body')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument()
   })
