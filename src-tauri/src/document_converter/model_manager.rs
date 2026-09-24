@@ -5,6 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -276,6 +277,7 @@ impl ModelManager {
     ) -> ConverterResult<()> {
         let client = reqwest::Client::builder()
             .https_only(true)
+            .connect_timeout(Duration::from_secs(30))
             .user_agent(format!("Agentic-OS/{}", env!("CARGO_PKG_VERSION")))
             .build()?;
         let mut downloaded = 0u64;
@@ -491,11 +493,25 @@ impl ModelManager {
 }
 
 fn redacted_download_error(error: reqwest::Error) -> ConverterError {
-    log::warn!("Document AI download request failed: {error}");
-    ConverterError::new(
-        "MODEL_DOWNLOAD_FAILED",
-        "Could not download Document AI. Check your connection and try again",
-    )
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connection-or-tls"
+    } else if error.is_status() {
+        "http-status"
+    } else if error.is_body() || error.is_decode() {
+        "response-body"
+    } else {
+        "network"
+    };
+    log::warn!("Document AI download request failed ({category}): {error}");
+    let message = match category {
+        "timeout" => "Document AI download timed out. Check your connection or company VPN and try again",
+        "connection-or-tls" => "Could not establish a secure connection for the Document AI download. Check your company proxy, VPN, and macOS certificate trust settings",
+        "http-status" => "The Document AI download service rejected the request. Check company network access to Hugging Face and try again",
+        _ => "Could not download Document AI. Check your connection and try again",
+    };
+    ConverterError::new("MODEL_DOWNLOAD_FAILED", message)
 }
 
 fn parse_manifest() -> ConverterResult<ModelManifest> {

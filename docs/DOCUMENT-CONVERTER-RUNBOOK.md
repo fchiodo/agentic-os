@@ -80,6 +80,11 @@ models/paddleocr-vl/1.6/
 
 Installation performs disk preflight, HTTPS-only per-file download, declared
 size and SHA-256 validation, a verified marker write, and an atomic rename.
+On macOS the downloader uses the native TLS trust store and managed system
+proxy settings. This allows corporate root certificates and configured proxies
+to work without weakening certificate validation. A company network must allow
+HTTPS access to `huggingface.co` and the CDN host returned by its signed model
+download redirects.
 Partial files live under `models/.downloads/` and never count as installed.
 Cancel, Remove and Repair operate only below the managed model root and reject
 symlinks/path traversal. Removing the `.app` does not remove model data;

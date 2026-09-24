@@ -38,7 +38,9 @@ regex = "1"
 serde_yaml = "0.9"
 glob = "0.3"
 similar = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+# Document AI model downloads must honor the macOS Keychain trust store and
+# managed system proxy settings used on corporate Macs.
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "system-proxy", "stream"] }
 futures-util = "0.3"
 libc = "0.2"
 lopdf = "0.34"
