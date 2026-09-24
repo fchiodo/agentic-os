@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const graphState = vi.hoisted(() => ({
   destroyed: false,
   destructor: vi.fn(),
+  forceContextLoss: vi.fn(),
 }))
 
 vi.mock('3d-force-graph', () => {
@@ -18,6 +19,8 @@ vi.mock('3d-force-graph', () => {
     minDistance: 0,
   }
   const renderer = {
+    domElement: document.createElement('canvas'),
+    forceContextLoss: graphState.forceContextLoss,
     outputColorSpace: '',
     setPixelRatio: vi.fn(),
   }
@@ -75,6 +78,7 @@ import { OrbitGlobe } from '@/features/memory/orbit-globe'
 beforeEach(() => {
   graphState.destroyed = false
   graphState.destructor.mockClear()
+  graphState.forceContextLoss.mockClear()
   vi.useFakeTimers()
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
     createRadialGradient: () => ({ addColorStop: vi.fn() }),
@@ -120,6 +124,34 @@ describe('OrbitGlobe lifecycle', () => {
     view.unmount()
 
     expect(graphState.destructor).toHaveBeenCalledOnce()
+    expect(graphState.forceContextLoss).toHaveBeenCalledOnce()
     expect(() => act(() => vi.advanceTimersByTime(120))).not.toThrow()
+  })
+
+  it('releases every WebGL context across repeated route changes', () => {
+    for (let index = 0; index < 20; index += 1) {
+      const view = render(
+        <OrbitGlobe
+          edges={[]}
+          highlightedIds={new Set()}
+          motionEnabled
+          nodes={[]}
+          onBackgroundClick={vi.fn()}
+          onEdgeClick={vi.fn()}
+          onNodeClick={vi.fn()}
+          onPerformance={vi.fn()}
+          onReplayProgress={vi.fn()}
+          reducedMotion={false}
+          renderedEdgeIds={new Set()}
+          replayNonce={0}
+          selectedEdgeId={null}
+          selectedId={null}
+        />,
+      )
+      view.unmount()
+    }
+
+    expect(graphState.destructor).toHaveBeenCalledTimes(20)
+    expect(graphState.forceContextLoss).toHaveBeenCalledTimes(20)
   })
 })

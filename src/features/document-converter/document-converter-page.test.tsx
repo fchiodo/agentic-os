@@ -77,6 +77,9 @@ describe('DocumentConverterPage', () => {
       destinationRoot: null,
       options: { processingMode: 'automatic', maxTokensPerPage: 2048, preservePageImages: false },
       previewJobId: null,
+      modelProgress: null,
+      nativeDragActive: false,
+      progressByJob: {},
     })
   })
 

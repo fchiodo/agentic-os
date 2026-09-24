@@ -44,6 +44,11 @@ interface OrbitControlsLike {
   addEventListener: (event: string, handler: () => void) => void
 }
 
+interface ReleasableRenderer {
+  domElement?: HTMLElement
+  forceContextLoss?: () => void
+}
+
 export interface OrbitGlobeHandle {
   focusNode: (id: string) => void
   resetView: () => void
@@ -95,6 +100,15 @@ const sphereGeometry = new THREE.SphereGeometry(1, 18, 14)
 const haloGeometry = new THREE.SphereGeometry(1, 14, 10)
 const coreGeometry = new THREE.IcosahedronGeometry(1, 1)
 const labelCache = new Map<string, THREE.Sprite>()
+
+function clearLabelCache() {
+  for (const sprite of labelCache.values()) {
+    const material = sprite.material as THREE.SpriteMaterial
+    material.map?.dispose()
+    material.dispose()
+  }
+  labelCache.clear()
+}
 
 function labelSprite(text: string, color: string, emphasized: boolean): THREE.Sprite {
   const key = `${text}\u0000${color}\u0000${emphasized}`
@@ -279,12 +293,14 @@ export const OrbitGlobe = forwardRef<OrbitGlobeHandle, OrbitGlobeProps>(function
   const sceneTimeRef = useRef(0)
   const lastSceneFrameRef = useRef<number | null>(null)
   const motionRef = useRef(motionEnabled)
+  const reducedMotionRef = useRef(reducedMotion)
   const replayActiveRef = useRef(false)
   const growthCameraManualRef = useRef(false)
   const visualStateRef = useRef({ highlightedIds, selectedEdgeId, selectedId })
   const callbacksRef = useRef({ onBackgroundClick, onEdgeClick, onNodeClick, onPerformance, onReplayProgress })
   callbacksRef.current = { onBackgroundClick, onEdgeClick, onNodeClick, onPerformance, onReplayProgress }
   motionRef.current = motionEnabled
+  reducedMotionRef.current = reducedMotion
   visualStateRef.current = { highlightedIds, selectedEdgeId, selectedId }
 
   useImperativeHandle(ref, () => ({
@@ -344,7 +360,7 @@ export const OrbitGlobe = forwardRef<OrbitGlobeHandle, OrbitGlobeProps>(function
     const controls = graph.controls() as OrbitControlsLike
     controls.enableDamping = true
     controls.dampingFactor = 0.08
-    controls.autoRotate = motionRef.current && !reducedMotion
+    controls.autoRotate = motionRef.current && !reducedMotionRef.current
     controls.autoRotateSpeed = 0.42
     controls.minDistance = 60
     controls.maxDistance = 2400
@@ -352,7 +368,7 @@ export const OrbitGlobe = forwardRef<OrbitGlobeHandle, OrbitGlobeProps>(function
       controls.autoRotate = false
       if (replayActiveRef.current) growthCameraManualRef.current = true
     })
-    controls.addEventListener('end', () => { controls.autoRotate = motionRef.current && !reducedMotion })
+    controls.addEventListener('end', () => { controls.autoRotate = motionRef.current && !reducedMotionRef.current })
 
     graph.renderer().setPixelRatio(Math.min(window.devicePixelRatio, 1.6))
     graph.renderer().outputColorSpace = THREE.SRGBColorSpace
@@ -369,15 +385,15 @@ export const OrbitGlobe = forwardRef<OrbitGlobeHandle, OrbitGlobeProps>(function
     observer.observe(container)
     graph.cameraPosition({ x: 0, y: 75, z: cameraDistance(container.clientWidth) * 1.2 })
     const cameraTransitionTimeout = window.setTimeout(
-      () => graph.cameraPosition({ x: 0, y: 55, z: cameraDistance(container.clientWidth) }, { x: 0, y: 0, z: 0 }, reducedMotion ? 0 : 1500),
+      () => graph.cameraPosition({ x: 0, y: 55, z: cameraDistance(container.clientWidth) }, { x: 0, y: 0, z: 0 }, reducedMotionRef.current ? 0 : 1500),
       120,
     )
 
     const animateScene = (now: number) => {
       const previous = lastSceneFrameRef.current ?? now
-      if (motionRef.current && !reducedMotion && !document.hidden) sceneTimeRef.current += Math.min((now - previous) / 1000, 0.05)
+      if (motionRef.current && !reducedMotionRef.current && !document.hidden) sceneTimeRef.current += Math.min((now - previous) / 1000, 0.05)
       lastSceneFrameRef.current = now
-      dressing.update(sceneTimeRef.current, replayActiveRef.current ? 0.25 : 1, motionRef.current)
+      dressing.update(sceneTimeRef.current, replayActiveRef.current ? 0.25 : 1, motionRef.current && !reducedMotionRef.current)
       sceneFrameRef.current = window.requestAnimationFrame(animateScene)
     }
     sceneFrameRef.current = window.requestAnimationFrame(animateScene)
@@ -387,11 +403,22 @@ export const OrbitGlobe = forwardRef<OrbitGlobeHandle, OrbitGlobeProps>(function
       window.clearTimeout(cameraTransitionTimeout)
       if (sceneFrameRef.current !== null) window.cancelAnimationFrame(sceneFrameRef.current)
       if (replayFrameRef.current !== null) window.cancelAnimationFrame(replayFrameRef.current)
-      dressing.group.removeFromParent()
+      sceneFrameRef.current = null
+      replayFrameRef.current = null
+      replayActiveRef.current = false
+      const renderer = graph.renderer() as unknown as ReleasableRenderer
       graph._destructor()
+      // three-render-objects disposes the renderer but does not explicitly
+      // release WebKit's WebGL context. Rapid route changes can otherwise
+      // leave several GPU contexts pending collection and exhaust the macOS
+      // WebContent process before GC catches up.
+      renderer.forceContextLoss?.()
+      renderer.domElement?.remove()
+      container.replaceChildren()
+      clearLabelCache()
       graphRef.current = null
     }
-  }, [reducedMotion])
+  }, [])
 
   useEffect(() => {
     const graph = graphRef.current
@@ -436,7 +463,7 @@ export const OrbitGlobe = forwardRef<OrbitGlobeHandle, OrbitGlobeProps>(function
     const controls = graph?.controls() as OrbitControlsLike | undefined
     if (!graph || !controls) return
     controls.autoRotate = motionEnabled && !reducedMotion
-    graph.linkDirectionalParticles((link) => motionEnabled && (link.id === selectedEdgeId || link.edge.evidence === 'observed') ? 2 : 0).refresh()
+    graph.linkDirectionalParticles((link) => motionEnabled && !reducedMotion && (link.id === selectedEdgeId || link.edge.evidence === 'observed') ? 2 : 0).refresh()
   }, [motionEnabled, reducedMotion, selectedEdgeId])
 
   useEffect(() => {
