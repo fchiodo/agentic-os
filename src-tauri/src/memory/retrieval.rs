@@ -28,7 +28,7 @@ const QUERY_PLAN_TIMEOUT_SECS: u64 = 30;
 /// of the top hits (1-hop graph expansion).
 const MAX_LINK_EXPANSIONS: usize = 3;
 const LINK_SCORE_DAMPING: f64 = 0.6;
-const MAX_CLAIMS: usize = 8;
+const MAX_CLAIMS: usize = 16;
 const MAX_CLAIM_CHARS: usize = 600;
 const ASK_PIPELINE_VERSION: &str = "ask-p0.1";
 
@@ -1418,6 +1418,8 @@ Rules:
 - Write each claim as one natural, readable sentence — never transcribe list rows as bare semicolon chains. Connect the verbatim terms with plain function words of the question's language.
 - Prefer a concise synthesis over copying whole passages.
 - Do not include citation markers in claim text; the application adds them.
+- For a list or enumeration, return exactly one source list item per claim.
+- Never combine two separate list items into one claim to fit the claim limit.
 - Return at most {MAX_CLAIMS} claims, each under {MAX_CLAIM_CHARS} characters.
 - If the evidence does not directly answer the question, return {{"abstained":true,"claims":[]}}.
 
@@ -1465,6 +1467,13 @@ fn verify_synthesis(
         output_truncated: raw_claims > MAX_CLAIMS,
         ..VerificationTrace::default()
     };
+    if trace.output_truncated {
+        // The overflow is surfaced instead of silently dropped: the answer that
+        // follows is a partial result and must never read as complete coverage.
+        warnings.push(format!(
+            "La risposta del modello superava il limite operativo di {MAX_CLAIMS} elementi; il risultato è parziale."
+        ));
+    }
     if raw.abstained {
         trace.rejected_claims = raw_claims;
         trace.claims.push(ClaimVerificationTrace {
@@ -2409,6 +2418,120 @@ mod tests {
             chunk_index: Some(chunk_index),
             ..passage(id, path, text, score)
         }
+    }
+
+    fn fixture_claims() -> Vec<RawClaim> {
+        include_str!("fixtures/multiline-use-cases.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('●'))
+            .map(|line| RawClaim {
+                text: line.trim_start_matches('●').trim().to_string(),
+                citations: vec![1],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fourteen_supported_list_items_are_not_merged_or_dropped() {
+        let fixture = include_str!("fixtures/multiline-use-cases.txt");
+        let evidence = vec![passage_with_chunk(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            0,
+            fixture,
+            0.9,
+        )];
+        let claims = fixture_claims();
+        assert_eq!(claims.len(), 14, "the fixture must stay a 14-item list");
+        let mut warnings = Vec::new();
+        let outcome = verify_synthesis(
+            "00000000-0000-4000-8000-000000000301",
+            &request(),
+            "2026-09-24T12:00:00Z",
+            &evidence,
+            RawSynthesis {
+                abstained: false,
+                claims,
+            },
+            &mut warnings,
+        );
+
+        assert!(
+            !outcome.result.abstained,
+            "a fully supported 14-item list must not abstain: {:?}",
+            outcome.result.warnings
+        );
+        assert_eq!(outcome.trace.raw_claims, 14);
+        assert_eq!(outcome.trace.accepted_claims, 14);
+        assert_eq!(outcome.trace.rejected_claims, 0);
+        assert!(!outcome.trace.output_truncated);
+        assert_eq!(outcome.result.answer.matches("[1]").count(), 14);
+    }
+
+    #[test]
+    fn claim_overflow_is_reported() {
+        let fixture = include_str!("fixtures/multiline-use-cases.txt");
+        let evidence = vec![passage_with_chunk(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            0,
+            fixture,
+            0.9,
+        )];
+        let mut claims = fixture_claims();
+        while claims.len() < 17 {
+            let index = claims.len() + 1;
+            claims.push(RawClaim {
+                text: format!("Deployment scale: Launch relevant sends variant {index}."),
+                citations: vec![1],
+            });
+        }
+        let mut warnings = Vec::new();
+        let outcome = verify_synthesis(
+            "00000000-0000-4000-8000-000000000302",
+            &request(),
+            "2026-09-24T12:00:00Z",
+            &evidence,
+            RawSynthesis {
+                abstained: false,
+                claims,
+            },
+            &mut warnings,
+        );
+
+        assert_eq!(outcome.trace.raw_claims, 17);
+        assert!(
+            outcome.trace.output_truncated,
+            "an overflow must be visible in the trace instead of silently dropping claims"
+        );
+        assert!(
+            outcome
+                .result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("parziale")),
+            "the user must see an explicit partial-result warning: {:?}",
+            outcome.result.warnings
+        );
+    }
+
+    #[test]
+    fn synthesis_prompt_requires_one_list_item_per_claim() {
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            "● Dynamic hero selection: Choose a story.",
+            0.9,
+        )];
+        let prompt = synthesis_prompt(&request(), &evidence).unwrap();
+
+        assert!(prompt.contains(
+            "For a list or enumeration, return exactly one source list item per claim."
+        ));
+        assert!(prompt.contains(
+            "Never combine two separate list items into one claim to fit the claim limit."
+        ));
     }
 
     #[test]
