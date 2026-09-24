@@ -180,7 +180,7 @@ cargo test
 
 Expected: the focused test passes; the complete suite reports zero failures.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add src-tauri/src/memory/retrieval.rs
@@ -204,11 +204,11 @@ git commit -m "feat(memory): trace Ask evidence and claim decisions"
 - Produces: `verification_units(citation_ids, evidence) -> Vec<String>` containing paragraph- or bullet-scoped text already sent to the model.
 - Consumes: the existing 1,500-character chunks and their 220-character overlap.
 
-- [ ] **Step 1: Add a synthetic multiline-list fixture**
+- [x] **Step 1: Add a synthetic multiline-list fixture**
 
 Create a non-sensitive fixture with 14 bullet items. At least three items must contain hard line wraps and blank lines inside a single bullet, and one item must cross a simulated chunk boundary. Use unique titles such as `Dynamic hero selection`, `Audience targeting`, `Live inventory`, and `Regional context` so accidental fusion is detectable.
 
-- [ ] **Step 2: Write failing tests for chunk position and conservative reflow**
+- [x] **Step 2: Write failing tests for chunk position and conservative reflow**
 
 Add an index test asserting `search_document_chunks` exposes the stored `chunk_index`.
 
@@ -254,7 +254,7 @@ fn verifier_never_fuses_adjacent_bullets() {
 
 Add a third test with two consecutive chunks from the same source whose overlap splits one bullet; the complete claim must pass only when both chunk citations are present.
 
-- [ ] **Step 3: Run focused tests and verify RED**
+- [x] **Step 3: Run focused tests and verify RED**
 
 Run:
 
@@ -265,11 +265,11 @@ cargo test memory::retrieval::tests::verifier_never_fuses_adjacent_bullets
 
 Expected: the wrapped-line test fails because each newline is currently treated as a sentence boundary; the adjacent-chunk test cannot be expressed because chunk position is missing.
 
-- [ ] **Step 4: Carry chunk position through retrieval**
+- [x] **Step 4: Carry chunk position through retrieval**
 
 Change the document query to select `c.chunk_index`, populate `DocumentChunkHit.chunk_index`, and copy it into source `EvidencePassage` values. Memory evidence uses `None`.
 
-- [ ] **Step 5: Implement adjacent-chunk reconstruction**
+- [x] **Step 5: Implement adjacent-chunk reconstruction**
 
 Build candidate source sequences only from cited evidence with the same `vault_path` and consecutive `chunk_index` values. Merge the known overlap by finding the longest exact suffix/prefix match; when no safe overlap exists, keep the chunks as separate units.
 
@@ -286,7 +286,7 @@ fn is_bullet_start(line: &str) -> bool {
 
 Start a new unit at every bullet marker. Within one unit, collapse whitespace and hard line wraps to one space. Do not globally replace newlines before identifying bullet boundaries. Keep paragraph units separate when a sentence ends with `.`, `!`, `?`, or `;`. Feed these units to the existing term, number, subject, negation, relation-frame, and sentence-scope checks.
 
-- [ ] **Step 6: Run focused and complete Rust tests**
+- [x] **Step 6: Run focused and complete Rust tests**
 
 Run:
 
@@ -299,7 +299,7 @@ cargo test
 
 Expected: all new tests and all existing adversarial verifier tests pass.
 
-- [ ] **Step 7: Commit Task 2**
+- [x] **Step 7: Commit Task 2**
 
 ```bash
 git add src-tauri/src/memory/index.rs src-tauri/src/memory/retrieval.rs src-tauri/src/memory/fixtures/multiline-use-cases.txt
