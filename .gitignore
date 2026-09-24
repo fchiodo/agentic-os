@@ -28,6 +28,7 @@ __pycache__/
 *.py[cod]
 
 # Local dev artifacts
+.worktrees/
 .playwright-cli
 output
 document-converter-output/
