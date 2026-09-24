@@ -1,8 +1,7 @@
 """Direct, network-disabled MLX adapter for PaddleOCR-VL.
 
-This is deliberately a narrow Phase 1/2 adapter. Rust will eventually own PDF
-inspection, job lifecycle, model verification, and output reconstruction. The
-sidecar accepts a verified local model directory and a local image path only.
+Rust owns inspection, jobs, verification and reconstruction. This module is
+only the engine adapter at the local process boundary.
 """
 
 from __future__ import annotations
@@ -117,6 +116,6 @@ class PaddleOcrVlEngine:
 
     @staticmethod
     def _validated_token_limit(value: object) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4096:
-            raise EngineError("INVALID_REQUEST", "maxTokens must be between 1 and 4096")
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 8192:
+            raise EngineError("INVALID_REQUEST", "maxTokens must be between 1 and 8192")
         return value

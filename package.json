@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "dev:desktop": "tauri dev",
@@ -11,14 +15,15 @@
     "prepare:sidecars": "pnpm prepare:markitdown && pnpm prepare:ocr",
     "bootstrap:mac": "./scripts/bootstrap-macos.sh",
     "build": "tsc -b && vite build",
-    "build:desktop": "tauri build && pnpm sync:desktop-app",
+    "build:desktop": "CI=true tauri build --ci && pnpm sync:desktop-app",
     "sync:desktop-app": "./scripts/sync-desktop-app.sh",
     "check:native": "cargo check --manifest-path src-tauri/Cargo.toml",
     "check:ocr": "node scripts/check-ocr-sidecar.mjs",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:ocr": "python3.10 -m unittest discover -s tools/ocr-sidecar/tests -p 'test_*.py' -v",
+    "test:ocr": "pnpm prepare:ocr && src-tauri/target/ocr-sidecar/venv/bin/python -m unittest discover -s tools/ocr-sidecar/tests -p 'test_*.py' -v",
     "test:ocr:integration": "python3.10 tools/ocr-sidecar/tests/run_real_smoke.py",
+    "benchmark:ocr": "src-tauri/target/ocr-sidecar/venv/bin/python tools/ocr-sidecar/tests/benchmark.py",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort"
   },
   "dependencies": {

@@ -17,16 +17,30 @@ require_command() {
 [[ "$(uname -s)" == "Darwin" ]] || fail "Agentic OS desktop development requires macOS."
 [[ "$(uname -m)" == "arm64" ]] || fail "Document Converter v1 requires an Apple Silicon Mac (arm64)."
 
-macos_major="$(sw_vers -productVersion | cut -d. -f1)"
-[[ "$macos_major" -ge 14 ]] || fail "Document AI requires macOS 14 or newer. Found $(sw_vers -productVersion)."
+macos_version="$(sw_vers -productVersion)"
+macos_major="$(printf '%s' "$macos_version" | cut -d. -f1)"
+macos_minor="$(printf '%s' "$macos_version" | cut -d. -f2)"
+if [[ "$macos_major" -lt 26 ]] || { [[ "$macos_major" -eq 26 ]] && [[ "$macos_minor" -lt 2 ]]; }; then
+  fail "The pinned MLX runtime requires macOS 26.2 or newer. Found $macos_version."
+fi
 
 require_command node "Node.js is missing. Install a supported Node.js release (20 or newer), then rerun this script."
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
-[[ "$node_major" -ge 20 ]] || fail "Node.js 20 or newer is required. Found $(node --version)."
+node_minor="$(node -p 'process.versions.node.split(".")[1]')"
+if ! { [[ "$node_major" -eq 20 ]] && [[ "$node_minor" -ge 19 ]]; } \
+  && ! { [[ "$node_major" -ge 22 ]] && { [[ "$node_major" -gt 22 ]] || [[ "$node_minor" -ge 12 ]]; }; }; then
+  fail "Node.js 20.19+ or 22.12+ is required by Vite 8. Found $(node --version)."
+fi
 
 require_command pnpm "pnpm is missing. Enable Corepack or install pnpm, then rerun this script."
-require_command rustc "Rust is missing. Install Rust 1.77.2 or newer from https://rustup.rs, then rerun this script."
+required_pnpm="11.25.0"
+actual_pnpm="$(pnpm --version)"
+[[ "$actual_pnpm" == "$required_pnpm" ]] || fail "pnpm $required_pnpm is required. Found $actual_pnpm. Run: corepack prepare pnpm@$required_pnpm --activate"
+require_command rustc "Rust is missing. Install rustup and the repository-pinned Rust 1.98.1 toolchain from https://rustup.rs, then rerun this script."
 require_command cargo "Cargo is missing. Install the Rust toolchain, then rerun this script."
+required_rust="1.98.1"
+actual_rust="$(rustc --version | awk '{print $2}')"
+[[ "$actual_rust" == "$required_rust" ]] || fail "Rust $required_rust is required for reproducible builds. Found $actual_rust. With rustup, run: rustup toolchain install $required_rust"
 
 ocr_python="${AGENTIC_OS_OCR_PYTHON:-}"
 if [[ -z "$ocr_python" ]]; then

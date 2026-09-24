@@ -11,7 +11,7 @@
       "installedSizeBytes": 1930426592,
       "license": "Apache-2.0",
       "licenseUrl": "https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6/blob/c5630abae1d940eafe0697512a0325494b02ab42/LICENSE",
-      "minimumSidecarVersion": "0.1.0-spike",
+      "minimumSidecarVersion": "0.2.1",
       "protocolVersion": 1,
       "files": [
         {

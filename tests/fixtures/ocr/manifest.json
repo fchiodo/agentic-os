@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "fixtures": [
+    {
+      "id": "A",
+      "path": "digital-10-pages.pdf",
+      "expectedMode": "digital",
+      "pages": 10
+    },
+    {
+      "id": "B",
+      "path": "scanned-10-pages.pdf",
+      "expectedMode": "ocr",
+      "pages": 10
+    },
+    {
+      "id": "C",
+      "path": "table.pdf",
+      "expectedMode": "digital",
+      "pages": 2
+    },
+    {
+      "id": "D",
+      "path": "columns.pdf",
+      "expectedMode": "digital",
+      "pages": 2
+    },
+    {
+      "id": "E",
+      "path": "image.png",
+      "expectedMode": "ocr",
+      "pages": 1
+    },
+    {
+      "id": "mixed",
+      "path": "mixed.pdf",
+      "expectedMode": "hybrid",
+      "pages": 2
+    }
+  ]
+}

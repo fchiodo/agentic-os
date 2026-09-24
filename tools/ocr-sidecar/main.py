@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import platform
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
+from converter import convert_document
 from engine import EngineError, PaddleOcrVlEngine
 from protocol import PROTOCOL_VERSION, ProtocolError, error_message, message, parse_request
 
 
-SIDECAR_VERSION = "0.1.0-spike"
+SIDECAR_VERSION = "0.2.1"
 MODEL_ID = "PaddlePaddle/PaddleOCR-VL-1.6"
 MODEL_VERSION = "1.6"
 MODEL_REVISION = "c5630abae1d940eafe0697512a0325494b02ab42"
@@ -46,6 +48,8 @@ def dispatch(request: dict[str, object], engine: PaddleOcrVlEngine) -> bool:
                 runtimeVersion=package_version("mlx"),
                 modelRequired=f"{MODEL_ID}@{MODEL_REVISION}",
                 architecture=platform.machine(),
+                processId=os.getpid(),
+                processGroupId=os.getpgrp(),
             )
         )
         return True
@@ -59,12 +63,33 @@ def dispatch(request: dict[str, object], engine: PaddleOcrVlEngine) -> bool:
                 tables=True,
                 formulas=True,
                 images=True,
-                multipage=False,
+                multipage=True,
                 languages=["multilingual"],
-                cancellation=False,
-                phase="packaging-spike",
+                cancellation=True,
+                phase="document-converter-v1",
             )
         )
+        return True
+
+    if command == "convert":
+        job_id = request.get("jobId")
+
+        def report(stage: str, page: int | None, total_pages: int | None, label: str) -> None:
+            emit(
+                message(
+                    "progress",
+                    request_id,
+                    jobId=job_id,
+                    stage=stage,
+                    page=page,
+                    totalPages=total_pages,
+                    label=label,
+                    indeterminate=page is None or total_pages is None,
+                )
+            )
+
+        result = convert_document(request, engine, report)
+        emit(message("completed", request_id, jobId=job_id, result=result))
         return True
 
     if command == "load-model":
@@ -133,6 +158,16 @@ def main() -> None:
             )
 
 
+def isolate_process_group() -> None:
+    """Put the inference runtime and its workers in a killable private group."""
+    try:
+        os.setsid()
+    except PermissionError:
+        # This is safe when a launcher already made the process a group leader.
+        os.setpgid(0, 0)
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    isolate_process_group()
     main()

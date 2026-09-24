@@ -6,7 +6,7 @@ authors = ["FCHIODO"]
 license = "MIT"
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.98.1"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -28,6 +28,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2.3.5"
+tauri-plugin-dialog = "2.7.0"
 tauri = { version = "2.11.2", features = [] }
 thiserror = "2"
 tokio = { version = "1", features = ["process", "io-util", "rt-multi-thread", "macros", "sync", "time", "net"] }
@@ -37,7 +38,13 @@ regex = "1"
 serde_yaml = "0.9"
 glob = "0.3"
 similar = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+libc = "0.2"
+lopdf = "0.34"
 pdf-extract = "=0.8.2"
 mail-parser = "0.11"
 msg_parser = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

@@ -4,6 +4,7 @@ mod commands;
 mod control_models;
 mod db;
 mod discovery;
+mod document_converter;
 mod error;
 mod harness;
 mod memory;
@@ -20,6 +21,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -54,6 +56,12 @@ pub fn run() {
                 .unwrap_or_else(|err| panic!("failed to rebuild memory index: {err}"));
             app.manage(db.clone());
             app.manage(commands::AskCancellations::default());
+            let document_converter = document_converter::DocumentConverterState::initialize(
+                app.handle(),
+                &db,
+            )
+            .unwrap_or_else(|err| panic!("failed to initialize Document Converter: {err}"));
+            app.manage(document_converter);
 
             // Memory maintenance scheduler (MEMORY-SPEC §6): sweep on app
             // start, then every 24h while the app runs. Failures are logged,
@@ -122,7 +130,32 @@ pub fn run() {
             commands::memory_retrieval_eval_case_save,
             commands::memory_orbit_map,
             commands::skills_distill,
+            document_converter::commands::document_converter_get_status,
+            document_converter::commands::document_converter_get_model_status,
+            document_converter::commands::document_converter_install_model,
+            document_converter::commands::document_converter_cancel_model_download,
+            document_converter::commands::document_converter_repair_model,
+            document_converter::commands::document_converter_remove_model,
+            document_converter::commands::document_converter_choose_files,
+            document_converter::commands::document_converter_inspect_paths,
+            document_converter::commands::document_converter_choose_destination,
+            document_converter::commands::document_converter_create_jobs,
+            document_converter::commands::document_converter_cancel_job,
+            document_converter::commands::document_converter_cancel_all,
+            document_converter::commands::document_converter_retry_job,
+            document_converter::commands::document_converter_get_job,
+            document_converter::commands::document_converter_list_jobs,
+            document_converter::commands::document_converter_delete_history_entry,
+            document_converter::commands::document_converter_get_preview,
+            document_converter::commands::document_converter_read_asset,
+            document_converter::commands::document_converter_open_output,
+            document_converter::commands::document_converter_import_to_memory,
         ])
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<document_converter::DocumentConverterState>().shutdown();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
