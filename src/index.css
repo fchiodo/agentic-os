@@ -4376,23 +4376,6 @@ sup:has(> .memory-cite-chip) {
 .orbit-evidence-legend small { color: var(--orbit-faint); font-size: 8px; }
 .orbit-distance-note { margin-left: 5px; padding-left: 10px; border-left: 1px solid var(--orbit-border); }
 
-.orbit-empty-ring {
-  position: absolute;
-  z-index: 5;
-  top: 57%;
-  left: 50%;
-  max-width: 230px;
-  padding: 6px 9px;
-  border: 1px dashed var(--orbit-border-strong);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--orbit-bg) 88%, transparent);
-  color: var(--orbit-muted);
-  font-size: 9px;
-  text-align: center;
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-
 .orbit-activity-dock {
   position: absolute;
   z-index: 8;
@@ -4648,6 +4631,30 @@ sup:has(> .memory-cite-chip) {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+}
+
+.orbit-group-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--ivory-light);
+  color: var(--slate-light);
+  font-size: 10px;
+}
+
+.orbit-group-progress strong {
+  color: var(--slate-dark);
+  font-family: var(--mono);
+}
+
+.orbit-group-progress button {
+  min-height: 28px;
+  padding: 0 8px;
+  white-space: nowrap;
 }
 
 .orbit-detail-actions button {

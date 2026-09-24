@@ -215,7 +215,59 @@ describe('OrbitMapView exploration', () => {
     expect(sigmaMock.setState).not.toHaveBeenCalledWith(expect.objectContaining({ ratio: 0.58 }))
 
     fireEvent.keyDown(window, { key: 'Escape' })
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'System overview' })).toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByLabelText('Map selection details')).not.toBeInTheDocument())
+  })
+
+  it('keeps a large group readable and never reveals every structural child on selection', async () => {
+    const current = fixture()
+    const bulkNodes = Array.from({ length: 60 }, (_, index) => node({
+      id: `skill:bulk-${index.toString().padStart(2, '0')}`,
+      kind: 'skill',
+      ring: 1,
+      label: `Bulk skill ${index + 1}`,
+      groupId: 'group:skill:test',
+    }))
+    const bulkEdges = bulkNodes.map((child, index) => ({
+      id: `edge:bulk-${index}`,
+      source: 'group:skill:test',
+      target: child.id,
+      relation: 'contains',
+      evidence: 'declared' as const,
+      weight: 1,
+      activityAt: null,
+      provenance: [{ kind: 'registry', reference: child.sourceRef, detail: 'Discovered skill', ts: null }],
+    }))
+    orbitHookState.current = { ...current, nodes: [...current.nodes, ...bulkNodes], edges: [...current.edges, ...bulkEdges] }
+    renderMap()
+
+    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'group:skill:test' }))
+    expect(sigmaMock.graph?.nodes().filter((id) => id.startsWith('skill:bulk-'))).toHaveLength(0)
+    expect(sigmaMock.graph?.hasEdge('edge:bulk-0')).toBe(false)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand group' }))
+    await waitFor(() => expect(sigmaMock.graph?.nodes().filter((id) => id.startsWith('skill:bulk-'))).toHaveLength(12))
+    expect(sigmaMock.graph?.getNodeAttribute('group:skill:test', 'forceLabel')).toBe(false)
+    expect(screen.getByText((_content, element) => element?.textContent === '12 of 61 items shown')).toBeInTheDocument()
+  })
+
+  it('finds a late child without expanding hundreds of siblings', async () => {
+    const current = fixture()
+    const bulkNodes = Array.from({ length: 60 }, (_, index) => node({
+      id: `skill:bulk-${index.toString().padStart(2, '0')}`,
+      kind: 'skill',
+      ring: 1,
+      label: `Bulk skill ${index + 1}`,
+      groupId: 'group:skill:test',
+    }))
+    orbitHookState.current = { ...current, nodes: [...current.nodes, ...bulkNodes] }
+    renderMap()
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search all map items' }), { target: { value: 'Bulk skill 60' } })
+    fireEvent.click(screen.getByRole('option', { name: /Bulk skill 60/ }))
+
+    expect(await screen.findByRole('heading', { name: 'Bulk skill 60' })).toBeInTheDocument()
+    expect(sigmaMock.graph?.hasNode('skill:bulk-59')).toBe(true)
+    expect(sigmaMock.graph?.nodes().filter((id) => id.startsWith('skill:bulk-')).length).toBeLessThanOrEqual(13)
   })
 
   it('separates recorded activity from unavailable telemetry', async () => {
@@ -304,5 +356,24 @@ describe('radialPositions', () => {
     console.info(`ORBIT_LAYOUT_FIXTURE={"nodes":${large.length},"layoutMs":${elapsed.toFixed(3)}}`)
     expect(positions.size).toBe(large.length)
     expect(elapsed).toBeLessThan(100)
+  })
+
+  it('distributes top-level groups evenly around their category ring', () => {
+    const groups = Array.from({ length: 8 }, (_, index) => node({
+      id: `group:application:${index}`,
+      kind: 'application_group',
+      ring: 4,
+      label: `Application group ${index}`,
+      aggregate: true,
+    }))
+    const positions = radialPositions([
+      node({ id: 'core:agentic-os', kind: 'core', ring: 0, label: 'AgenticOS' }),
+      ...groups,
+    ])
+    const angles = groups
+      .map((group) => { const position = positions.get(group.id)!; const angle = Math.atan2(position.y, position.x); return angle < 0 ? angle + Math.PI * 2 : angle })
+      .sort((left, right) => left - right)
+    const gaps = angles.map((angle, index) => ((angles[(index + 1) % angles.length] ?? 0) - angle + Math.PI * 2) % (Math.PI * 2))
+    for (const gap of gaps) expect(gap).toBeCloseTo((Math.PI * 2) / groups.length, 6)
   })
 })

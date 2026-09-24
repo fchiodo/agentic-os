@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { useMemoryConfirm, useMemoryOrbitMap } from '@/features/memory/hooks'
-import { radialPositions } from '@/features/memory/orbit-layout'
+import { ORBIT_RING_RADII, radialPositions } from '@/features/memory/orbit-layout'
 import type {
   OrbitActivity,
   OrbitActivityWindow,
@@ -42,9 +42,11 @@ import { useTaskEventsStore } from '@/store/task-events'
 import { useWorkbenchStore } from '@/store/workbench'
 
 const DOMAINS = ['work', 'planphysique', 'personal', 'family', 'finance', 'research'] as const
-const DEFAULT_CHILD_LIMIT = 48
+const DEFAULT_CHILD_LIMIT = 12
 const SEARCH_PAGE_SIZE = 40
 const DEFAULT_EDGE_LIMIT = 120
+const SELECTED_RELATION_NODE_LIMIT = 18
+const STRUCTURAL_RELATIONS = new Set(['contains', 'contains_source', 'governs', 'registers'])
 
 type MapMode = 'structure' | 'activity'
 type MapTheme = 'dark' | 'light'
@@ -69,11 +71,11 @@ const DOMAIN_COLORS: Record<string, string> = {
 }
 
 const RING_META = [
-  { color: '#f4f1e9', icon: Layers3, label: 'Agentic OS', radius: 0 },
-  { color: '#ef835d', icon: Wand2, label: 'Skills', radius: 13 },
-  { color: '#6fa8dc', icon: Database, label: 'Memory', radius: 25 },
-  { color: '#83a866', icon: Workflow, label: 'Routines', radius: 37 },
-  { color: '#a788c0', icon: AppWindow, label: 'Applications', radius: 49 },
+  { color: '#f4f1e9', icon: Layers3, label: 'Agentic OS', radius: ORBIT_RING_RADII[0] },
+  { color: '#ef835d', icon: Wand2, label: 'Skills', radius: ORBIT_RING_RADII[1] },
+  { color: '#6fa8dc', icon: Database, label: 'Memory', radius: ORBIT_RING_RADII[2] },
+  { color: '#83a866', icon: Workflow, label: 'Routines', radius: ORBIT_RING_RADII[3] },
+  { color: '#a788c0', icon: AppWindow, label: 'Applications', radius: ORBIT_RING_RADII[4] },
 ] as const
 
 const EMPTY_NODES: OrbitNode[] = []
@@ -115,6 +117,10 @@ function nodeColor(node: OrbitNode, theme: MapTheme): string {
   return RING_META[node.ring].color
 }
 
+function compactGraphLabel(label: string): string {
+  return label.length > 24 ? `${label.slice(0, 22).trimEnd()}…` : label
+}
+
 function makeGraph(
   nodes: OrbitNode[],
   edges: OrbitEdge[],
@@ -122,14 +128,15 @@ function makeGraph(
   theme: MapTheme,
 ): Graph {
   const graph = new Graph({ multi: true, type: 'directed' })
-  const positions = radialPositions(nodes)
+  const visibleNodes = nodes.filter((node) => visibleIds.has(node.id))
+  const positions = radialPositions(visibleNodes)
   const guideColor = theme === 'dark' ? '#8f99a31f' : '#69665f24'
   const sectorColor = theme === 'dark' ? '#6fa8dc24' : '#6a9bcc2b'
   const anchors: Array<[string, number, number]> = [
-    ['__layout:north', 0, -54],
-    ['__layout:east', 54, 0],
-    ['__layout:south', 0, 54],
-    ['__layout:west', -54, 0],
+    ['__layout:north', 0, -90],
+    ['__layout:east', 90, 0],
+    ['__layout:south', 0, 90],
+    ['__layout:west', -90, 0],
   ]
   anchors.forEach(([id, x, y]) => graph.addNode(id, { x, y, size: 0.01, label: '', color: '#ffffff00', hidden: true }))
 
@@ -157,8 +164,8 @@ function makeGraph(
     // Sigma also hides every edge incident to a hidden node. Keep sector
     // anchors renderable but fully transparent so their guide line remains
     // visible without introducing decorative points.
-    graph.addNode(inner, { x: Math.cos(angle) * 18, y: Math.sin(angle) * 18, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
-    graph.addNode(outer, { x: Math.cos(angle) * 32, y: Math.sin(angle) * 32, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
+    graph.addNode(inner, { x: Math.cos(angle) * 29, y: Math.sin(angle) * 29, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
+    graph.addNode(outer, { x: Math.cos(angle) * 49, y: Math.sin(angle) * 49, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
     graph.addEdgeWithKey(`__sector-edge:${index}`, inner, outer, { color: sectorColor, size: 0.55, ringGuide: true, type: 'line', zIndex: 0 })
   }
 
@@ -167,10 +174,10 @@ function makeGraph(
     const position = positions.get(node.id) ?? { x: 0, y: 0 }
     graph.addNode(node.id, {
       ...position,
-      label: node.label,
+      label: compactGraphLabel(node.label),
       size: nodeSize(node),
       color: nodeColor(node, theme),
-      forceLabel: node.aggregate || node.kind === 'core',
+      forceLabel: node.kind === 'core' || node.kind === 'memory_domain',
       nodeKind: node.kind,
       status: node.status,
       zIndex: node.aggregate ? 3 : 2,
@@ -273,7 +280,8 @@ export function OrbitMapView({
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [focusRequest, setFocusRequest] = useState<{ id: string; sequence: number } | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
-  const [detailOpen, setDetailOpen] = useState(true)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [showRelations, setShowRelations] = useState(false)
   const [relationLimit, setRelationLimit] = useState(DEFAULT_EDGE_LIMIT)
   const [relationTypes, setRelationTypes] = useState<Set<string>>(() => new Set(DEFAULT_RELATION_TYPES))
@@ -309,6 +317,7 @@ export function OrbitMapView({
       setSelectedId(null)
       setSelectedTaskId(null)
       setSelectedEdgeId(null)
+      setDetailOpen(false)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -358,13 +367,16 @@ export function OrbitMapView({
     if (selectedNode) {
       visible.add(selectedNode.id)
       if (selectedNode.groupId) visible.add(selectedNode.groupId)
+      let relatedCount = 0
       for (const edge of allEdges) {
-        if (!relationIsEnabled(edge) || (edge.relation === 'registers' && !showRelations)) continue
+        if (!relationIsEnabled(edge) || STRUCTURAL_RELATIONS.has(edge.relation)) continue
         const relatedId = edge.source === selectedNode.id ? edge.target : edge.target === selectedNode.id ? edge.source : null
         if (!relatedId) continue
         visible.add(relatedId)
         const parent = nodeById.get(relatedId)?.groupId
         if (parent) visible.add(parent)
+        relatedCount += 1
+        if (relatedCount >= SELECTED_RELATION_NODE_LIMIT) break
       }
     }
     for (const nodeId of selectedActivityNodeIds) {
@@ -373,13 +385,13 @@ export function OrbitMapView({
       if (parent) visible.add(parent)
     }
     return visible
-  }, [allEdges, childrenByGroup, expandedGroups, groupLimits, nodeById, nodes, relationIsEnabled, selectedActivityNodeIds, selectedNode, showRelations])
+  }, [allEdges, childrenByGroup, expandedGroups, groupLimits, nodeById, nodes, relationIsEnabled, selectedActivityNodeIds, selectedNode])
 
   const taskEdges = useMemo(() => activityEdges(selectedActivity), [selectedActivity])
   const allRelationTypes = useMemo(() => [...new Set([...allEdges, ...taskEdges].map((edge) => edge.relation))].sort(), [allEdges, taskEdges])
   const displayedEdges = useMemo(() => {
     if (mode === 'activity') return taskEdges.filter(relationIsEnabled).slice(0, relationLimit)
-    const selected = selectedId ? allEdges.filter((edge) => (edge.source === selectedId || edge.target === selectedId) && relationIsEnabled(edge)) : []
+    const selected = selectedId ? allEdges.filter((edge) => (edge.source === selectedId || edge.target === selectedId) && relationIsEnabled(edge) && !STRUCTURAL_RELATIONS.has(edge.relation)) : []
     const advanced = showRelations ? allEdges.filter(relationIsEnabled) : []
     const byId = new Map<string, OrbitEdge>()
     for (const edge of [...selected, ...advanced]) {
@@ -391,11 +403,15 @@ export function OrbitMapView({
       .slice(0, relationLimit)
   }, [allEdges, mode, relationIsEnabled, relationLimit, selectedId, showRelations, taskEdges])
 
-  const selectedEdge = displayedEdges.find((edge) => edge.id === selectedEdgeId) ?? null
+  const selectedEdge = [...allEdges, ...taskEdges].find((edge) => edge.id === selectedEdgeId) ?? null
+  const renderedEdges = useMemo(
+    () => displayedEdges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target)),
+    [displayedEdges, visibleIds],
+  )
 
   const nextGraph = useMemo(() => {
-    return makeGraph(nodes, displayedEdges, visibleIds, theme)
-  }, [displayedEdges, nodes, theme, visibleIds])
+    return makeGraph(nodes, renderedEdges, visibleIds, theme)
+  }, [nodes, renderedEdges, theme, visibleIds])
 
   useEffect(() => {
     if (!lastTaskEvent || Date.now() - Date.parse(lastTaskEvent.ts) > 10_000) return
@@ -421,10 +437,10 @@ export function OrbitMapView({
       edgeProgramClasses: { declared: EdgeArrowProgram, inferred: EdgeArrowProgram, line: EdgeLineProgram, observed: EdgeArrowProgram },
       enableEdgeEvents: true,
       labelColor: { color: '#f4f1e9' },
-      labelDensity: 0.55,
+      labelDensity: 0.22,
       labelFont: 'Anthropic Sans, Arial, sans-serif',
-      labelRenderedSizeThreshold: 6,
-      labelSize: 11,
+      labelRenderedSizeThreshold: 7,
+      labelSize: 10,
       renderEdgeLabels: false,
       zIndex: true,
     })
@@ -443,7 +459,15 @@ export function OrbitMapView({
     })
     renderer.on('clickStage', () => {
       setSelectedId(null)
+      setSelectedTaskId(null)
       setSelectedEdgeId(null)
+      setDetailOpen(false)
+    })
+    renderer.on('enterNode', ({ node }) => {
+      if (!node.startsWith('__')) setHoveredId(node)
+    })
+    renderer.on('leaveNode', ({ node }) => {
+      setHoveredId((current) => current === node ? null : current)
     })
     return () => {
       renderer.kill()
@@ -568,10 +592,16 @@ export function OrbitMapView({
       highlighted.add(selectedId)
       if (graph.hasNode(selectedId)) for (const neighbor of graph.neighbors(selectedId)) highlighted.add(neighbor)
     }
+    if (selectedNode?.aggregate && expandedGroups.has(selectedNode.id)) {
+      const limit = groupLimits[selectedNode.id] ?? DEFAULT_CHILD_LIMIT
+      for (const child of (childrenByGroup.get(selectedNode.id) ?? []).slice(0, limit)) highlighted.add(child.id)
+    }
     const hasHighlight = highlighted.size > 0
     renderer.setSetting('nodeReducer', (node, data) => {
       if (data.ringGuide || node.startsWith('__')) return data
-      if (highlighted.has(node)) return { ...data, highlighted: true, forceLabel: true, size: data.size * 1.18 }
+      if (node === selectedId) return { ...data, highlighted: true, forceLabel: true, size: data.size * 1.22 }
+      if (node === hoveredId) return { ...data, highlighted: true, forceLabel: true, size: data.size * 1.12 }
+      if (highlighted.has(node)) return { ...data, highlighted: true, forceLabel: data.nodeKind === 'memory_domain', size: data.size * 1.08 }
       if (hasHighlight) return { ...data, color: theme === 'dark' ? '#4a5056' : '#d1cfc5', label: '' }
       return data
     })
@@ -582,7 +612,7 @@ export function OrbitMapView({
       return { ...data, color: theme === 'dark' ? '#424950' : '#ddd9cf', hidden: hasHighlight }
     })
     renderer.refresh()
-  }, [livePulse, nextGraph, selectedActivityNodeIds, selectedId, theme])
+  }, [childrenByGroup, expandedGroups, groupLimits, hoveredId, livePulse, nextGraph, selectedActivityNodeIds, selectedId, selectedNode, theme])
 
   useEffect(() => {
     if (!focusRequest) return
@@ -665,6 +695,7 @@ export function OrbitMapView({
     setShowRelations(false)
     setSearch('')
     setSearchLimit(SEARCH_PAGE_SIZE)
+    setDetailOpen(false)
     const camera = rendererRef.current?.getCamera()
     if (camera) {
       const target = { x: 0.5, y: 0.5, ratio: 1 }
@@ -763,7 +794,7 @@ export function OrbitMapView({
         <div className="orbit-context-actions"><button disabled={breadcrumb.length === 1} onClick={goBackLevel} type="button"><ArrowLeft aria-hidden="true" size={14} />Back</button><button onClick={resetOverview} type="button"><RotateCcw aria-hidden="true" size={14} />Reset overview</button><button disabled={!selectedNode} onClick={() => selectedNode && requestFocus(selectedNode.id)} type="button"><Crosshair aria-hidden="true" size={14} />Center selection</button>{!detailOpen && <button onClick={() => setDetailOpen(true)} type="button"><Eye aria-hidden="true" size={14} />Show details</button>}</div>
       </div>
 
-      <div className="orbit-active-filters" aria-label="Active map filters"><span>Mode: {mode}</span>{domain && <span>Domain: {DOMAIN_LABELS[domain]}</span>}{includeSensitive && <span>Sensitive content included</span>}{query && <span>Search: “{search.trim()}” · {matchingSearchResults.length} results</span>}{expandedGroups.size > 0 && <span>{expandedGroups.size} expanded group{expandedGroups.size === 1 ? '' : 's'}</span>}{livePulse && <span className="orbit-live-activity" role="status">Observed event received</span>}</div>
+      <div className="orbit-active-filters" aria-label="Active map filters"><span>Mode: {mode}</span>{domain && <span>Domain: {DOMAIN_LABELS[domain]}</span>}{includeSensitive && <span>Sensitive content included</span>}{query && <span>Search: “{search.trim()}” · {matchingSearchResults.length} results</span>}{expandedGroups.size > 0 && <span>{expandedGroups.size} expanded group{expandedGroups.size === 1 ? '' : 's'}</span>}{mode === 'structure' && counts?.routines === 0 && <span role="status">Routines ring empty · no indexed routine</span>}{livePulse && <span className="orbit-live-activity" role="status">Observed event received</span>}</div>
       {orbitQuery.error && <div className="inline-error" role="alert">{errorMessage(orbitQuery.error)}</div>}
 
       <div className={`orbit-main ${detailOpen ? '' : 'is-detail-closed'}`}>
@@ -772,9 +803,8 @@ export function OrbitMapView({
           {mode === 'activity' && <div className="orbit-activity-dock" aria-label="Recorded task activity"><div><strong>Recorded tasks</strong><small>{activityWindow === 'today' ? 'Today' : 'Last 7 days'}</small></div><div className="orbit-activity-list">{orbitQuery.data?.activities.map((activity) => <button aria-pressed={selectedTaskId === activity.taskId} className={selectedTaskId === activity.taskId ? 'is-active' : ''} key={activity.taskId} onClick={() => selectTask(activity)} type="button"><span>{activity.title}<small>{DOMAIN_LABELS[activity.domain] ?? activity.domain} · {stateLabel(activity.status)}</small></span><strong>{activity.telemetryAvailable ? activity.eventCount : 'N/A'}</strong></button>)}{orbitQuery.data?.activities.length === 0 && <p>No recorded task activity in this interval.</p>}</div></div>}
           <div aria-label="Interactive orbital graph" className="orbit-canvas" ref={canvasRef} />
           {orbitQuery.isLoading && <div className="orbit-loading"><Network aria-hidden="true" size={34} /><p>Composing authorized local registries…</p></div>}
-          {!orbitQuery.isLoading && counts?.routines === 0 && <div className="orbit-empty-ring" role="status">No routines detected in indexed sources.</div>}
           <div className="orbit-evidence-legend" aria-label="Relation evidence legend">{(Object.entries(EVIDENCE_META) as [OrbitEdge['evidence'], (typeof EVIDENCE_META)[OrbitEdge['evidence']]][]).map(([key, meta]) => <span key={key}><i className={`is-${key}`} style={{ borderColor: meta.color }} />{meta.label}<small>{meta.style}</small></span>)}<span className="orbit-distance-note">Position shows category only, never semantic similarity.</span></div>
-          <div className="orbit-relations-control"><button aria-expanded={showRelations} onClick={() => setShowRelations((current) => !current)} type="button">{showRelations ? <EyeOff aria-hidden="true" size={14} /> : <Eye aria-hidden="true" size={14} />}Show relations</button>{showRelations && <div className="orbit-relations-popover"><strong>Advanced relation rendering</strong><fieldset><legend>Evidence</legend>{(['declared', 'observed', 'inferred'] as const).map((evidence) => <label key={evidence}><input checked={evidenceTypes.has(evidence)} onChange={() => setEvidenceTypes((current) => { const next = new Set(current); if (next.has(evidence)) next.delete(evidence); else next.add(evidence); return next })} type="checkbox" />{EVIDENCE_META[evidence].label}</label>)}</fieldset><fieldset><legend>Types</legend>{allRelationTypes.map((relation) => <label key={relation}><input checked={relationTypes.has(relation)} onChange={() => setRelationTypes((current) => { const next = new Set(current); if (next.has(relation)) next.delete(relation); else next.add(relation); return next })} type="checkbox" />{relation}</label>)}</fieldset><label>Rendering limit<select onChange={(event) => setRelationLimit(Number(event.target.value))} value={relationLimit}><option value="60">60 edges</option><option value="120">120 edges</option><option value="240">240 edges</option></select></label><small>{displayedEdges.length} rendered of {allEdges.length} authorized relations.</small></div>}</div>
+          <div className="orbit-relations-control"><button aria-expanded={showRelations} onClick={() => setShowRelations((current) => !current)} type="button">{showRelations ? <EyeOff aria-hidden="true" size={14} /> : <Eye aria-hidden="true" size={14} />}Show relations</button>{showRelations && <div className="orbit-relations-popover"><strong>Advanced relation rendering</strong><fieldset><legend>Evidence</legend>{(['declared', 'observed', 'inferred'] as const).map((evidence) => <label key={evidence}><input checked={evidenceTypes.has(evidence)} onChange={() => setEvidenceTypes((current) => { const next = new Set(current); if (next.has(evidence)) next.delete(evidence); else next.add(evidence); return next })} type="checkbox" />{EVIDENCE_META[evidence].label}</label>)}</fieldset><fieldset><legend>Types</legend>{allRelationTypes.map((relation) => <label key={relation}><input checked={relationTypes.has(relation)} onChange={() => setRelationTypes((current) => { const next = new Set(current); if (next.has(relation)) next.delete(relation); else next.add(relation); return next })} type="checkbox" />{relation}</label>)}</fieldset><label>Rendering limit<select onChange={(event) => setRelationLimit(Number(event.target.value))} value={relationLimit}><option value="60">60 edges</option><option value="120">120 edges</option><option value="240">240 edges</option></select></label><small>{renderedEdges.length} rendered of {allEdges.length} authorized relations.</small></div>}</div>
           <details className="orbit-accessible-list"><summary><ListTree aria-hidden="true" size={14} />Explore as an accessible list</summary><div>{nodes.filter((node) => node.groupId === null && node.kind !== 'core').map((group) => { const children = childrenByGroup.get(group.id) ?? []; const expanded = expandedGroups.has(group.id); const limit = groupLimits[group.id] ?? DEFAULT_CHILD_LIMIT; return <section key={group.id}><div><button onClick={() => selectNode(group.id)} type="button">{group.label} · {group.count}</button><button aria-expanded={expanded} onClick={() => toggleGroup(group.id)} type="button">{expanded ? 'Collapse' : 'Expand'}</button></div>{expanded && <ul>{children.slice(0, limit).map((child) => <li key={child.id}><button onClick={() => selectNode(child.id, true)} type="button">{child.label}<small>{kindLabel(child)}</small></button></li>)}</ul>}{expanded && children.length > limit && <button onClick={() => setGroupLimits((current) => ({ ...current, [group.id]: limit + DEFAULT_CHILD_LIMIT }))} type="button">Show {Math.min(DEFAULT_CHILD_LIMIT, children.length - limit)} more</button>}</section> })}</div></details>
         </section>
 
@@ -794,6 +824,7 @@ export function OrbitMapView({
             <div className="orbit-detail-badges"><StatusBadge label={stateLabel(selectedNode.operationalState)} tone={selectedNode.operationalState === 'attention' || selectedNode.status === 'stale' || selectedNode.connectionState === 'failing' ? 'warning' : selectedNode.operationalState === 'running' || selectedNode.operationalState === 'in_use' || selectedNode.connectionState === 'working' ? 'success' : 'neutral'} />{selectedNode.catalogState !== 'not_applicable' && <span>Catalog: {stateLabel(selectedNode.catalogState)}</span>}{selectedNode.usageState !== 'not_applicable' && <span>Usage: {stateLabel(selectedNode.usageState)}</span>}{selectedNode.connectionState !== 'not_applicable' && <span>Connection: {stateLabel(selectedNode.connectionState)}</span>}{selectedNode.sensitivity && <span><ShieldCheck aria-hidden="true" size={13} />{selectedNode.sensitivity}</span>}</div>
             {selectedNode.lastActivityAt && <dl className="orbit-user-meta"><dt>Last observed activity</dt><dd>{formatRelativeTime(Date.parse(selectedNode.lastActivityAt))}</dd></dl>}
             <div className="orbit-relations"><h3>Main relations <span>{nodeRelations.length}</span></h3>{nodeRelations.slice(0, 18).map((edge) => { const otherId = edge.source === selectedNode.id ? edge.target : edge.source; const other = nodeById.get(otherId); return <div className="orbit-relation-row" key={edge.id}><button onClick={() => setSelectedEdgeId(edge.id)} type="button"><span><strong>{relationLabel(edge, selectedNode.id)}</strong><small>{EVIDENCE_META[edge.evidence].label} · {edge.source === selectedNode.id ? 'outgoing' : 'incoming'} · {edge.weight}</small></span><span>{other?.label ?? otherId}</span></button><button aria-label={`Go to ${other?.label ?? otherId}`} onClick={() => selectNode(otherId, true)} type="button"><ChevronRight aria-hidden="true" size={14} /></button></div> })}{nodeRelations.length === 0 && <p className="row-subtle">No governed relation is recorded for this item with the active relation filters.</p>}</div>
+            {selectedNode.aggregate && expandedGroups.has(selectedNode.id) && (() => { const childCount = (childrenByGroup.get(selectedNode.id) ?? []).length; const visibleCount = Math.min(groupLimits[selectedNode.id] ?? DEFAULT_CHILD_LIMIT, childCount); return <div className="orbit-group-progress"><span><strong>{visibleCount}</strong> of {childCount} items shown</span>{visibleCount < childCount && <button className="secondary-button" onClick={() => setGroupLimits((current) => ({ ...current, [selectedNode.id]: visibleCount + DEFAULT_CHILD_LIMIT }))} type="button">Show {Math.min(DEFAULT_CHILD_LIMIT, childCount - visibleCount)} more</button>}</div> })()}
             <div className="orbit-detail-actions">{selectedActivity && <button className="secondary-button" onClick={() => { setSelectedId(null); setSelectedEdgeId(null) }} type="button"><ArrowLeft aria-hidden="true" size={14} />Back to task</button>}{selectedNode.aggregate && <button className="secondary-button" onClick={() => toggleGroup(selectedNode.id)} type="button">{expandedGroups.has(selectedNode.id) ? 'Collapse group' : 'Expand group'}</button>}{selectedNode.actions.includes('open_memory') && selectedNode.sourcePath && <button className="primary-button" onClick={() => onOpenMemory(selectedNode.sourcePath!)} type="button"><ExternalLink aria-hidden="true" size={14} />Open document</button>}{selectedNode.actions.includes('open_source') && onOpenSource && <button className="primary-button" onClick={() => onOpenSource(selectedNode.id.replace(/^source:/, ''), selectedNode.domain ?? undefined)} type="button"><FileText aria-hidden="true" size={14} />Open original source</button>}{catalogId(selectedNode) && <button className="primary-button" onClick={() => navigateCatalog(selectedNode)} type="button"><ExternalLink aria-hidden="true" size={14} />Open in Catalog</button>}{selectedNode.actions.includes('confirm_memory') && <button className="secondary-button" disabled={confirmMutation.isPending} onClick={() => confirmMutation.mutate(selectedNode.id.replace(/^memory:/, ''))} type="button"><CheckCircle2 aria-hidden="true" size={14} />Confirm still true</button>}</div>
             <details className="orbit-technical"><summary>Technical details</summary><dl><dt>ID</dt><dd><code>{selectedNode.id}</code></dd><dt>Source ref</dt><dd><code>{selectedNode.sourceRef}</code></dd>{selectedNode.sourcePath && <><dt>Path</dt><dd><code>{selectedNode.sourcePath}</code></dd></>}<dt>Visible items</dt><dd>{selectedNode.count}</dd><dt>Domains</dt><dd>{selectedNode.domains.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd><dt>Capabilities</dt><dd>{selectedNode.capabilities.map((item) => `${item.value} (${item.evidence})`).join(', ') || 'None declared'}</dd></dl></details>
           </> : selectedActivity ? <>
