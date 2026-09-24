@@ -835,7 +835,7 @@ function GovernanceRail({
   const visibleProposals = railTab === 'pending' ? pending : activity
 
   return (
-    <aside aria-hidden={collapsed} className={`memory-governance-rail surface ${collapsed ? 'is-closed' : ''}`}>
+    <aside aria-hidden={collapsed} className={`memory-governance-rail surface ${collapsed ? 'is-closed' : ''}`} inert={collapsed}>
       <div className="memory-governance-header">
         <Shield aria-hidden="true" size={17} />
         <span className="memory-governance-title">Governance</span>
@@ -874,7 +874,7 @@ export function MemoryPage() {
   const [showImporter, setShowImporter] = useState(false)
   const [selectedImportId, setSelectedImportId] = useState<string | null>(null)
   const [railTab, setRailTab] = useState<'pending' | 'activity'>('pending')
-  const [governanceOpen, setGovernanceOpen] = useState(true)
+  const [governanceOpen, setGovernanceOpen] = useState(false)
 
   const treeQuery = useMemoryTree(domainFilter)
   const searchQuery = useMemorySearch(searchText, domainFilter, includeStale)
