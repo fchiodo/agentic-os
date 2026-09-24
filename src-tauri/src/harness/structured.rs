@@ -33,6 +33,43 @@ pub fn no_cancel() -> CancelSignal {
 const WAIT_NOTICE_SECS: u64 = 15;
 const MAX_DIAGNOSTIC_CHARS: usize = 200;
 
+fn structured_codex_overrides() -> Vec<String> {
+    let config = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+        .and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok())
+        .unwrap_or_default();
+    structured_codex_overrides_from_config(&config)
+}
+
+fn structured_codex_overrides_from_config(config: &str) -> Vec<String> {
+    let mut overrides = vec![
+        r#"model_reasoning_effort="medium""#.to_string(),
+        "features.plugins=false".to_string(),
+        "features.apps=false".to_string(),
+    ];
+    let mut server_names = config
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|root| root.get("mcp_servers").and_then(toml::Value::as_table).cloned())
+        .map(|servers| servers.into_iter().map(|(name, _)| name).collect::<Vec<_>>())
+        .unwrap_or_default();
+    server_names.sort();
+    server_names.dedup();
+    if !server_names.is_empty() {
+        let disabled_servers = server_names
+            .into_iter()
+            .map(|name| {
+                let quoted_name = toml::Value::String(name).to_string();
+                format!("{quoted_name}={{enabled=false}}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        overrides.push(format!("mcp_servers={{{disabled_servers}}}"));
+    }
+    overrides
+}
+
 #[derive(Debug, Clone)]
 pub struct StructuredModelOutput {
     pub text: String,
@@ -107,23 +144,15 @@ pub async fn run_read_only_with_images(
         for image in &images {
             command.arg("-i").arg(image);
         }
+        // Structured turns are bounded evidence extraction, so they do not
+        // need the user's MCP servers, plugins, or apps. Codex merges `-c`
+        // tables with config.toml; `mcp_servers={}` therefore leaves existing
+        // servers enabled. Override every configured server explicitly while
+        // retaining the user's model provider and authentication settings.
+        for value in structured_codex_overrides() {
+            command.arg("-c").arg(value);
+        }
         command
-            // This call is a bounded, evidence-constrained JSON extraction,
-            // not open-ended reasoning — it must NOT inherit the user's
-            // interactive default (often "xhigh" for deep coding work),
-            // which turns a seconds-long turn into minutes (observed:
-            // "explain me the sierra admin API" against imported document
-            // evidence). "medium" keeps synthesis quality for genuine
-            // explanations at a fraction of the latency.
-            .arg("-c")
-            .arg(r#"model_reasoning_effort="medium""#)
-            // Structured turns are tool-less by contract, but the read-only
-            // sandbox does NOT gate MCP tool calls: any servers configured
-            // in ~/.codex/config.toml (Jira, Bitbucket, …) would be loaded
-            // and callable. Disabling them here keeps Ask/lint/vision turns
-            // hermetic and avoids their startup latency on every turn.
-            .arg("-c")
-            .arg("mcp_servers={}")
             .arg("-C")
             .arg(&work_dir)
             .current_dir(&work_dir)
@@ -419,5 +448,32 @@ not-json noise line
         let (accumulator, _) = ingest_all(output);
         let error = accumulator.finish().unwrap_err().to_string();
         assert!(error.contains("proxy timeout"));
+    }
+
+    #[test]
+    fn structured_turn_overrides_disable_every_configured_mcp_and_app_source() {
+        let config = r#"
+[mcp_servers.atlassian]
+url = "https://mcp.atlassian.test"
+
+[mcp_servers.zoom]
+url = "https://mcp.zoom.test"
+
+[mcp_servers."custom.server"]
+url = "https://mcp.custom.test"
+
+[mcp_servers.zoom.env]
+TOKEN = "ignored"
+"#;
+
+        assert_eq!(
+            structured_codex_overrides_from_config(config),
+            vec![
+                r#"model_reasoning_effort="medium""#.to_string(),
+                "features.plugins=false".to_string(),
+                "features.apps=false".to_string(),
+                r#"mcp_servers={"atlassian"={enabled=false},"custom.server"={enabled=false},"zoom"={enabled=false}}"#.to_string(),
+            ]
+        );
     }
 }
