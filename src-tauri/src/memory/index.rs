@@ -9,6 +9,11 @@ use super::frontmatter;
 use super::vault;
 use super::{MemoryRow, ReindexResult};
 
+/// Bump whenever the source chunker changes meaning. Stored chunks are a
+/// rebuildable derived index, so a new value marks every import for re-chunking
+/// from the immutable vault copy.
+const SOURCE_CHUNK_VERSION: &str = "blocks-v2";
+
 #[derive(Debug, Clone)]
 pub struct DocumentChunkHit {
     pub id: i64,
@@ -184,6 +189,11 @@ pub fn ensure_tables(db: &Db) -> AppResult<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_memory_eval_cases_status
                 ON memory_eval_cases(status, domain, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS memory_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             "#,
         )?;
 
@@ -600,6 +610,29 @@ pub fn remove_document_chunks(db: &Db, import_id: &str) -> AppResult<()> {
 pub fn document_imports_missing_chunks(db: &Db) -> AppResult<Vec<String>> {
     ensure_tables(db)?;
     db.with_conn(|conn| {
+        // The derived index is rebuildable: when the chunker changes, every
+        // import is re-chunked from the immutable vault copy instead of being
+        // served from segments that no longer match the current boundaries. The
+        // version is only recorded once the rebuild has actually succeeded, so a
+        // failed source is retried instead of being skipped forever.
+        let stored_version: Option<String> = conn
+            .query_row(
+                "SELECT value FROM memory_meta WHERE key = 'source_chunk_version'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        if stored_version.as_deref() != Some(SOURCE_CHUNK_VERSION) {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM document_imports
+                 WHERE extraction_quality_status != 'failed'
+                 ORDER BY created_at",
+            )?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(rows);
+        }
         let mut stmt = conn.prepare(
             "SELECT i.id
              FROM document_imports i
@@ -613,6 +646,19 @@ pub fn document_imports_missing_chunks(db: &Db) -> AppResult<Vec<String>> {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    })
+}
+
+/// Record the chunker version once every import has been rebuilt from the vault.
+pub fn mark_source_chunks_current(db: &Db) -> AppResult<()> {
+    ensure_tables(db)?;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO memory_meta (key, value) VALUES ('source_chunk_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![SOURCE_CHUNK_VERSION],
+        )?;
+        Ok(())
     })
 }
 
@@ -701,41 +747,159 @@ fn searchable_terms(value: &str) -> std::collections::BTreeSet<String> {
 fn chunk_source(body: &str) -> Vec<String> {
     const TARGET_CHARS: usize = 1_500;
     const OVERLAP_CHARS: usize = 220;
-    const BOUNDARY_LOOKBACK_CHARS: usize = 240;
 
     let normalized = body.replace('\0', "").replace("\r\n", "\n");
-    let characters = normalized.chars().collect::<Vec<_>>();
+    let blocks = source_blocks(&normalized);
     let mut chunks = Vec::new();
-    let mut start = 0usize;
-    while start < characters.len() {
-        let hard_end = (start + TARGET_CHARS).min(characters.len());
-        let mut end = hard_end;
-        if hard_end < characters.len() {
-            let boundary_floor = hard_end
-                .saturating_sub(BOUNDARY_LOOKBACK_CHARS)
-                .max(start + 1);
-            if let Some(boundary) = (boundary_floor..hard_end)
-                .rev()
-                .find(|index| characters[*index].is_whitespace())
+    let mut current: Vec<String> = Vec::new();
+    for block in blocks {
+        let mut candidate = current.clone();
+        candidate.push(block.clone());
+        if !current.is_empty() && joined_block_len(&candidate) > TARGET_CHARS {
+            chunks.push(current.join("\n\n"));
+            current = overlap_blocks(&current, OVERLAP_CHARS);
+            // The carried overlap must still leave room for this block, or the
+            // next chunk would exceed the bound the model prompt relies on.
+            while !current.is_empty()
+                && joined_block_len(&current) + block.chars().count() + 2 > TARGET_CHARS
             {
-                end = boundary + 1;
+                current.remove(0);
             }
         }
-
-        let chunk = characters[start..end]
-            .iter()
-            .collect::<String>()
-            .trim()
-            .to_string();
-        if !chunk.is_empty() {
-            chunks.push(chunk);
-        }
-        if end == characters.len() {
-            break;
-        }
-        start = end.saturating_sub(OVERLAP_CHARS);
+        current.push(block);
+    }
+    if !current.is_empty() {
+        chunks.push(current.join("\n\n"));
     }
     chunks
+}
+
+/// Split extracted text into whole list items and paragraphs. A bullet is never
+/// cut in half: the synthesis prompt asks for one claim per list item, and a
+/// claim can only be verified against text that still carries the item label.
+fn source_blocks(value: &str) -> Vec<String> {
+    const MAX_BLOCK_CHARS: usize = 1_200;
+
+    let lines = value.lines().collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    let mut previous_line_blank = true;
+    for (index, raw_line) in lines.iter().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            previous_line_blank = true;
+            continue;
+        }
+        let next_line = lines[index + 1..]
+            .iter()
+            .map(|candidate| candidate.trim())
+            .find(|candidate| !candidate.is_empty());
+        let starts_new_block = is_source_bullet(line)
+            || (!current.is_empty() && previous_line_blank && starts_new_paragraph(line));
+        if starts_new_block {
+            push_source_block(&mut blocks, &mut current, MAX_BLOCK_CHARS);
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(line);
+        // A bullet keeps its hard-wrapped continuation lines even when the PDF
+        // extraction inserted blank lines inside the item.
+        previous_line_blank = next_line.is_none();
+    }
+    push_source_block(&mut blocks, &mut current, MAX_BLOCK_CHARS);
+    blocks
+}
+
+fn push_source_block(blocks: &mut Vec<String>, current: &mut String, limit: usize) {
+    let block = current.trim().to_string();
+    current.clear();
+    if block.is_empty() {
+        return;
+    }
+    if block.chars().count() <= limit {
+        blocks.push(block);
+    } else {
+        blocks.extend(split_on_word_boundaries(&block, limit));
+    }
+}
+
+fn is_source_bullet(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    trimmed.starts_with('●')
+        || trimmed.starts_with('•')
+        || trimmed.starts_with('○')
+        || trimmed.starts_with("- ")
+}
+
+/// Hard-wrapped PDF text resumes with a lowercase fragment; a genuinely new
+/// paragraph starts with a capital letter or a list marker.
+fn starts_new_paragraph(value: &str) -> bool {
+    value
+        .chars()
+        .find(|character| character.is_alphabetic())
+        .is_none_or(|character| character.is_uppercase())
+}
+
+fn joined_block_len(blocks: &[String]) -> usize {
+    blocks
+        .iter()
+        .map(|block| block.chars().count())
+        .sum::<usize>()
+        + blocks.len().saturating_sub(1) * 2
+}
+
+fn overlap_blocks(blocks: &[String], limit: usize) -> Vec<String> {
+    // Carry whole blocks only. A partial tail would put the next chunk's first
+    // line in the middle of a list item and detach the item label from the
+    // sentence the verifier has to match.
+    let mut carried: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for block in blocks.iter().rev() {
+        let block_len = block.chars().count();
+        if total + block_len + 2 > limit {
+            break;
+        }
+        total += block_len + 2;
+        carried.insert(0, block.clone());
+    }
+    carried
+}
+
+/// A single unbroken token (minified or space-less text) still has to respect
+/// the chunk bound, so it is hard-split on characters as a last resort.
+fn split_on_word_boundaries(value: &str, limit: usize) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    for word in value.split_whitespace() {
+        let word_len = word.chars().count();
+        if !current.is_empty() && current_len + word_len + 1 > limit {
+            pieces.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+        if word_len > limit {
+            for character in word.chars() {
+                if current_len == limit {
+                    pieces.push(std::mem::take(&mut current));
+                    current_len = 0;
+                }
+                current.push(character);
+                current_len += 1;
+            }
+            continue;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+            current_len += 1;
+        }
+        current.push_str(word);
+        current_len += word_len;
+    }
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+    pieces
 }
 
 /// Get a memory row by ID.
@@ -984,7 +1148,87 @@ mod tests {
             .chars()
             .rev()
             .collect::<String>();
-        let head = chunks[1].chars().take(220).collect::<String>();
-        assert_eq!(tail, head);
+        assert!(!tail.is_empty());
+    }
+
+    #[test]
+    fn source_chunking_never_splits_a_list_item_label_from_its_body() {
+        let body = "Recommended Use Cases\n\n\
+            ●  Personalized hero and content selection (Da Vinci): Select the most relevant lead or\n\
+            secondary story for each customer using browsing, purchase history, category affinity,\n\
+            engagement, loyalty signals, and active campaign performance.\n\n\
+            ●  AI-powered audience targeting (Da Vinci): Utilize AI to analyze imagery and content.\n\n\
+            ●  Live inventory: Show recently browsed items while suppressing out-of-stock items.";
+        let chunks = chunk_source(body);
+
+        for chunk in &chunks {
+            for line in chunk.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                assert!(
+                    line.starts_with('●') || line.starts_with('•') || line.starts_with("Recommended"),
+                    "a chunk line must not begin with a mid-item fragment: {line:?}"
+                );
+            }
+        }
+        let joined = chunks.join("\n\n");
+        for label in [
+            "Personalized hero and content selection (Da Vinci):",
+            "AI-powered audience targeting (Da Vinci):",
+            "Live inventory:",
+        ] {
+            assert!(joined.contains(label), "missing label: {label}");
+        }
+    }
+
+    #[test]
+    fn source_chunking_keeps_hard_wrapped_text_with_its_own_item() {
+        let body = "●  Continuous testing and real-time optimization (Da Vinci x Studio): Test subject lines,\n\n\
+            creative variants (e.g. PDP vs. Attribute/Lifestyle), product logic, and dynamic modules\n\
+            continuously, then apply what is learned while the content is still active.\n\n\
+            ●  Broader content support (Da Vinci): Use dynamic modules to give athlete videos more exposure.";
+        let chunks = chunk_source(body);
+        let joined = chunks.join("\n\n");
+        let testing = joined
+            .lines()
+            .find(|line| line.contains("Continuous testing"))
+            .expect("the wrapped item must stay on one line");
+
+        assert!(testing.contains("still active"), "got: {testing}");
+        assert!(
+            !testing.contains("Broader content support"),
+            "two separate items must never be fused: {testing}"
+        );
+    }
+
+    #[test]
+    fn source_chunking_overlap_never_starts_a_chunk_mid_item() {
+        // Every item is longer than the overlap budget, so a partial carry is
+        // tempting; the first line of each chunk must still be an item label.
+        let body = (0..12)
+            .map(|index| {
+                format!(
+                    "●  Use case number {index} (Studio): {}",
+                    "detail sentence about the campaign. ".repeat(20).trim()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let chunks = chunk_source(&body);
+
+        assert!(chunks.len() >= 4, "expected several chunks");
+        for chunk in &chunks {
+            let first = chunk
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .expect("a chunk is never empty");
+            assert!(
+                first.starts_with('●'),
+                "a chunk must open on an item label, got: {first:?}"
+            );
+        }
     }
 }

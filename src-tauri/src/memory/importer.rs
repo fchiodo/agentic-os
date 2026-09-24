@@ -331,6 +331,7 @@ pub fn ensure_search_chunks(db: &Db) -> Vec<String> {
         }
     };
     let mut warnings = Vec::new();
+    let mut failures = 0usize;
     for import_id in missing {
         let result = (|| -> AppResult<()> {
             let source = read_source(db, &import_id)?;
@@ -345,9 +346,19 @@ pub fn ensure_search_chunks(db: &Db) -> Vec<String> {
             Ok(())
         })();
         if let Err(error) = result {
+            failures += 1;
             warnings.push(format!(
                 "Source {} could not be added to Ask retrieval ({error}).",
                 import_id
+            ));
+        }
+    }
+    // Only advance the stored chunker version when the whole derived index was
+    // rebuilt; otherwise the next Ask retries the sources that failed.
+    if failures == 0 {
+        if let Err(error) = super::index::mark_source_chunks_current(db) {
+            warnings.push(format!(
+                "The source passage index version could not be recorded ({error})."
             ));
         }
     }

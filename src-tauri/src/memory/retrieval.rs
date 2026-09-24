@@ -1350,7 +1350,7 @@ pub(crate) fn retrieve_evidence(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let source_passage_limit = if broad { 16 } else { MAX_SOURCE_PASSAGES };
-    for hit in chunk_hits.into_iter().take(source_passage_limit) {
+    for hit in order_source_chunks(chunk_hits).into_iter().take(source_passage_limit) {
         evidence.push(EvidencePassage {
             id: format!("source:{}:{}", hit.import_id, hit.id),
             chunk_index: Some(hit.chunk_index),
@@ -1370,6 +1370,9 @@ pub(crate) fn retrieve_evidence(
             .partial_cmp(&left.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    // Group a document's segments after ranking, so the pool cut spends its
+    // slots on the strongest source instead of dropping its later sections.
+    let evidence = group_segments_by_path(evidence);
     let mut deduplicated = Vec::new();
     for passage in evidence {
         if deduplicated.iter().any(|existing: &EvidencePassage| {
@@ -1384,6 +1387,76 @@ pub(crate) fn retrieve_evidence(
         }
     }
     Ok((deduplicated, warnings))
+}
+
+/// Keep a path's evidence passages adjacent without reordering the paths
+/// themselves, so the strongest document reaches the model in one piece even
+/// when the evidence budget is smaller than its segment count.
+fn group_segments_by_path(evidence: Vec<EvidencePassage>) -> Vec<EvidencePassage> {
+    let mut path_order: Vec<String> = Vec::new();
+    for passage in &evidence {
+        if !path_order.contains(&passage.vault_path) {
+            path_order.push(passage.vault_path.clone());
+        }
+    }
+    let mut grouped = Vec::with_capacity(evidence.len());
+    for path in path_order {
+        let mut own = evidence
+            .iter()
+            .filter(|passage| passage.vault_path == path)
+            .cloned()
+            .collect::<Vec<_>>();
+        own.sort_by(|left, right| {
+            left.chunk_index.cmp(&right.chunk_index)
+        });
+        grouped.extend(own);
+    }
+    grouped
+}
+
+/// Keep every retrieved segment of one source adjacent in the evidence pool.
+/// `MAX_EVIDENCE_PASSAGES` is small, so a scattered document loses its later
+/// sections to unrelated documents that each scored higher on a single query.
+/// Concentrating the strongest source first preserves cross-document ranking
+/// while letting a full document reach the model in one piece.
+fn order_source_chunks(
+    chunk_hits: Vec<super::index::DocumentChunkHit>,
+) -> Vec<super::index::DocumentChunkHit> {
+    let mut best_by_import: Vec<(String, f64)> = Vec::new();
+    for hit in &chunk_hits {
+        match best_by_import
+            .iter_mut()
+            .find(|(import_id, _)| *import_id == hit.import_id)
+        {
+            Some((_, best)) => {
+                if hit.score > *best {
+                    *best = hit.score;
+                }
+            }
+            None => best_by_import.push((hit.import_id.clone(), hit.score)),
+        }
+    }
+    best_by_import.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut ordered = Vec::with_capacity(chunk_hits.len());
+    for (import_id, _) in best_by_import {
+        let mut own = chunk_hits
+            .iter()
+            .filter(|hit| hit.import_id == import_id)
+            .collect::<Vec<_>>();
+        own.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        ordered.extend(own.into_iter().cloned());
+    }
+    ordered
 }
 
 fn synthesis_prompt(request: &MemoryAskRequest, evidence: &[EvidencePassage]) -> AppResult<String> {
@@ -1420,6 +1493,7 @@ Rules:
 - Do not include citation markers in claim text; the application adds them.
 - For a list or enumeration, return exactly one source list item per claim.
 - Never combine two separate list items into one claim to fit the claim limit.
+- For a list item, start the claim with the item's own label and reuse the source wording; never wrap it in framing prose such as "The use case X is to ..." or "One use case is ...".
 - Return at most {MAX_CLAIMS} claims, each under {MAX_CLAIM_CHARS} characters.
 - If the evidence does not directly answer the question, return {{"abstained":true,"claims":[]}}.
 
@@ -1948,14 +2022,54 @@ fn text_verification_units(value: &str) -> Vec<String> {
             units.push(normalized.clone());
         }
         units.extend(
-            normalized
-                .split_inclusive(|character: char| matches!(character, '.' | '!' | '?' | ';'))
-                .map(str::trim)
-                .filter(|sentence| {
-                    !sentence.is_empty() && sentence.chars().count() <= MAX_CLAIM_CHARS
-                })
-                .map(str::to_string),
+            sentence_units(&normalized)
+                .into_iter()
+                .filter(|sentence| sentence.chars().count() <= MAX_CLAIM_CHARS),
         );
+    }
+    units
+}
+
+/// Split on real sentence ends. A naive split on every period breaks inside
+/// abbreviations such as "e.g." or "vs." and produces fragments that start in
+/// the middle of a parenthetical, which no faithful claim can ever match.
+fn sentence_units(value: &str) -> Vec<String> {
+    const ABBREVIATIONS: [&str; 24] = [
+        "al", "approx", "co", "corp", "dept", "dr", "fig", "gov", "inc", "jr", "ltd", "mr",
+        "mrs", "ms", "no", "prof", "sr", "st", "u.s", "vs", "etc", "eg", "ie", "n",
+    ];
+    let mut units = Vec::new();
+    let mut current = String::new();
+    for character in value.chars() {
+        current.push(character);
+        if !matches!(character, '.' | '!' | '?' | ';') {
+            continue;
+        }
+        let body = &current[..current.len() - character.len_utf8()];
+        let token = body
+            .split_whitespace()
+            .next_back()
+            .unwrap_or_default()
+            .trim_matches(|candidate: char| !candidate.is_alphanumeric() && candidate != '.')
+            .to_lowercase();
+        let is_abbreviation = character == '.'
+            && (token.contains('.')
+                || ABBREVIATIONS.contains(&token.as_str())
+                || (token.chars().filter(|letter| letter.is_alphabetic()).count() == 1
+                    && !token.is_empty()
+                    && token.chars().all(|letter| letter.is_alphabetic())));
+        if is_abbreviation {
+            continue;
+        }
+        let unit = current.trim();
+        if !unit.is_empty() {
+            units.push(unit.to_string());
+        }
+        current.clear();
+    }
+    let unit = current.trim();
+    if !unit.is_empty() {
+        units.push(unit.to_string());
     }
     units
 }
@@ -2532,6 +2646,79 @@ mod tests {
         assert!(prompt.contains(
             "Never combine two separate list items into one claim to fit the claim limit."
         ));
+        assert!(prompt.contains(
+            "never wrap it in framing prose such as \"The use case X is to ...\""
+        ));
+    }
+
+    /// Controlled live check against the authorized local vault. It stays
+    /// ignored in ordinary CI because it needs the real database, the corporate
+    /// Codex provider, and a private expected-item list that is never committed.
+    #[tokio::test]
+    #[ignore = "requires the authorized local vault and corporate Codex provider"]
+    async fn live_ask_covers_expected_list_items() {
+        let db_path = std::env::var("AGENTIC_OS_LIVE_DB").expect("AGENTIC_OS_LIVE_DB");
+        let expected_path =
+            std::env::var("AGENTIC_OS_LIVE_EXPECTED_ITEMS").expect("AGENTIC_OS_LIVE_EXPECTED_ITEMS");
+        let expected_source =
+            std::env::var("AGENTIC_OS_LIVE_EXPECTED_SOURCE").expect("AGENTIC_OS_LIVE_EXPECTED_SOURCE");
+        let runs = std::env::var("AGENTIC_OS_LIVE_RUNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        let expected = std::fs::read_to_string(expected_path)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        let db = Db::open(std::path::Path::new(&db_path)).unwrap();
+
+        for run in 1..=runs {
+            let started = std::time::Instant::now();
+            let answer = ask(
+                &db,
+                &MemoryAskRequest {
+                    question: "What are the use cases from Movable Ink?".to_string(),
+                    domain: "work".to_string(),
+                    include_stale: false,
+                },
+                |_| {},
+                crate::harness::structured::no_cancel(),
+            )
+            .await
+            .unwrap();
+            let normalized = answer.answer.to_lowercase();
+            let covered = expected
+                .iter()
+                .filter(|item| normalized.contains(item.as_str()))
+                .count();
+            println!(
+                "LIVE_MEMORY_ASK={{\"run\":{run},\"durationMs\":{},\"expected\":{},\"covered\":{},\"abstained\":{},\"citations\":{},\"sources\":{}}}",
+                started.elapsed().as_millis(),
+                expected.len(),
+                covered,
+                answer.abstained,
+                answer.citations.len(),
+                answer.source_count,
+            );
+            assert!(
+                !answer.abstained,
+                "run {run} abstained with warnings: {:?}",
+                answer.warnings
+            );
+            assert_eq!(
+                covered,
+                expected.len(),
+                "run {run} answered: {}",
+                answer.answer
+            );
+            assert!(answer
+                .citations
+                .iter()
+                .any(|citation| citation.vault_path == expected_source));
+        }
     }
 
     #[test]
@@ -2809,6 +2996,31 @@ mod tests {
             &evidence,
         )
         .is_none());
+    }
+    #[test]
+    fn verifier_keeps_parenthetical_abbreviations_inside_one_sentence() {
+        let unit = "●  Continuous testing and real-time optimization (Da Vinci x Studio): Test subject lines, creative variants (e.g. PDP vs. Attribute/Lifestyle), product logic, and dynamic modules continuously, then apply what is learned while the content is still active.";
+        let units = text_verification_units(unit);
+        let full = units
+            .iter()
+            .find(|candidate| candidate.starts_with("Continuous testing"))
+            .expect("the item sentence must survive abbreviation-aware splitting");
+        assert!(full.contains("(e.g. PDP vs. Attribute/Lifestyle)"), "got: {full}");
+        assert!(full.ends_with("the content is still active."), "got: {full}");
+        assert!(!units.iter().any(|candidate| candidate == "PDP vs."));
+    }
+
+    #[test]
+    fn verifier_accepts_a_later_sentence_of_a_multi_sentence_item() {
+        let evidence = vec![passage(
+            "source:1:10",
+            "_sources/work/use-cases.md",
+            "●  Continuous testing and real-time optimization (Da Vinci x Studio): Test subject lines, creative variants (e.g. PDP vs. Attribute/Lifestyle), product logic, and dynamic modules continuously, then apply what is learned while the content is still active. This improves the current approach where campaign results may not be available until the tested content or moment has already passed.",
+            0.9,
+        )];
+        let claim = "Continuous testing and real-time optimization (Da Vinci x Studio): Test subject lines, creative variants (e.g. PDP vs. Attribute/Lifestyle), product logic, and dynamic modules continuously, then apply what is learned while the content is still active.";
+
+        assert!(verified_claim_text(claim, &BTreeSet::from([1]), &evidence).is_some());
     }
 
     #[test]
