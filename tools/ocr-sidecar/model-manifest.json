@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "models": {
     "paddleocr-vl": {
       "displayName": "PaddleOCR-VL 1.6",
@@ -7,8 +7,8 @@
       "repository": "PaddlePaddle/PaddleOCR-VL-1.6",
       "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
       "architecture": "aarch64-apple-darwin",
-      "downloadSizeBytes": 1930426592,
-      "installedSizeBytes": 1930426592,
+      "downloadSizeBytes": 1930437968,
+      "installedSizeBytes": 1930437968,
       "license": "Apache-2.0",
       "licenseUrl": "https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6/blob/c5630abae1d940eafe0697512a0325494b02ab42/LICENSE",
       "minimumSidecarVersion": "0.2.1",
@@ -43,6 +43,11 @@
           "path": "image_processing_paddleocr_vl.py",
           "sizeBytes": 25032,
           "sha256": "a4fa521b9cb16e207f94b7f2d16427771776dfc634420d319fc4916ee58049ec"
+        },
+        {
+          "path": "LICENSE",
+          "sizeBytes": 11376,
+          "sha256": "b8c4d7deccd236af023af1c88c4d4e8f0fc2f41914e0fb23a3ec9678fb5a8456"
         },
         {
           "path": "model.safetensors",
@@ -91,8 +96,23 @@
         }
       ],
       "download": {
-        "scheme": "https",
-        "baseUrl": "https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6/resolve/c5630abae1d940eafe0697512a0325494b02ab42/"
+        "sources": [
+          {
+            "id": "github-agentic-os-release",
+            "scheme": "https",
+            "baseUrl": "https://github.com/fchiodo/agentic-os/releases/download/document-ai-paddleocr-vl-1.6-c5630abae1d940eafe0697512a0325494b02ab42/"
+          },
+          {
+            "id": "modelscope-paddlepaddle",
+            "scheme": "https",
+            "baseUrl": "https://modelscope.cn/models/PaddlePaddle/PaddleOCR-VL-1.6/resolve/master/"
+          },
+          {
+            "id": "huggingface-paddlepaddle",
+            "scheme": "https",
+            "baseUrl": "https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6/resolve/c5630abae1d940eafe0697512a0325494b02ab42/"
+          }
+        ]
       }
     }
   }

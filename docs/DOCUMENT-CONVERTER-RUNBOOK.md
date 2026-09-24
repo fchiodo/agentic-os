@@ -83,8 +83,13 @@ size and SHA-256 validation, a verified marker write, and an atomic rename.
 On macOS the downloader uses the native TLS trust store and managed system
 proxy settings. This allows corporate root certificates and configured proxies
 to work without weakening certificate validation. A company network must allow
-HTTPS access to `huggingface.co` and the CDN host returned by its signed model
-download redirects.
+HTTPS access to at least one source in the versioned model manifest. A dedicated
+Agentic OS GitHub Release is primary for networks that block public model
+registries. PaddlePaddle ModelScope and the immutable PaddlePaddle Hugging Face
+revision remain fallbacks. The GitHub Release mirrors the unchanged Apache-2.0
+model files; it is not part of the Git repository or application bundle. Every
+file is accepted only when its byte size and SHA-256 match the manifest, so no
+mirror can silently change the installed model.
 Partial files live under `models/.downloads/` and never count as installed.
 Cancel, Remove and Repair operate only below the managed model root and reject
 symlinks/path traversal. Removing the `.app` does not remove model data;

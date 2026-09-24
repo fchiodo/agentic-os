@@ -60,6 +60,13 @@ pub struct ModelFile {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDownload {
+    pub sources: Vec<ModelDownloadSource>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDownloadSource {
+    pub id: String,
     pub scheme: String,
     pub base_url: String,
 }
@@ -275,11 +282,7 @@ impl ModelManager {
         definition: &ModelDefinition,
         staging: &Path,
     ) -> ConverterResult<()> {
-        let client = reqwest::Client::builder()
-            .https_only(true)
-            .connect_timeout(Duration::from_secs(30))
-            .user_agent(format!("Agentic-OS/{}", env!("CARGO_PKG_VERSION")))
-            .build()?;
+        let client = model_download_client()?;
         let mut downloaded = 0u64;
         for file in &definition.files {
             self.ensure_not_cancelled()?;
@@ -288,34 +291,60 @@ impl ModelManager {
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent)?;
             }
+            let mut file_result = None;
             let mut last_error = None;
-            for attempt in 1..=DOWNLOAD_ATTEMPTS {
-                match self
-                    .download_file(&client, definition, file, &destination, downloaded)
-                    .await
-                {
-                    Ok(file_bytes) => {
-                        downloaded += file_bytes;
-                        last_error = None;
-                        break;
-                    }
-                    Err(error)
-                        if error.code() == "MODEL_DOWNLOAD_FAILED"
-                            && attempt < DOWNLOAD_ATTEMPTS =>
+            for source in &definition.download.sources {
+                for attempt in 1..=DOWNLOAD_ATTEMPTS {
+                    match self
+                        .download_file(&client, definition, file, source, &destination, downloaded)
+                        .await
                     {
-                        log::warn!(
-                            "Document AI file download attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed for {}",
-                            file.path
-                        );
-                        last_error = Some(error);
-                        tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1)))
-                            .await;
+                        Ok(file_bytes) => {
+                            file_result = Some(file_bytes);
+                            last_error = None;
+                            break;
+                        }
+                        Err(error)
+                            if error.code() == "MODEL_DOWNLOAD_FAILED"
+                                && attempt < DOWNLOAD_ATTEMPTS =>
+                        {
+                            log::warn!(
+                                "Document AI download attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed for {} via {}",
+                                file.path,
+                                source.id
+                            );
+                            last_error = Some(error);
+                            tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
+                        }
+                        Err(error)
+                            if error.code() == "MODEL_DOWNLOAD_FAILED"
+                                || error.code() == "MODEL_CHECKSUM_FAILED" =>
+                        {
+                            last_error = Some(error);
+                            break;
+                        }
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
                 }
+                if file_result.is_some() {
+                    break;
+                }
+                log::warn!(
+                    "Document AI source {} failed for {}; trying the next verified source",
+                    source.id,
+                    file.path
+                );
             }
-            if let Some(error) = last_error {
-                return Err(error);
+            match file_result {
+                Some(file_bytes) => downloaded += file_bytes,
+                None => {
+                    return Err(last_error.unwrap_or_else(|| {
+                        ConverterError::new(
+                            "MODEL_DOWNLOAD_FAILED",
+                            "No verified Document AI download source is available",
+                        )
+                    }));
+                }
             }
         }
         Ok(())
@@ -326,12 +355,13 @@ impl ModelManager {
         client: &reqwest::Client,
         definition: &ModelDefinition,
         file: &ModelFile,
+        source: &ModelDownloadSource,
         destination: &Path,
         downloaded: u64,
     ) -> ConverterResult<u64> {
         let temporary = destination.with_extension(format!("download-{}", Uuid::new_v4()));
         let result = async {
-            let url = format!("{}{}", definition.download.base_url, file.path);
+            let url = format!("{}{}", source.base_url, file.path);
             let response = client
                 .get(url)
                 .send()
@@ -431,8 +461,12 @@ impl ModelManager {
                 "Document AI v1 requires an Apple Silicon Mac",
             ));
         }
-        if definition.download.scheme != "https"
-            || !definition.download.base_url.starts_with("https://")
+        if definition.download.sources.is_empty()
+            || definition.download.sources.iter().any(|source| {
+                source.id.is_empty()
+                    || source.scheme != "https"
+                    || !source.base_url.starts_with("https://")
+            })
         {
             return Err(ConverterError::new(
                 "MODEL_MANIFEST_INVALID",
@@ -492,6 +526,14 @@ impl ModelManager {
     }
 }
 
+fn model_download_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .https_only(true)
+        .connect_timeout(Duration::from_secs(30))
+        .user_agent(format!("Agentic-OS/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+}
+
 fn redacted_download_error(error: reqwest::Error) -> ConverterError {
     let category = if error.is_timeout() {
         "timeout"
@@ -518,7 +560,7 @@ fn parse_manifest() -> ConverterResult<ModelManifest> {
     let manifest: ModelManifest = serde_json::from_str(MODEL_MANIFEST_JSON).map_err(|_| {
         ConverterError::new("MODEL_MANIFEST_INVALID", "Document AI manifest is invalid")
     })?;
-    if manifest.schema_version != 1 {
+    if manifest.schema_version != 2 {
         return Err(ConverterError::new(
             "MODEL_MANIFEST_INVALID",
             "Document AI manifest version is not supported",
@@ -634,11 +676,34 @@ mod tests {
         assert_eq!(model.version, "1.6");
         assert_eq!(model.protocol_version, 1);
         assert_eq!(model.repository, "PaddlePaddle/PaddleOCR-VL-1.6");
+        assert_eq!(model.download.sources.len(), 3);
+        assert_eq!(model.download.sources[0].id, "github-agentic-os-release");
+        assert!(model.download.sources[0].base_url.starts_with("https://"));
     }
 
     #[test]
     fn rejects_path_traversal() {
         assert!(safe_model_relative("../model.safetensors").is_err());
         assert!(safe_model_relative("model.safetensors").is_ok());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires access to the public model registry"]
+    async fn primary_model_source_matches_the_pinned_manifest() {
+        let manifest = parse_manifest().unwrap();
+        let model = manifest.models.get(OCR_ENGINE_ID).unwrap();
+        let source = &model.download.sources[0];
+        let file = &model.files[0];
+        let response = model_download_client()
+            .unwrap()
+            .get(format!("{}{}", source.base_url, file.path))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let bytes = response.bytes().await.unwrap();
+        assert_eq!(bytes.len() as u64, file.size_bytes);
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), file.sha256);
     }
 }

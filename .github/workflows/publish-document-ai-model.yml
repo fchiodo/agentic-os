@@ -1,0 +1,92 @@
+name: Publish Document AI model mirror
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-document-ai-paddleocr-vl-1.6
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      MODEL_KEY: paddleocr-vl
+      RELEASE_TAG: document-ai-paddleocr-vl-1.6-c5630abae1d940eafe0697512a0325494b02ab42
+      SOURCE_ID: modelscope-paddlepaddle
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create draft release
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .draft)"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release $RELEASE_TAG is already published; refusing to overwrite it."
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "Document AI — PaddleOCR-VL 1.6" \
+              --notes "Unmodified PaddleOCR-VL 1.6 model files mirrored for Agentic OS. Source revision: c5630abae1d940eafe0697512a0325494b02ab42. License: Apache-2.0. Agentic OS verifies every asset against the byte size and SHA-256 pinned in tools/ocr-sidecar/model-manifest.json before installation."
+          fi
+
+      - name: Mirror and verify model assets
+        run: |
+          set -euo pipefail
+          manifest="tools/ocr-sidecar/model-manifest.json"
+          source_base="$(jq -er --arg model "$MODEL_KEY" --arg source "$SOURCE_ID" '.models[$model].download.sources[] | select(.id == $source) | .baseUrl' "$manifest")"
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "$work_dir"' EXIT
+
+          jq -er --arg model "$MODEL_KEY" '.models[$model].files[] | [.path, (.sizeBytes | tostring), .sha256] | @tsv' "$manifest" |
+            while IFS=$'\t' read -r relative_path expected_size expected_sha; do
+              if [[ "$relative_path" == */* || "$relative_path" == *..* ]]; then
+                echo "Unsafe release asset path: $relative_path"
+                exit 1
+              fi
+
+              destination="$work_dir/$relative_path"
+              curl \
+                --fail \
+                --location \
+                --retry 4 \
+                --retry-all-errors \
+                --connect-timeout 30 \
+                --output "$destination" \
+                "${source_base}${relative_path}"
+
+              actual_size="$(stat --format=%s "$destination")"
+              actual_sha="$(sha256sum "$destination" | cut -d ' ' -f 1)"
+              if [[ "$actual_size" != "$expected_size" ]]; then
+                echo "Size mismatch for $relative_path: expected $expected_size, got $actual_size"
+                exit 1
+              fi
+              if [[ "$actual_sha" != "$expected_sha" ]]; then
+                echo "SHA-256 mismatch for $relative_path: expected $expected_sha, got $actual_sha"
+                exit 1
+              fi
+
+              gh release upload "$RELEASE_TAG" "$destination" --clobber
+              rm "$destination"
+            done
+
+      - name: Verify inventory and publish release
+        run: |
+          set -euo pipefail
+          manifest="tools/ocr-sidecar/model-manifest.json"
+          expected="$(jq -er --arg model "$MODEL_KEY" '.models[$model].files | length' "$manifest")"
+          actual="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.assets | length')"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Release inventory mismatch: expected $expected assets, found $actual"
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --latest=false

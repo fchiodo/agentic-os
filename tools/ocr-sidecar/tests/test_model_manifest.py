@@ -19,12 +19,22 @@ class ModelManifestTests(unittest.TestCase):
         cls.model = cls.manifest["models"]["paddleocr-vl"]
 
     def test_manifest_has_pinned_secure_source(self) -> None:
-        self.assertEqual(self.manifest["schemaVersion"], 1)
+        self.assertEqual(self.manifest["schemaVersion"], 2)
         self.assertEqual(self.model["architecture"], "aarch64-apple-darwin")
         self.assertEqual(self.model["protocolVersion"], 1)
         self.assertRegex(self.model["revision"], r"^[0-9a-f]{40}$")
-        self.assertTrue(self.model["download"]["baseUrl"].startswith("https://"))
-        self.assertIn(self.model["revision"], self.model["download"]["baseUrl"])
+        sources = self.model["download"]["sources"]
+        self.assertGreaterEqual(len(sources), 2)
+        self.assertEqual(sources[0]["id"], "github-agentic-os-release")
+        self.assertIn("github.com/fchiodo/agentic-os/releases/download/", sources[0]["baseUrl"])
+        self.assertEqual(len({source["id"] for source in sources}), len(sources))
+        for source in sources:
+            self.assertEqual(source["scheme"], "https")
+            self.assertTrue(source["baseUrl"].startswith("https://"))
+        hugging_face = next(
+            source for source in sources if source["id"] == "huggingface-paddlepaddle"
+        )
+        self.assertIn(self.model["revision"], hugging_face["baseUrl"])
 
     def test_declared_total_matches_file_inventory(self) -> None:
         total = sum(file["sizeBytes"] for file in self.model["files"])
