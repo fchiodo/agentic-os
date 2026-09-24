@@ -19,6 +19,7 @@ import {
   useDashboardSnapshot,
 } from '@/features/dashboard/use-dashboard-snapshot'
 import { useControlStatus } from '@/features/control/use-control-status'
+import { DocumentConverterRuntimeBridge } from '@/features/document-converter/runtime-bridge'
 import { formatCompactNumber } from '@/lib/format'
 
 const navigation = [
@@ -154,6 +155,7 @@ export function AppShell() {
       className="app-shell"
       style={{ gridTemplateColumns: `${sidebarCollapsed ? '76px' : '280px'} minmax(0, 1fr)` }}
     >
+      <DocumentConverterRuntimeBridge dropEnabled={isDocumentConverter} />
       <aside className={`sidebar ${sidebarCollapsed ? 'is-collapsed' : ''}`}>
         <div className="brand-block">
           <div className="brand-mark">

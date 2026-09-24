@@ -1,4 +1,3 @@
-import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   AlertCircle,
@@ -21,13 +20,11 @@ import {
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState, type DragEvent } from 'react'
-import { isTauriRuntime } from '@/lib/tauri'
 import * as api from './api'
 import { MarkdownPreview } from './components/markdown-preview'
 import {
   converterJobsKey,
   useConversionJobs,
-  useConverterEvents,
   useConverterStatus,
   useInstallModel,
   useRemoveModel,
@@ -129,29 +126,20 @@ function ModelCard({
 }
 
 function DropZone({ onFiles }: { onFiles: (files: SelectedDocument[]) => void }) {
-  const [dragging, setDragging] = useState(false)
+  const [browserDragging, setBrowserDragging] = useState(false)
+  const nativeDragActive = useConverterStore((state) => state.nativeDragActive)
+  const setNativeDragActive = useConverterStore((state) => state.setNativeDragActive)
+  const dragging = browserDragging || nativeDragActive
   const choose = useMutation({ mutationFn: api.chooseFiles, onSuccess: onFiles })
 
   const inspectDropped = useCallback((paths: string[]) => {
     if (paths.length > 0) void api.inspectPaths(paths).then(onFiles)
   }, [onFiles])
 
-  useEffect(() => {
-    if (!isTauriRuntime()) return
-    const unsubscribe = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === 'over') setDragging(true)
-      if (event.payload.type === 'leave') setDragging(false)
-      if (event.payload.type === 'drop') {
-        setDragging(false)
-        inspectDropped(event.payload.paths)
-      }
-    })
-    return () => { void unsubscribe.then((callback) => callback()) }
-  }, [inspectDropped])
-
   const browserDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
-    setDragging(false)
+    setBrowserDragging(false)
+    setNativeDragActive(false)
     const paths = Array.from(event.dataTransfer.files)
       .map((file) => (file as File & { path?: string }).path)
       .filter((path): path is string => Boolean(path))
@@ -161,8 +149,8 @@ function DropZone({ onFiles }: { onFiles: (files: SelectedDocument[]) => void })
   return (
     <div
       className={`converter-drop-zone ${dragging ? 'is-dragging' : ''}`}
-      onDragEnter={(event) => { event.preventDefault(); setDragging(true) }}
-      onDragLeave={() => setDragging(false)}
+      onDragEnter={(event) => { event.preventDefault(); setBrowserDragging(true) }}
+      onDragLeave={() => setBrowserDragging(false)}
       onDragOver={(event) => event.preventDefault()}
       onDrop={browserDrop}
     >
@@ -233,8 +221,8 @@ export function DocumentConverterPage() {
   const queryClient = useQueryClient()
   const status = useConverterStatus()
   const jobsQuery = useConversionJobs()
-  const [modelProgress, setModelProgress] = useState<ModelProgress | null>(null)
-  const [progress, setProgress] = useState<Record<string, ConversionProgress>>({})
+  const modelProgress = useConverterStore((state) => state.modelProgress)
+  const progress = useConverterStore((state) => state.progressByJob)
   const [notice, setNotice] = useState<string | null>(null)
   const selected = useConverterStore((state) => state.selected)
   const destinationRoot = useConverterStore((state) => state.destinationRoot)
@@ -247,12 +235,6 @@ export function DocumentConverterPage() {
   const setProcessingMode = useConverterStore((state) => state.setProcessingMode)
   const setPreservePageImages = useConverterStore((state) => state.setPreservePageImages)
   const setPreviewJobId = useConverterStore((state) => state.setPreviewJobId)
-  const onModelProgress = useCallback((value: ModelProgress) => setModelProgress(value), [])
-  const onConversionProgress = useCallback((value: ConversionProgress) => {
-    setProgress((current) => ({ ...current, [value.jobId]: value }))
-  }, [])
-  useConverterEvents(onModelProgress, onConversionProgress)
-
   const create = useMutation({
     mutationFn: api.createJobs,
     onSuccess: async (result) => {

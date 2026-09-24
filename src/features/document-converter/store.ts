@@ -1,11 +1,19 @@
 import { create } from 'zustand'
-import type { ConversionOptions, SelectedDocument } from './schema'
+import type {
+  ConversionOptions,
+  ConversionProgress,
+  ModelProgress,
+  SelectedDocument,
+} from './schema'
 
 type ConverterUiState = {
   selected: SelectedDocument[]
   destinationRoot: string | null
   options: ConversionOptions
   previewJobId: string | null
+  modelProgress: ModelProgress | null
+  progressByJob: Record<string, ConversionProgress>
+  nativeDragActive: boolean
   setSelected: (selected: SelectedDocument[]) => void
   addSelected: (selected: SelectedDocument[]) => void
   removeSelected: (path: string) => void
@@ -14,6 +22,9 @@ type ConverterUiState = {
   setProcessingMode: (mode: ConversionOptions['processingMode']) => void
   setPreservePageImages: (preserve: boolean) => void
   setPreviewJobId: (id: string | null) => void
+  setModelProgress: (progress: ModelProgress) => void
+  setConversionProgress: (progress: ConversionProgress) => void
+  setNativeDragActive: (active: boolean) => void
 }
 
 export const useConverterStore = create<ConverterUiState>((set) => ({
@@ -25,6 +36,9 @@ export const useConverterStore = create<ConverterUiState>((set) => ({
     preservePageImages: false,
   },
   previewJobId: null,
+  modelProgress: null,
+  progressByJob: {},
+  nativeDragActive: false,
   setSelected: (selected) => set({ selected }),
   addSelected: (incoming) => set((state) => {
     const unique = new Map(state.selected.map((item) => [item.path, item]))
@@ -43,4 +57,9 @@ export const useConverterStore = create<ConverterUiState>((set) => ({
     options: { ...state.options, preservePageImages },
   })),
   setPreviewJobId: (previewJobId) => set({ previewJobId }),
+  setModelProgress: (modelProgress) => set({ modelProgress }),
+  setConversionProgress: (progress) => set((state) => ({
+    progressByJob: { ...state.progressByJob, [progress.jobId]: progress },
+  })),
+  setNativeDragActive: (nativeDragActive) => set({ nativeDragActive }),
 }))
