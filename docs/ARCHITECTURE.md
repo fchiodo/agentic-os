@@ -148,6 +148,55 @@ Supervisor–specialist, no free agent-to-agent chat (v0.1 was right). Concretel
 - **Domain agents are configurations, not processes**: a named bundle of (system prompt, skills subset, tool grants, memory scope, model capability, policy profile) executed on a harness adapter. `Executive`, `Engineering`, `PlanPhysique`, `Research`, `Finance`, `PersonalOps` are rows in the registry, not services.
 - **Reviewer is a workflow step**, not a standing agent: a second model pass (different model where it matters) checking completeness, groundedness, citations, policy compliance before an artifact reaches Fabio or a side effect executes.
 
+### Document Converter target (gated after Phase 2)
+
+Document Converter is a local document-processing subsystem, not a harness or
+agent workflow. Its content trust boundary is separate from Codex and all
+model-provider paths:
+
+```mermaid
+flowchart TD
+    UI[React: Document Converter / Memory import]
+    IPC[Tauri typed commands and events]
+    SVC[Rust DocumentConversionService]
+    JOB[Job Manager]
+    MODEL[Model Manager]
+    CLASSIFIER[Document Classifier]
+    ENGINE[OcrEngine]
+    PADDLE[PaddleOcrEngine]
+    SIDECAR[OCR sidecar via versioned JSONL stdio]
+    MLX[PaddleOCR-VL / MLX using verified local model]
+    CDM[Canonical Document Model]
+    OUT[Markdown + document.json + assets]
+
+    UI --> IPC --> SVC
+    SVC --> JOB
+    SVC --> MODEL
+    SVC --> CLASSIFIER
+    JOB --> ENGINE --> PADDLE --> SIDECAR --> MLX --> CDM --> OUT
+    OUT --> UI
+```
+
+Rust owns validation, SHA-256 source identity, classification, queueing,
+process lifecycle, model installation/verification, SQLite history, atomic
+output, and cancellation. The sidecar owns only local model initialization and
+inference. MarkItDown remains the fast digital extraction path; the backend,
+not React or Memory, chooses digital, OCR, or hybrid processing.
+
+The Canonical Document Model is the stable boundary. Paddle-specific output is
+adapted into versioned `Document`, `Page`, and typed `Block` values before the
+Markdown and JSON renderers run. Future engines can therefore be added without
+changing public IPC or consumers.
+
+Document bytes, rendered pages, OCR text, and extracted assets remain inside
+this local pipeline and must never enter Codex, provider, connector, telemetry,
+or cloud fallback paths. Network is allowed only while the Rust Model Manager
+installs a pinned model over HTTPS with declared sizes and SHA-256 checks.
+
+This section describes the approved target, not current completion. Phase 1/2
+evidence and unresolved gates are recorded in `docs/ocr-spike-results.md`; no
+production command/route is enabled until those gates close.
+
 ## 4. Harness strategy (the core bet)
 
 Agentic OS does not implement an agent loop. It orchestrates the best loops that exist:

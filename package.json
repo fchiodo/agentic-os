@@ -4,15 +4,22 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 1420 --strictPort",
+    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "dev:desktop": "tauri dev",
     "prepare:markitdown": "node scripts/build-markitdown-sidecar.mjs",
+    "prepare:ocr": "node scripts/build-ocr-sidecar.mjs",
+    "prepare:sidecars": "pnpm prepare:markitdown && pnpm prepare:ocr",
+    "bootstrap:mac": "./scripts/bootstrap-macos.sh",
     "build": "tsc -b && vite build",
     "build:desktop": "tauri build && pnpm sync:desktop-app",
     "sync:desktop-app": "./scripts/sync-desktop-app.sh",
     "check:native": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "check:ocr": "node scripts/check-ocr-sidecar.mjs",
     "lint": "eslint .",
-    "preview": "vite preview --host 0.0.0.0 --port 4173 --strictPort"
+    "test": "vitest run",
+    "test:ocr": "python3.10 -m unittest discover -s tools/ocr-sidecar/tests -p 'test_*.py' -v",
+    "test:ocr:integration": "python3.10 tools/ocr-sidecar/tests/run_real_smoke.py",
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.100.14",

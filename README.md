@@ -59,6 +59,32 @@ pnpm check:native
 pnpm build:desktop
 ```
 
+## Document Converter development status
+
+The local PaddleOCR-VL/MLX work is currently at the completed technical and
+packaging spike stage, not yet exposed in the application UI. The sidecar is
+Apple Silicon-only and can be built reproducibly with hash-locked Python
+dependencies:
+
+```bash
+./scripts/bootstrap-macos.sh
+pnpm prepare:ocr
+pnpm check:ocr
+pnpm test:ocr
+```
+
+The OCR model is not committed or bundled. The real integration test is
+opt-in and requires a verified local model directory:
+
+```bash
+AGENTIC_OS_OCR_MODEL=/absolute/path/to/model pnpm test:ocr:integration
+```
+
+See [the spike report](docs/ocr-spike-results.md) and
+[Document Converter runbook](docs/DOCUMENT-CONVERTER-RUNBOOK.md). Phase 3 is
+intentionally gated on layout quality, M4 Pro/24 GB validation, clean-Mac
+packaging/signing, and Mac A → Mac B reproduction.
+
 ## Next increments
 
 1. Add a secure routine execution adapter with explicit allowlists.

@@ -1,0 +1,7 @@
+# Phase 1/2 spike dependencies. The generated requirements.lock is the source
+# of truth used by the build; do not install this file directly.
+mlx==0.32.2
+mlx-vlm==0.7.2
+pypdfium2==5.13.0
+pyinstaller==6.21.0
+transformers==5.17.0
