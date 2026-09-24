@@ -1,48 +1,6 @@
 import type { DashboardSnapshot } from '@/features/dashboard/schema'
 
 export const mockDashboardSnapshot: DashboardSnapshot = {
-  activity: {
-    recentJobs: [
-      {
-        id: 'job-1',
-        inputPath: '~/datasets/catalog.csv',
-        maxRuntimeSeconds: 600,
-        name: 'Catalog reconciliation',
-        outputPath: '~/exports/catalog-registry.json',
-        status: 'completed',
-        updatedAt: 1_779_844_200_000,
-      },
-      {
-        id: 'job-2',
-        inputPath: '~/prompts/catalog-refresh.md',
-        maxRuntimeSeconds: 300,
-        name: 'Prompt classification pass',
-        outputPath: '~/exports/prompt-tags.json',
-        status: 'running',
-        updatedAt: 1_779_845_400_000,
-      },
-    ],
-    recentThreads: [
-      {
-        cwd: '~/Documents/projects/agentic-os',
-        id: 'thread-1',
-        model: 'gpt-5',
-        provider: 'openai',
-        title: 'Refresh registry architecture',
-        tokensUsed: 12_840,
-        updatedAt: 1_779_845_100_000,
-      },
-      {
-        cwd: '~/Documents/projects/ops',
-        id: 'thread-2',
-        model: 'gpt-5-mini',
-        provider: 'openai',
-        title: 'Review local MCP inventory',
-        tokensUsed: 4_120,
-        updatedAt: 1_779_841_900_000,
-      },
-    ],
-  },
   catalog: {
     counts: {
       agent: 3,
@@ -230,34 +188,4 @@ export const mockDashboardSnapshot: DashboardSnapshot = {
       status: 'available',
     },
   ],
-  usage: {
-    activeThreads: 7,
-    distinctWorkspaces: 3,
-    logEntries24h: 1_284,
-    topWorkspaces: [
-      {
-        cwd: '~/Documents/projects/agentic-os',
-        lastUpdatedAt: 1_779_844_600_000,
-        threadCount: 4,
-        tokenTotal: 22_310,
-      },
-      {
-        cwd: '~/Documents/projects/ops',
-        lastUpdatedAt: 1_779_841_900_000,
-        threadCount: 2,
-        tokenTotal: 8_920,
-      },
-    ],
-    totalTokens: 31_230,
-    trackedThreads: 9,
-    trend: [
-      { day: 'Mon', tokenTotal: 2_300 },
-      { day: 'Tue', tokenTotal: 4_800 },
-      { day: 'Wed', tokenTotal: 2_050 },
-      { day: 'Thu', tokenTotal: 6_540 },
-      { day: 'Fri', tokenTotal: 5_980 },
-      { day: 'Sat', tokenTotal: 3_240 },
-      { day: 'Sun', tokenTotal: 6_320 },
-    ],
-  },
 }

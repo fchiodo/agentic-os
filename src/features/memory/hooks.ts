@@ -22,7 +22,6 @@ import {
   memorySaveManual,
   memorySearch,
   memoryTree,
-  skillsDistill,
 } from '@/features/memory/api'
 import type {
   DocumentImportRequest,
@@ -275,15 +274,5 @@ export function useMemoryOrbitMap(
   return useQuery({
     queryKey: [...memoryOrbitQueryKey, domain, includeSensitive, activityWindow],
     queryFn: () => memoryOrbitMap(domain, includeSensitive, activityWindow),
-  })
-}
-
-export function useSkillsDistill() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (taskId: string) => skillsDistill(taskId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: memoryProposalsQueryKey })
-    },
   })
 }

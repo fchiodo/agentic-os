@@ -1,5 +1,10 @@
 # Agentic OS — Local-First Architecture v1.2
 
+> Current implementation note (2026-09-24): Runner, Approvals, Usage, and Audit
+> have been removed from the desktop product. Their descriptions below document
+> the earlier roadmap. Memory write proposals and their event ledger remain an
+> internal, local flow.
+
 Status: draft for review · Date: 2026-07-20 (v1.0: 2026-07-15 · v1.1 same day · v1.2 adds memory forgetting + retrieval ranking) · Supersedes: "Fabio Agentic OS — Reference Architecture v0.1" (evaluated below)
 Companion documents: `docs/UI-SPEC.md` (UI specification) · `docs/MEMORY-SPEC.md` (second brain / memory implementation spec)
 The app was renamed from "Agent Control" to "Agentic OS" on 2026-07-20; the repository directory and internal identifiers (bundle id, crate name) are unchanged.

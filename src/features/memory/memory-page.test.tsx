@@ -9,7 +9,7 @@ import { resetMockMemoryState } from '@/features/memory/api'
 vi.mock('@/features/memory/orbit-map', () => ({
   OrbitMapView: () => (
     <section>
-      <h2>Orbital map</h2>
+      <h3>Interactive 3D brain</h3>
       <span>AgenticOS</span>
     </section>
   ),
@@ -140,11 +140,11 @@ describe('MemoryPage', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('switches to the orbital map and back without losing the Memory page', async () => {
+  it('switches to the 3D brain and back without losing the Memory page', async () => {
     renderPage()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Map' }))
-    expect(await screen.findByRole('heading', { name: 'Orbital map' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '3D Brain' }))
+    expect(await screen.findByRole('heading', { name: 'Interactive 3D brain' })).toBeInTheDocument()
     expect(screen.getByText('AgenticOS')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Library' }))

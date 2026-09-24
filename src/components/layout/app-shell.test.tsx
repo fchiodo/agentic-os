@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AppShell } from '@/components/layout/app-shell'
@@ -18,16 +18,13 @@ vi.mock('@/features/control/use-control-status', () => ({
 }))
 
 afterEach(() => {
+  cleanup()
   vi.clearAllMocks()
 })
 
 function renderShell() {
   vi.mocked(useDashboardSnapshot).mockReturnValue({
     data: {
-      activity: {
-        recentJobs: [],
-        recentThreads: [],
-      },
       catalog: {
         counts: {
           agent: 1,
@@ -48,15 +45,6 @@ function renderShell() {
         platform: 'darwin arm64',
       },
       sources: [],
-      usage: {
-        activeThreads: 0,
-        distinctWorkspaces: 0,
-        logEntries24h: 0,
-        topWorkspaces: [],
-        totalTokens: 0,
-        trackedThreads: 0,
-        trend: [],
-      },
     },
     error: null,
     isFetching: false,
@@ -65,11 +53,7 @@ function renderShell() {
 
   vi.mocked(useControlStatus).mockReturnValue({
     data: {
-      auditChainOk: true,
-      pendingApprovals: 0,
       pendingMemoryProposals: 0,
-      runningTasks: 0,
-      spentTodayUsd: 0,
     },
   } as ReturnType<typeof useControlStatus>)
 
@@ -107,6 +91,15 @@ function renderShell() {
 }
 
 describe('AppShell', () => {
+  it('does not expose retired product navigation', () => {
+    renderShell()
+
+    expect(screen.queryByRole('link', { name: /runner/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /approvals/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /usage/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /audit/i })).not.toBeInTheDocument()
+  })
+
   it('does not render the data sources column on catalog', () => {
     renderShell()
 

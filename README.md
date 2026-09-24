@@ -1,6 +1,6 @@
 # Agentic OS
 
-Desktop control plane for local agents, skills, routines, and Codex usage data.
+Desktop control plane for local agents, skills, routines, memory, and document processing.
 
 ## Stack
 
@@ -17,15 +17,10 @@ Desktop control plane for local agents, skills, routines, and Codex usage data.
   - `~/.codex/.tmp/plugins/plugins`
   - `~/.codex/routines`
   - workspace `skills/`, `agents/`, `routines/`, and `prompts/`
-- Usage and activity reads from:
-  - `~/.codex/state_5.sqlite`
-  - `~/.codex/logs_2.sqlite`
 - Primary views:
   - `Catalog`
-  - `Runner`
   - `Memory`
   - `Document Converter`
-  - `Usage`
 
 ## Project layout
 
@@ -36,9 +31,8 @@ src/
   features/
     catalog/            inventory browsing
     dashboard/          native data contract and query
-    runner/             prompt/routine staging surface
+    memory/             governed memory and Second Brain
     document-converter/ local conversion UI, typed IPC schemas, preview
-    usage/              token and workspace telemetry
   lib/                  formatting and platform helpers
   store/                persisted UI state
 

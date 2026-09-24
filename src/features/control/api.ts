@@ -3,11 +3,7 @@ import { controlStatusSchema, type ControlStatus } from '@/features/control/sche
 import { isTauriRuntime } from '@/lib/tauri'
 
 const mockControlStatus: ControlStatus = {
-  pendingApprovals: 1,
   pendingMemoryProposals: 0,
-  runningTasks: 1,
-  spentTodayUsd: 0.27,
-  auditChainOk: true,
 }
 
 export async function getControlStatus(): Promise<ControlStatus> {

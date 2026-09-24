@@ -1,4 +1,3 @@
-mod approval;
 mod audit;
 mod commands;
 mod control_models;
@@ -10,8 +9,6 @@ mod harness;
 mod memory;
 mod models;
 mod orbit;
-mod orchestrator;
-mod policy;
 mod snapshot;
 
 use db::Db;
@@ -97,16 +94,6 @@ pub fn run() {
             commands::get_app_snapshot,
             commands::refresh_app_snapshot,
             commands::control_status,
-            commands::tasks_list,
-            commands::tasks_get,
-            commands::tasks_events_since,
-            commands::tasks_submit,
-            commands::tasks_cancel,
-            commands::approvals_list,
-            commands::approvals_decide,
-            commands::audit_runs,
-            commands::audit_trace,
-            commands::audit_verify_chain,
             commands::memory_tree,
             commands::memory_read,
             commands::memory_search,
@@ -129,7 +116,6 @@ pub fn run() {
             commands::memory_retrieval_eval_cases_list,
             commands::memory_retrieval_eval_case_save,
             commands::memory_orbit_map,
-            commands::skills_distill,
             document_converter::commands::document_converter_get_status,
             document_converter::commands::document_converter_get_model_status,
             document_converter::commands::document_converter_install_model,

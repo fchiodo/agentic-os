@@ -1,16 +1,14 @@
 import '@testing-library/jest-dom/vitest'
-import type Graph from 'graphology'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { orbitMapSchema } from '@/features/memory/schema'
 import type { OrbitMap, OrbitNode } from '@/features/memory/schema'
 
-const sigmaMock = vi.hoisted(() => ({
-  animate: vi.fn(),
-  graph: null as Graph | null,
-  handlers: new Map<string, (payload: { edge?: string; node?: string }) => void>(),
-  setState: vi.fn(),
+const globeMock = vi.hoisted(() => ({
+  focusNode: vi.fn(),
+  props: null as import('@/features/memory/orbit-globe').OrbitGlobeProps | null,
+  resetView: vi.fn(),
 }))
 
 const orbitHookState = vi.hoisted(() => ({
@@ -18,37 +16,18 @@ const orbitHookState = vi.hoisted(() => ({
   refetch: vi.fn(),
 }))
 
-vi.mock('sigma', () => ({
-  default: class SigmaMock {
-    constructor(graph: Graph) {
-      sigmaMock.graph = graph
-    }
-
-    on(event: string, handler: (payload: { edge?: string; node?: string }) => void) {
-      sigmaMock.handlers.set(event, handler)
-    }
-
-    kill() {}
-    refresh() {}
-    setSetting() { return this }
-
-    getCamera() {
-      return {
-        animate: sigmaMock.animate,
-        getState: () => ({ angle: 0, ratio: 1, x: 0.5, y: 0.5 }),
-        setState: sigmaMock.setState,
-      }
-    }
-
-    getNodeDisplayData(node: string) {
-      if (node === 'skill:deep') return { x: 0.18, y: 0.76 }
-      if (node === 'group:skill:test') return { x: 0.23, y: 0.71 }
-      return { x: 0.5, y: 0.5 }
-    }
-  },
-}))
-
-vi.mock('sigma/rendering', () => ({ EdgeArrowProgram: class {}, EdgeLineProgram: class {} }))
+vi.mock('@/features/memory/orbit-globe', async () => {
+  const React = await import('react')
+  const OrbitGlobe = React.forwardRef<
+    import('@/features/memory/orbit-globe').OrbitGlobeHandle,
+    import('@/features/memory/orbit-globe').OrbitGlobeProps
+  >((props, ref) => {
+    globeMock.props = props
+    React.useImperativeHandle(ref, () => ({ focusNode: globeMock.focusNode, resetView: globeMock.resetView }))
+    return <div aria-label="Interactive 3D brain graph" />
+  })
+  return { OrbitGlobe }
+})
 
 vi.mock('@/features/memory/hooks', () => ({
   useMemoryConfirm: () => ({ isPending: false, mutate: vi.fn() }),
@@ -61,9 +40,7 @@ vi.mock('@/features/memory/hooks', () => ({
   }),
 }))
 
-vi.mock('@/store/task-events', () => ({ useTaskEventsStore: () => null }))
 
-import { radialPositions } from '@/features/memory/orbit-layout'
 import { OrbitMapView } from '@/features/memory/orbit-map'
 
 function node(overrides: Partial<OrbitNode> & Pick<OrbitNode, 'id' | 'kind' | 'ring' | 'label'>): OrbitNode {
@@ -139,10 +116,9 @@ function renderMap() {
 beforeEach(() => {
   orbitHookState.current = fixture()
   orbitHookState.refetch.mockReset()
-  sigmaMock.animate.mockReset()
-  sigmaMock.setState.mockReset()
-  sigmaMock.handlers.clear()
-  sigmaMock.graph = null
+  globeMock.focusNode.mockReset()
+  globeMock.resetView.mockReset()
+  globeMock.props = null
   vi.stubGlobal('matchMedia', vi.fn(() => ({
     matches: true,
     addEventListener: vi.fn(),
@@ -167,28 +143,34 @@ describe('OrbitMapView exploration', () => {
 
   it('keeps selection separate from expansion and only focuses on request', async () => {
     renderMap()
-    const clickNode = sigmaMock.handlers.get('clickNode')
-    expect(clickNode).toBeDefined()
-
-    act(() => clickNode?.({ node: 'group:skill:test' }))
+    act(() => globeMock.props?.onNodeClick('group:skill:test'))
     expect(await screen.findByRole('heading', { name: 'Test skills' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Expand group' })).toBeInTheDocument()
-    expect(sigmaMock.animate).not.toHaveBeenCalled()
+    expect(globeMock.focusNode).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Center selection' }))
-    expect(sigmaMock.setState).toHaveBeenCalledWith({ ratio: 0.58, x: 0.23, y: 0.71 })
+    expect(globeMock.focusNode).toHaveBeenCalledWith('group:skill:test')
   })
 
-  it('renders memory sector separators through transparent visible anchors', () => {
+  it('renders the 3D brain categories and scene controls', () => {
     renderMap()
-    const graph = sigmaMock.graph
-    expect(graph).not.toBeNull()
-    for (let index = 0; index < 6; index += 1) {
-      expect(graph?.hasEdge(`__sector-edge:${index}`)).toBe(true)
-      expect(graph?.getNodeAttribute(`__sector:${index}:inner`, 'hidden')).not.toBe(true)
-      expect(graph?.getNodeAttribute(`__sector:${index}:outer`, 'hidden')).not.toBe(true)
-      expect(graph?.getNodeAttribute(`__sector:${index}:inner`, 'color')).toBe('#ffffff00')
-    }
+    expect(screen.getByRole('heading', { name: '3D Brain' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Interactive 3D brain graph')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Play growth' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cinema' })).toBeInTheDocument()
+    expect(globeMock.props?.nodes.map((item) => item.id)).toContain('core:agentic-os')
+  })
+
+  it('starts the growth replay and exposes a clean cinema view', () => {
+    const view = renderMap()
+    expect(globeMock.props?.replayNonce).toBe(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Play growth' }))
+    expect(globeMock.props?.replayNonce).toBe(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cinema' }))
+    expect(view.container.querySelector('.orbit-workspace')).toHaveClass('is-cinema')
+    expect(screen.getByRole('button', { name: 'Exit cinema' })).toBeInTheDocument()
   })
 
   it('finds an item in a closed group, expands its parent, and opens the detail', async () => {
@@ -198,21 +180,21 @@ describe('OrbitMapView exploration', () => {
     fireEvent.click(screen.getByRole('option', { name: /Deep skill/ }))
 
     expect(await screen.findByRole('heading', { name: 'Deep skill' })).toBeInTheDocument()
-    expect(sigmaMock.setState).toHaveBeenCalledWith({ ratio: 0.58, x: 0.18, y: 0.76 })
+    expect(globeMock.focusNode).toHaveBeenCalledWith('skill:deep')
     fireEvent.click(screen.getByText('Explore as an accessible list'))
     expect(screen.getByRole('button', { name: /Deep skill/ })).toBeInTheDocument()
   })
 
   it('does not move the camera on a payload refresh and closes selection with Escape', async () => {
     const view = renderMap()
-    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'group:skill:test' }))
+    act(() => globeMock.props?.onNodeClick('group:skill:test'))
     fireEvent.click(await screen.findByRole('button', { name: 'Center selection' }))
-    sigmaMock.setState.mockClear()
+    globeMock.focusNode.mockClear()
 
     orbitHookState.current = fixture('2026-09-23T10:01:00Z')
     view.rerender(<MemoryRouter><OrbitMapView onOpenMemory={vi.fn()} /></MemoryRouter>)
     await act(async () => {})
-    expect(sigmaMock.setState).not.toHaveBeenCalledWith(expect.objectContaining({ ratio: 0.58 }))
+    expect(globeMock.focusNode).not.toHaveBeenCalled()
 
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByLabelText('Map selection details')).not.toBeInTheDocument())
@@ -240,13 +222,12 @@ describe('OrbitMapView exploration', () => {
     orbitHookState.current = { ...current, nodes: [...current.nodes, ...bulkNodes], edges: [...current.edges, ...bulkEdges] }
     renderMap()
 
-    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'group:skill:test' }))
-    expect(sigmaMock.graph?.nodes().filter((id) => id.startsWith('skill:bulk-'))).toHaveLength(0)
-    expect(sigmaMock.graph?.hasEdge('edge:bulk-0')).toBe(false)
+    act(() => globeMock.props?.onNodeClick('group:skill:test'))
+    expect(globeMock.props?.nodes.filter((item) => item.id.startsWith('skill:bulk-'))).toHaveLength(0)
+    expect(globeMock.props?.renderedEdgeIds.has('edge:bulk-0')).toBe(false)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Expand group' }))
-    await waitFor(() => expect(sigmaMock.graph?.nodes().filter((id) => id.startsWith('skill:bulk-'))).toHaveLength(12))
-    expect(sigmaMock.graph?.getNodeAttribute('group:skill:test', 'forceLabel')).toBe(false)
+    await waitFor(() => expect(globeMock.props?.nodes.filter((item) => item.id.startsWith('skill:bulk-'))).toHaveLength(12))
     expect(screen.getByText((_content, element) => element?.textContent === '12 of 61 items shown')).toBeInTheDocument()
   })
 
@@ -266,8 +247,8 @@ describe('OrbitMapView exploration', () => {
     fireEvent.click(screen.getByRole('option', { name: /Bulk skill 60/ }))
 
     expect(await screen.findByRole('heading', { name: 'Bulk skill 60' })).toBeInTheDocument()
-    expect(sigmaMock.graph?.hasNode('skill:bulk-59')).toBe(true)
-    expect(sigmaMock.graph?.nodes().filter((id) => id.startsWith('skill:bulk-')).length).toBeLessThanOrEqual(13)
+    expect(globeMock.props?.nodes.some((item) => item.id === 'skill:bulk-59')).toBe(true)
+    expect(globeMock.props?.nodes.filter((item) => item.id.startsWith('skill:bulk-')).length).toBeLessThanOrEqual(13)
   })
 
   it('separates recorded activity from unavailable telemetry', async () => {
@@ -277,9 +258,10 @@ describe('OrbitMapView exploration', () => {
     expect(await screen.findByRole('heading', { name: 'Run governed task' })).toBeInTheDocument()
     expect(screen.getByText('2 recorded events')).toBeInTheDocument()
     expect(screen.getByText(/not claimed to have determined the answer/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Trace' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Task without trace/ }))
-    expect(await screen.findByText(/Data not available: this task has no trace events/i)).toBeInTheDocument()
+    expect(await screen.findByText(/Data not available: this task has no recorded events/i)).toBeInTheDocument()
   })
 
   it('keeps the selected task while inspecting one of its linked nodes', async () => {
@@ -287,31 +269,31 @@ describe('OrbitMapView exploration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
     const taskButton = screen.getByRole('button', { name: /Run governed task/ })
     fireEvent.click(taskButton)
-    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'skill:deep' }))
+    act(() => globeMock.props?.onNodeClick('skill:deep'))
 
     expect(await screen.findByRole('heading', { name: 'Deep skill' })).toBeInTheDocument()
     expect(screen.getByText('Inspecting within task: Run governed task')).toBeInTheDocument()
     expect(taskButton).toHaveAttribute('aria-pressed', 'true')
-    expect(sigmaMock.graph?.hasEdge('activity:task-1:0')).toBe(true)
+    expect(globeMock.props?.renderedEdgeIds.has('activity:task-1:0')).toBe(true)
   })
 
   it('applies evidence filters to selected-node and activity relations', async () => {
     renderMap()
-    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'skill:deep' }))
-    expect(sigmaMock.graph?.hasEdge('edge:observed')).toBe(true)
+    act(() => globeMock.props?.onNodeClick('skill:deep'))
+    expect(globeMock.props?.renderedEdgeIds.has('edge:observed')).toBe(true)
 
     fireEvent.click(screen.getByRole('button', { name: 'Show relations' }))
     fireEvent.click(screen.getByRole('checkbox', { name: 'Observed' }))
-    await waitFor(() => expect(sigmaMock.graph?.hasEdge('edge:observed')).toBe(false))
+    await waitFor(() => expect(globeMock.props?.renderedEdgeIds.has('edge:observed')).toBe(false))
 
     fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
     fireEvent.click(screen.getByRole('button', { name: /Run governed task/ }))
-    expect(sigmaMock.graph?.hasEdge('activity:task-1:0')).toBe(false)
+    expect(globeMock.props?.renderedEdgeIds.has('activity:task-1:0')).toBe(false)
   })
 
   it('routes registry evidence to Catalog instead of presenting it as a trace', async () => {
     renderMap()
-    act(() => sigmaMock.handlers.get('clickNode')?.({ node: 'skill:deep' }))
+    act(() => globeMock.props?.onNodeClick('skill:deep'))
     fireEvent.click(await screen.findByRole('button', { name: /target of contains/i }))
 
     expect(screen.getByRole('button', { name: 'Open in Catalog · catalog:deep' })).toBeInTheDocument()
@@ -335,45 +317,5 @@ describe('OrbitMapView exploration', () => {
     expect(within(screen.getByRole('listbox', { name: 'Map search results' })).getAllByRole('option')).toHaveLength(40)
     fireEvent.click(screen.getByRole('button', { name: 'Show 5 more' }))
     expect(within(screen.getByRole('listbox', { name: 'Map search results' })).getAllByRole('option')).toHaveLength(45)
-  })
-})
-
-describe('radialPositions', () => {
-  it('keeps existing coordinates stable when unrelated nodes are added', () => {
-    const base = fixture().nodes
-    const before = radialPositions(base)
-    const after = radialPositions([...base, node({ id: 'application:unrelated', kind: 'application', ring: 4, label: 'Unrelated', groupId: 'group:application:mcp' })])
-    for (const item of base) expect(after.get(item.id)).toEqual(before.get(item.id))
-  })
-
-  it('lays out a representative aggregated fixture within the interaction budget', () => {
-    const large = fixture().nodes.slice(0, 10)
-    for (let index = 0; index < 561; index += 1) large.push(node({ id: `skill:${index}`, kind: 'skill', ring: 1, label: `Skill ${index}`, groupId: 'group:skill:test' }))
-    for (let index = 0; index < 100; index += 1) large.push(node({ id: `application:${index}`, kind: 'application', ring: 4, label: `Application ${index}`, groupId: 'group:application:mcp' }))
-    const started = performance.now()
-    const positions = radialPositions(large)
-    const elapsed = performance.now() - started
-    console.info(`ORBIT_LAYOUT_FIXTURE={"nodes":${large.length},"layoutMs":${elapsed.toFixed(3)}}`)
-    expect(positions.size).toBe(large.length)
-    expect(elapsed).toBeLessThan(100)
-  })
-
-  it('distributes top-level groups evenly around their category ring', () => {
-    const groups = Array.from({ length: 8 }, (_, index) => node({
-      id: `group:application:${index}`,
-      kind: 'application_group',
-      ring: 4,
-      label: `Application group ${index}`,
-      aggregate: true,
-    }))
-    const positions = radialPositions([
-      node({ id: 'core:agentic-os', kind: 'core', ring: 0, label: 'AgenticOS' }),
-      ...groups,
-    ])
-    const angles = groups
-      .map((group) => { const position = positions.get(group.id)!; const angle = Math.atan2(position.y, position.x); return angle < 0 ? angle + Math.PI * 2 : angle })
-      .sort((left, right) => left - right)
-    const gaps = angles.map((angle, index) => ((angles[(index + 1) % angles.length] ?? 0) - angle + Math.PI * 2) % (Math.PI * 2))
-    for (const gap of gaps) expect(gap).toBeCloseTo((Math.PI * 2) / groups.length, 6)
   })
 })

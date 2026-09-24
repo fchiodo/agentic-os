@@ -5,8 +5,6 @@ use serde::Serialize;
 pub struct DashboardSnapshot {
     pub generated_at: i64,
     pub catalog: CatalogSection,
-    pub activity: ActivitySection,
-    pub usage: UsageSection,
     pub sources: Vec<SourceDescriptor>,
     pub runtime: RuntimeInfo,
 }
@@ -63,65 +61,6 @@ pub struct CatalogItem {
     pub detector: String,
     pub entrypoint: Option<String>,
     pub confidence: f64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActivitySection {
-    pub recent_threads: Vec<ThreadSummary>,
-    pub recent_jobs: Vec<JobSummary>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThreadSummary {
-    pub id: String,
-    pub title: String,
-    pub cwd: String,
-    pub updated_at: i64,
-    pub tokens_used: i64,
-    pub model: Option<String>,
-    pub provider: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JobSummary {
-    pub id: String,
-    pub name: String,
-    pub status: String,
-    pub input_path: String,
-    pub output_path: String,
-    pub updated_at: i64,
-    pub max_runtime_seconds: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageSection {
-    pub total_tokens: i64,
-    pub tracked_threads: i64,
-    pub active_threads: i64,
-    pub distinct_workspaces: i64,
-    pub log_entries_24h: i64,
-    pub trend: Vec<UsagePoint>,
-    pub top_workspaces: Vec<WorkspaceUsage>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsagePoint {
-    pub day: String,
-    pub token_total: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceUsage {
-    pub cwd: String,
-    pub thread_count: i64,
-    pub token_total: i64,
-    pub last_updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

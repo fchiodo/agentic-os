@@ -1,4 +1,3 @@
-pub mod codex;
 pub mod structured;
 
 /// Resolves the VF proxy credential for the spawned Codex process.

@@ -1,4 +1,3 @@
-import Graph from 'graphology'
 import {
   Activity,
   AppWindow,
@@ -13,24 +12,24 @@ import {
   FileText,
   Layers3,
   ListTree,
-  Moon,
+  Maximize2,
+  Minimize2,
   Network,
+  Pause,
+  Play,
   RefreshCw,
   RotateCcw,
   Search,
   ShieldCheck,
-  Sun,
   Wand2,
   Workflow,
   X,
 } from 'lucide-react'
-import Sigma from 'sigma'
-import { EdgeArrowProgram, EdgeLineProgram } from 'sigma/rendering'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { useMemoryConfirm, useMemoryOrbitMap } from '@/features/memory/hooks'
-import { ORBIT_RING_RADII, radialPositions } from '@/features/memory/orbit-layout'
+import { OrbitGlobe, type OrbitGlobeHandle, type ReplayProgress } from '@/features/memory/orbit-globe'
 import type {
   OrbitActivity,
   OrbitActivityWindow,
@@ -38,7 +37,6 @@ import type {
   OrbitNode,
 } from '@/features/memory/schema'
 import { formatCompactNumber, formatRelativeTime } from '@/lib/format'
-import { useTaskEventsStore } from '@/store/task-events'
 import { useWorkbenchStore } from '@/store/workbench'
 
 const DOMAINS = ['work', 'planphysique', 'personal', 'family', 'finance', 'research'] as const
@@ -49,7 +47,6 @@ const SELECTED_RELATION_NODE_LIMIT = 18
 const STRUCTURAL_RELATIONS = new Set(['contains', 'contains_source', 'governs', 'registers'])
 
 type MapMode = 'structure' | 'activity'
-type MapTheme = 'dark' | 'light'
 type InteractionKind = 'expansionMs' | 'selectionMs'
 
 const DOMAIN_LABELS: Record<string, string> = {
@@ -61,21 +58,12 @@ const DOMAIN_LABELS: Record<string, string> = {
   research: 'Research',
 }
 
-const DOMAIN_COLORS: Record<string, string> = {
-  work: '#6fa8dc',
-  planphysique: '#69c6a8',
-  personal: '#c994e8',
-  family: '#e7b36a',
-  finance: '#e47777',
-  research: '#82a7ef',
-}
-
 const RING_META = [
-  { color: '#f4f1e9', icon: Layers3, label: 'Agentic OS', radius: ORBIT_RING_RADII[0] },
-  { color: '#ef835d', icon: Wand2, label: 'Skills', radius: ORBIT_RING_RADII[1] },
-  { color: '#6fa8dc', icon: Database, label: 'Memory', radius: ORBIT_RING_RADII[2] },
-  { color: '#83a866', icon: Workflow, label: 'Routines', radius: ORBIT_RING_RADII[3] },
-  { color: '#a788c0', icon: AppWindow, label: 'Applications', radius: ORBIT_RING_RADII[4] },
+  { color: '#f4f1e9', icon: Layers3, label: 'Agentic OS' },
+  { color: '#ef835d', icon: Wand2, label: 'Skills' },
+  { color: '#6fa8dc', icon: Database, label: 'Memory' },
+  { color: '#83a866', icon: Workflow, label: 'Routines' },
+  { color: '#a788c0', icon: AppWindow, label: 'Applications' },
 ] as const
 
 const EMPTY_NODES: OrbitNode[] = []
@@ -95,110 +83,13 @@ const DEFAULT_RELATION_TYPES = [
 ]
 
 const EVIDENCE_META: Record<OrbitEdge['evidence'], { color: string; label: string; style: string }> = {
-  declared: { color: '#9e9a90', label: 'Declared', style: 'thin arrow' },
-  observed: { color: '#f08a62', label: 'Observed', style: 'strong arrow' },
-  inferred: { color: '#70a6d8', label: 'Inferred', style: 'faint arrow' },
+  declared: { color: '#9e9a90', label: 'Declared', style: 'thin path' },
+  observed: { color: '#f08a62', label: 'Observed', style: 'particle path' },
+  inferred: { color: '#70a6d8', label: 'Inferred', style: 'faint path' },
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function nodeSize(node: OrbitNode): number {
-  if (node.kind === 'core') return 16
-  if (node.aggregate) return Math.min(13.5, 7 + Math.log2(node.count + 1) * 1.35)
-  if (node.kind === 'source') return 4.2
-  return node.kind === 'memory' ? 4.8 : 5.4
-}
-
-function nodeColor(node: OrbitNode, theme: MapTheme): string {
-  if (node.ring === 2 && node.domain) return DOMAIN_COLORS[node.domain] ?? RING_META[2].color
-  if (node.kind === 'core') return theme === 'dark' ? '#f5f1e8' : '#171716'
-  return RING_META[node.ring].color
-}
-
-function compactGraphLabel(label: string): string {
-  return label.length > 24 ? `${label.slice(0, 22).trimEnd()}…` : label
-}
-
-function makeGraph(
-  nodes: OrbitNode[],
-  edges: OrbitEdge[],
-  visibleIds: Set<string>,
-  theme: MapTheme,
-): Graph {
-  const graph = new Graph({ multi: true, type: 'directed' })
-  const visibleNodes = nodes.filter((node) => visibleIds.has(node.id))
-  const positions = radialPositions(visibleNodes)
-  const guideColor = theme === 'dark' ? '#8f99a31f' : '#69665f24'
-  const sectorColor = theme === 'dark' ? '#6fa8dc24' : '#6a9bcc2b'
-  const anchors: Array<[string, number, number]> = [
-    ['__layout:north', 0, -90],
-    ['__layout:east', 90, 0],
-    ['__layout:south', 0, 90],
-    ['__layout:west', -90, 0],
-  ]
-  anchors.forEach(([id, x, y]) => graph.addNode(id, { x, y, size: 0.01, label: '', color: '#ffffff00', hidden: true }))
-
-  RING_META.slice(1).forEach((ring, ringIndex) => {
-    const points = 96
-    for (let index = 0; index < points; index += 1) {
-      const angle = (Math.PI * 2 * index) / points
-      const id = `__ring:${ringIndex + 1}:${index}`
-      graph.addNode(id, { x: Math.cos(angle) * ring.radius, y: Math.sin(angle) * ring.radius, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
-    }
-    for (let index = 0; index < points; index += 1) {
-      graph.addEdgeWithKey(
-        `__ring-edge:${ringIndex + 1}:${index}`,
-        `__ring:${ringIndex + 1}:${index}`,
-        `__ring:${ringIndex + 1}:${(index + 1) % points}`,
-        { color: guideColor, size: ringIndex === 1 ? 0.72 : 0.5, ringGuide: true, type: 'line', zIndex: 0 },
-      )
-    }
-  })
-
-  for (let index = 0; index < DOMAINS.length; index += 1) {
-    const angle = -Math.PI / 2 + (Math.PI * 2 * (index - 0.5)) / DOMAINS.length
-    const inner = `__sector:${index}:inner`
-    const outer = `__sector:${index}:outer`
-    // Sigma also hides every edge incident to a hidden node. Keep sector
-    // anchors renderable but fully transparent so their guide line remains
-    // visible without introducing decorative points.
-    graph.addNode(inner, { x: Math.cos(angle) * 29, y: Math.sin(angle) * 29, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
-    graph.addNode(outer, { x: Math.cos(angle) * 49, y: Math.sin(angle) * 49, size: 0.01, label: '', color: '#ffffff00', ringGuide: true, zIndex: 0 })
-    graph.addEdgeWithKey(`__sector-edge:${index}`, inner, outer, { color: sectorColor, size: 0.55, ringGuide: true, type: 'line', zIndex: 0 })
-  }
-
-  for (const node of nodes) {
-    if (!visibleIds.has(node.id)) continue
-    const position = positions.get(node.id) ?? { x: 0, y: 0 }
-    graph.addNode(node.id, {
-      ...position,
-      label: compactGraphLabel(node.label),
-      size: nodeSize(node),
-      color: nodeColor(node, theme),
-      forceLabel: node.kind === 'core' || node.kind === 'memory_domain',
-      nodeKind: node.kind,
-      status: node.status,
-      zIndex: node.aggregate ? 3 : 2,
-    })
-  }
-
-  for (const edge of edges) {
-    if (!visibleIds.has(edge.source) || !visibleIds.has(edge.target)) continue
-    if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) continue
-    const evidence = EVIDENCE_META[edge.evidence]
-    graph.addEdgeWithKey(edge.id, edge.source, edge.target, {
-      color: evidence.color,
-      size: edge.evidence === 'observed' ? Math.min(4, 1.7 + Math.log2(edge.weight + 1) * 0.5) : edge.evidence === 'declared' ? 1.05 : 0.62,
-      type: edge.evidence,
-      evidence: edge.evidence,
-      relation: edge.relation,
-      recentActivity: edge.activityAt !== null && Date.now() - Date.parse(edge.activityAt) >= 0 && Date.now() - Date.parse(edge.activityAt) < 30_000,
-      zIndex: edge.evidence === 'observed' ? 4 : 2,
-    })
-  }
-  return graph
 }
 
 function relationLabel(edge: OrbitEdge, selectedId: string): string {
@@ -256,19 +147,13 @@ export function OrbitMapView({
   const setCatalogFilter = useWorkbenchStore((state) => state.setCatalogFilter)
   const setCatalogSearch = useWorkbenchStore((state) => state.setCatalogSearch)
   const setSelectedCatalogId = useWorkbenchStore((state) => state.setSelectedCatalogId)
-  const canvasRef = useRef<HTMLDivElement | null>(null)
-  const rendererRef = useRef<Sigma | null>(null)
-  const graphRef = useRef<Graph | null>(null)
-  const nodeByIdRef = useRef<Map<string, OrbitNode>>(new Map())
-  const transitionRef = useRef<number | null>(null)
-  const focusSequenceRef = useRef(0)
+  const globeRef = useRef<OrbitGlobeHandle | null>(null)
   const interactionStartedRef = useRef<Partial<Record<InteractionKind, number>>>({})
   const firstRenderStartedRef = useRef<number | null>(null)
   const firstRenderedPayloadRef = useRef<string | null>(null)
   const searchStartedRef = useRef<number | null>(null)
 
   const [mode, setMode] = useState<MapMode>('structure')
-  const [theme, setTheme] = useState<MapTheme>('dark')
   const [activityWindow, setActivityWindow] = useState<OrbitActivityWindow>('today')
   const [domain, setDomain] = useState<string | undefined>()
   const [includeSensitive, setIncludeSensitive] = useState(false)
@@ -278,21 +163,21 @@ export function OrbitMapView({
   const [groupLimits, setGroupLimits] = useState<Record<string, number>>({})
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
-  const [focusRequest, setFocusRequest] = useState<{ id: string; sequence: number } | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
-  const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [showRelations, setShowRelations] = useState(false)
   const [relationLimit, setRelationLimit] = useState(DEFAULT_EDGE_LIMIT)
   const [relationTypes, setRelationTypes] = useState<Set<string>>(() => new Set(DEFAULT_RELATION_TYPES))
   const [evidenceTypes, setEvidenceTypes] = useState<Set<OrbitEdge['evidence']>>(() => new Set(['declared', 'observed', 'inferred']))
-  const [livePulse, setLivePulse] = useState(false)
   const [reducedMotion, setReducedMotion] = useState(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  const [motionEnabled, setMotionEnabled] = useState(() => !(typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches))
+  const [cinema, setCinema] = useState(false)
+  const [replayFullBrain, setReplayFullBrain] = useState(false)
+  const [replayNonce, setReplayNonce] = useState(0)
+  const [replay, setReplay] = useState<ReplayProgress>({ active: false, complete: false, progress: 0, visible: 0, total: 0 })
   const [uiMetrics, setUiMetrics] = useState({ expansionMs: 0, firstRenderMs: 0, graphBuildMs: 0, searchMs: 0, selectionMs: 0 })
 
-  const lastTaskEvent = useTaskEventsStore((state) => state.lastEvent)
   const orbitQuery = useMemoryOrbitMap(domain, includeSensitive, activityWindow)
-  const refetchOrbit = orbitQuery.refetch
   const confirmMutation = useMemoryConfirm()
   const nodes = orbitQuery.data?.nodes ?? EMPTY_NODES
   const allEdges = orbitQuery.data?.edges ?? EMPTY_EDGES
@@ -301,12 +186,13 @@ export function OrbitMapView({
   const selectedActivity = orbitQuery.data?.activities.find((activity) => activity.taskId === selectedTaskId) ?? null
   const query = search.trim().toLocaleLowerCase()
 
-  useEffect(() => { nodeByIdRef.current = nodeById }, [nodeById])
-
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return
     const media = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const onChange = (event: MediaQueryListEvent) => setReducedMotion(event.matches)
+    const onChange = (event: MediaQueryListEvent) => {
+      setReducedMotion(event.matches)
+      setMotionEnabled(!event.matches)
+    }
     media.addEventListener('change', onChange)
     return () => media.removeEventListener('change', onChange)
   }, [])
@@ -314,6 +200,10 @@ export function OrbitMapView({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      if (cinema) {
+        setCinema(false)
+        return
+      }
       setSelectedId(null)
       setSelectedTaskId(null)
       setSelectedEdgeId(null)
@@ -321,7 +211,7 @@ export function OrbitMapView({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
+  }, [cinema])
 
   const childrenByGroup = useMemo(() => {
     const grouped = new Map<string, OrbitNode[]>()
@@ -359,6 +249,7 @@ export function OrbitMapView({
 
   const visibleIds = useMemo(() => {
     const visible = new Set<string>(['core:agentic-os'])
+    if (replayFullBrain) for (const node of nodes) visible.add(node.id)
     for (const node of nodes) if (node.groupId === null) visible.add(node.id)
     for (const groupId of expandedGroups) {
       const limit = groupLimits[groupId] ?? DEFAULT_CHILD_LIMIT
@@ -385,19 +276,17 @@ export function OrbitMapView({
       if (parent) visible.add(parent)
     }
     return visible
-  }, [allEdges, childrenByGroup, expandedGroups, groupLimits, nodeById, nodes, relationIsEnabled, selectedActivityNodeIds, selectedNode])
+  }, [allEdges, childrenByGroup, expandedGroups, groupLimits, nodeById, nodes, relationIsEnabled, replayFullBrain, selectedActivityNodeIds, selectedNode])
 
   const taskEdges = useMemo(() => activityEdges(selectedActivity), [selectedActivity])
   const allRelationTypes = useMemo(() => [...new Set([...allEdges, ...taskEdges].map((edge) => edge.relation))].sort(), [allEdges, taskEdges])
   const displayedEdges = useMemo(() => {
     if (mode === 'activity') return taskEdges.filter(relationIsEnabled).slice(0, relationLimit)
     const selected = selectedId ? allEdges.filter((edge) => (edge.source === selectedId || edge.target === selectedId) && relationIsEnabled(edge) && !STRUCTURAL_RELATIONS.has(edge.relation)) : []
+    const structural = allEdges.filter((edge) => STRUCTURAL_RELATIONS.has(edge.relation))
     const advanced = showRelations ? allEdges.filter(relationIsEnabled) : []
     const byId = new Map<string, OrbitEdge>()
-    for (const edge of [...selected, ...advanced]) {
-      if (edge.relation === 'registers' && !showRelations) continue
-      byId.set(edge.id, edge)
-    }
+    for (const edge of [...structural, ...selected, ...advanced]) byId.set(edge.id, edge)
     return [...byId.values()]
       .sort((left, right) => Number(right.source === selectedId || right.target === selectedId) - Number(left.source === selectedId || left.target === selectedId) || (right.activityAt ?? '').localeCompare(left.activityAt ?? ''))
       .slice(0, relationLimit)
@@ -408,166 +297,30 @@ export function OrbitMapView({
     () => displayedEdges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target)),
     [displayedEdges, visibleIds],
   )
-
-  const nextGraph = useMemo(() => {
-    return makeGraph(nodes, renderedEdges, visibleIds, theme)
-  }, [nodes, renderedEdges, theme, visibleIds])
-
-  useEffect(() => {
-    if (!lastTaskEvent || Date.now() - Date.parse(lastTaskEvent.ts) > 10_000) return
-    const pulseStartTimer = window.setTimeout(() => setLivePulse(true), 0)
-    const refreshTimer = window.setTimeout(() => void refetchOrbit(), 250)
-    const pulseTimer = window.setTimeout(() => setLivePulse(false), 1_600)
-    return () => {
-      window.clearTimeout(pulseStartTimer)
-      window.clearTimeout(refreshTimer)
-      window.clearTimeout(pulseTimer)
+  const visibleNodes = useMemo(() => nodes.filter((node) => visibleIds.has(node.id)), [nodes, visibleIds])
+  const globeEdges = useMemo(() => {
+    const byId = new Map<string, OrbitEdge>()
+    for (const edge of [...allEdges, ...taskEdges]) {
+      if (visibleIds.has(edge.source) && visibleIds.has(edge.target)) byId.set(edge.id, edge)
     }
-  }, [lastTaskEvent, refetchOrbit])
-
-  useEffect(() => {
-    const container = canvasRef.current
-    if (!container || rendererRef.current) return
-    const graph = new Graph({ multi: true, type: 'directed' })
-    graphRef.current = graph
-    const renderer = new Sigma(graph, container, {
-      allowInvalidContainer: true,
-      defaultEdgeColor: '#7d8791',
-      defaultNodeColor: '#9ca4ab',
-      edgeProgramClasses: { declared: EdgeArrowProgram, inferred: EdgeArrowProgram, line: EdgeLineProgram, observed: EdgeArrowProgram },
-      enableEdgeEvents: true,
-      labelColor: { color: '#f4f1e9' },
-      labelDensity: 0.22,
-      labelFont: 'Anthropic Sans, Arial, sans-serif',
-      labelRenderedSizeThreshold: 7,
-      labelSize: 10,
-      renderEdgeLabels: false,
-      zIndex: true,
-    })
-    rendererRef.current = renderer
-    renderer.on('clickNode', ({ node }) => {
-      if (node.startsWith('__')) return
-      interactionStartedRef.current.selectionMs = performance.now()
-      setSelectedId(node)
-      setSelectedEdgeId(null)
-      setDetailOpen(true)
-    })
-    renderer.on('clickEdge', ({ edge }) => {
-      if (edge.startsWith('__')) return
-      setSelectedEdgeId(edge)
-      setDetailOpen(true)
-    })
-    renderer.on('clickStage', () => {
-      setSelectedId(null)
-      setSelectedTaskId(null)
-      setSelectedEdgeId(null)
-      setDetailOpen(false)
-    })
-    renderer.on('enterNode', ({ node }) => {
-      if (!node.startsWith('__')) setHoveredId(node)
-    })
-    renderer.on('leaveNode', ({ node }) => {
-      setHoveredId((current) => current === node ? null : current)
-    })
-    return () => {
-      renderer.kill()
-      rendererRef.current = null
-      graphRef.current = null
-    }
-  }, [])
-
-  useEffect(() => {
-    const renderer = rendererRef.current
-    if (!renderer) return
-    renderer.setSetting('labelColor', { color: theme === 'dark' ? '#f1eee7' : '#343330' })
-    renderer.setSetting('defaultEdgeColor', theme === 'dark' ? '#7d8791' : '#aaa69c')
-    renderer.refresh()
-  }, [theme])
-
-  useEffect(() => {
-    const graph = graphRef.current
-    const renderer = rendererRef.current
-    if (!graph || !renderer) return
-    if (transitionRef.current !== null) window.cancelAnimationFrame(transitionRef.current)
-    const graphStarted = performance.now()
-    const cameraState = renderer.getCamera().getState()
-    const desiredIds = new Set(nextGraph.nodes())
-    const departingIds = new Set(graph.nodes().filter((node) => !desiredIds.has(node)))
-    const starts = new Map<string, { x: number; y: number }>()
-    const targets = new Map<string, { x: number; y: number }>()
-
-    for (const node of nextGraph.nodes()) {
-      const attributes = nextGraph.getNodeAttributes(node)
-      const target = { x: Number(attributes.x), y: Number(attributes.y) }
-      targets.set(node, target)
-      if (graph.hasNode(node)) {
-        const current = graph.getNodeAttributes(node)
-        starts.set(node, { x: Number(current.x), y: Number(current.y) })
-        graph.replaceNodeAttributes(node, { ...attributes, x: Number(current.x), y: Number(current.y) })
-      } else {
-        const model = nodeByIdRef.current.get(node)
-        const parent = model?.groupId && graph.hasNode(model.groupId) ? graph.getNodeAttributes(model.groupId) : null
-        const start = parent ? { x: Number(parent.x), y: Number(parent.y) } : target
-        starts.set(node, start)
-        graph.addNode(node, { ...attributes, ...start })
+    return [...byId.values()].slice(0, 1_800)
+  }, [allEdges, taskEdges, visibleIds])
+  const renderedEdgeIds = useMemo(() => new Set(renderedEdges.map((edge) => edge.id)), [renderedEdges])
+  const highlightedIds = useMemo(() => {
+    const highlighted = new Set(selectedActivityNodeIds)
+    if (selectedId) {
+      highlighted.add(selectedId)
+      for (const edge of globeEdges) {
+        if (edge.source === selectedId) highlighted.add(edge.target)
+        if (edge.target === selectedId) highlighted.add(edge.source)
       }
     }
-    for (const node of departingIds) {
-      const current = graph.getNodeAttributes(node)
-      starts.set(node, { x: Number(current.x), y: Number(current.y) })
-      const model = nodeByIdRef.current.get(node)
-      const parent = model?.groupId && graph.hasNode(model.groupId) ? graph.getNodeAttributes(model.groupId) : current
-      targets.set(node, { x: Number(parent.x), y: Number(parent.y) })
+    if (selectedNode?.aggregate && expandedGroups.has(selectedNode.id)) {
+      const limit = groupLimits[selectedNode.id] ?? DEFAULT_CHILD_LIMIT
+      for (const child of (childrenByGroup.get(selectedNode.id) ?? []).slice(0, limit)) highlighted.add(child.id)
     }
-    graph.clearEdges()
-    nextGraph.forEachEdge((edge, attributes, source, target) => {
-      if (graph.hasNode(source) && graph.hasNode(target)) graph.addEdgeWithKey(edge, source, target, { ...attributes })
-    })
-    renderer.getCamera().setState(cameraState)
-
-    const finish = () => {
-      for (const node of departingIds) if (graph.hasNode(node)) graph.dropNode(node)
-      renderer.refresh()
-      const now = performance.now()
-      const nextMetrics: Partial<typeof uiMetrics> = { graphBuildMs: now - graphStarted }
-      for (const key of ['expansionMs', 'selectionMs'] as InteractionKind[]) {
-        const started = interactionStartedRef.current[key]
-        if (started !== undefined) {
-          nextMetrics[key] = now - started
-          delete interactionStartedRef.current[key]
-        }
-      }
-      setUiMetrics((current) => ({ ...current, ...nextMetrics }))
-    }
-
-    if (reducedMotion) {
-      for (const [node, target] of targets) if (graph.hasNode(node)) graph.mergeNodeAttributes(node, target)
-      finish()
-      return
-    }
-
-    const started = performance.now()
-    const animate = (now: number) => {
-      const progress = Math.min(1, (now - started) / 300)
-      const eased = 1 - (1 - progress) ** 3
-      for (const [node, target] of targets) {
-        if (!graph.hasNode(node)) continue
-        const start = starts.get(node) ?? target
-        graph.mergeNodeAttributes(node, { x: start.x + (target.x - start.x) * eased, y: start.y + (target.y - start.y) * eased })
-      }
-      renderer.refresh()
-      if (progress < 1) transitionRef.current = window.requestAnimationFrame(animate)
-      else {
-        transitionRef.current = null
-        finish()
-      }
-    }
-    transitionRef.current = window.requestAnimationFrame(animate)
-    return () => {
-      if (transitionRef.current !== null) window.cancelAnimationFrame(transitionRef.current)
-      transitionRef.current = null
-    }
-  }, [nextGraph, reducedMotion])
+    return highlighted
+  }, [childrenByGroup, expandedGroups, globeEdges, groupLimits, selectedActivityNodeIds, selectedId, selectedNode])
 
   useEffect(() => {
     const generatedAt = orbitQuery.data?.generatedAt
@@ -583,64 +336,31 @@ export function OrbitMapView({
     return () => window.cancelAnimationFrame(frame)
   }, [orbitQuery.data?.generatedAt])
 
-  useEffect(() => {
-    const renderer = rendererRef.current
-    const graph = graphRef.current
-    if (!renderer || !graph) return
-    const highlighted = new Set(selectedActivityNodeIds)
-    if (selectedId) {
-      highlighted.add(selectedId)
-      if (graph.hasNode(selectedId)) for (const neighbor of graph.neighbors(selectedId)) highlighted.add(neighbor)
-    }
-    if (selectedNode?.aggregate && expandedGroups.has(selectedNode.id)) {
-      const limit = groupLimits[selectedNode.id] ?? DEFAULT_CHILD_LIMIT
-      for (const child of (childrenByGroup.get(selectedNode.id) ?? []).slice(0, limit)) highlighted.add(child.id)
-    }
-    const hasHighlight = highlighted.size > 0
-    renderer.setSetting('nodeReducer', (node, data) => {
-      if (data.ringGuide || node.startsWith('__')) return data
-      if (node === selectedId) return { ...data, highlighted: true, forceLabel: true, size: data.size * 1.22 }
-      if (node === hoveredId) return { ...data, highlighted: true, forceLabel: true, size: data.size * 1.12 }
-      if (highlighted.has(node)) return { ...data, highlighted: true, forceLabel: data.nodeKind === 'memory_domain', size: data.size * 1.08 }
-      if (hasHighlight) return { ...data, color: theme === 'dark' ? '#4a5056' : '#d1cfc5', label: '' }
-      return data
-    })
-    renderer.setSetting('edgeReducer', (edge, data) => {
-      if (data.ringGuide) return data
-      const incident = (selectedId && (graph.source(edge) === selectedId || graph.target(edge) === selectedId)) || selectedActivityNodeIds.has(graph.target(edge))
-      if (incident) return { ...data, color: data.recentActivity && livePulse ? '#ffd0bc' : data.color, size: Math.max(data.recentActivity && livePulse ? 4.2 : 1.5, data.size), zIndex: 6 }
-      return { ...data, color: theme === 'dark' ? '#424950' : '#ddd9cf', hidden: hasHighlight }
-    })
-    renderer.refresh()
-  }, [childrenByGroup, expandedGroups, groupLimits, hoveredId, livePulse, nextGraph, selectedActivityNodeIds, selectedId, selectedNode, theme])
-
-  useEffect(() => {
-    if (!focusRequest) return
-    let frame: number | null = null
-    let attempts = 0
-    const applyFocus = () => {
-      const renderer = rendererRef.current
-      const display = renderer?.getNodeDisplayData(focusRequest.id)
-      if (!renderer || !display) {
-        attempts += 1
-        if (attempts < 5) frame = window.requestAnimationFrame(applyFocus)
-        return
-      }
-      const target = { x: display.x, y: display.y, ratio: 0.58 }
-      if (reducedMotion) renderer.getCamera().setState(target)
-      else renderer.getCamera().animate(target, { duration: 300 })
-      setFocusRequest((current) => current?.sequence === focusRequest.sequence ? null : current)
-    }
-    frame = window.requestAnimationFrame(applyFocus)
-    return () => {
-      if (frame !== null) window.cancelAnimationFrame(frame)
-    }
-  }, [focusRequest, reducedMotion])
-
   const requestFocus = useCallback((id: string) => {
-    focusSequenceRef.current += 1
-    setFocusRequest({ id, sequence: focusSequenceRef.current })
+    globeRef.current?.focusNode(id)
   }, [])
+
+  const recordGraphPerformance = useCallback((graphBuildMs: number) => {
+    const now = performance.now()
+    const nextMetrics: Partial<typeof uiMetrics> = { graphBuildMs }
+    for (const key of ['expansionMs', 'selectionMs'] as InteractionKind[]) {
+      const started = interactionStartedRef.current[key]
+      if (started !== undefined) {
+        nextMetrics[key] = now - started
+        delete interactionStartedRef.current[key]
+      }
+    }
+    setUiMetrics((current) => ({ ...current, ...nextMetrics }))
+  }, [])
+
+  const playGrowth = () => {
+    setSelectedId(null)
+    setSelectedTaskId(null)
+    setSelectedEdgeId(null)
+    setDetailOpen(false)
+    setReplayFullBrain(true)
+    setReplayNonce((current) => current + 1)
+  }
 
   const selectNode = useCallback((id: string, focus = false) => {
     const node = nodeById.get(id)
@@ -696,12 +416,9 @@ export function OrbitMapView({
     setSearch('')
     setSearchLimit(SEARCH_PAGE_SIZE)
     setDetailOpen(false)
-    const camera = rendererRef.current?.getCamera()
-    if (camera) {
-      const target = { x: 0.5, y: 0.5, ratio: 1 }
-      if (reducedMotion) camera.setState(target)
-      else camera.animate(target, { duration: 300 })
-    }
+    setReplayFullBrain(false)
+    setReplay({ active: false, complete: false, progress: 0, visible: 0, total: 0 })
+    globeRef.current?.resetView()
   }
 
   const goBackLevel = () => {
@@ -723,8 +440,6 @@ export function OrbitMapView({
     void navigate('/catalog')
   }
 
-  const openTrace = (reference: string) => void navigate(`/audit?run=${encodeURIComponent(reference.replace(/^audit:/, ''))}`)
-
   const openCatalogReference = (reference: string) => {
     const node = nodes.find((candidate) => candidate.sourceRef === reference && catalogId(candidate))
     if (node) return navigateCatalog(node)
@@ -736,7 +451,7 @@ export function OrbitMapView({
   }
 
   const evidenceAction = (reference: string): { label: string; run: () => void } | null => {
-    if (reference.startsWith('audit:')) return { label: 'Open trace', run: () => openTrace(reference) }
+    if (reference.startsWith('audit:')) return null
     if (reference.startsWith('catalog:')) return { label: 'Open in Catalog', run: () => openCatalogReference(reference) }
     if (reference.startsWith('document-import:') && onOpenSource) {
       const importId = reference.replace(/^document-import:/, '')
@@ -769,9 +484,9 @@ export function OrbitMapView({
   const counts = orbitQuery.data?.counts
 
   return (
-    <div className={`orbit-workspace orbit-theme-${theme}`}>
+    <div className={`orbit-workspace ${cinema ? 'is-cinema' : ''}`}>
       <section className="surface orbit-toolbar">
-        <div className="orbit-title-block"><p className="eyebrow">Second Brain topology</p><h2>Orbital map</h2></div>
+        <div className="orbit-title-block"><p className="eyebrow">Second Brain topology</p><h2>3D Brain</h2></div>
         <div className="orbit-mode-switch" aria-label="Map mode">
           <button aria-pressed={mode === 'structure'} className={mode === 'structure' ? 'is-active' : ''} onClick={() => { setMode('structure'); setSelectedTaskId(null) }} type="button"><ListTree aria-hidden="true" size={14} />Structure</button>
           <button aria-pressed={mode === 'activity'} className={mode === 'activity' ? 'is-active' : ''} onClick={() => { setMode('activity'); setSelectedId(null) }} type="button"><Activity aria-hidden="true" size={14} />Activity</button>
@@ -784,7 +499,6 @@ export function OrbitMapView({
           <select aria-label="Filter map by domain" onChange={(event) => setDomain(event.target.value || undefined)} value={domain ?? ''}><option value="">All domains</option>{DOMAINS.map((item) => <option key={item} value={item}>{DOMAIN_LABELS[item]}</option>)}</select>
           {mode === 'activity' && <select aria-label="Activity interval" onChange={(event) => setActivityWindow(event.target.value as OrbitActivityWindow)} value={activityWindow}><option value="today">Today</option><option value="7d">Last 7 days</option></select>}
           <label className="memory-toggle-label orbit-sensitive-toggle"><input checked={includeSensitive} onChange={(event) => setIncludeSensitive(event.target.checked)} type="checkbox" />Sensitive</label>
-          <button aria-label={`Use ${theme === 'dark' ? 'light' : 'dark'} map theme`} className="icon-button" onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} type="button">{theme === 'dark' ? <Sun aria-hidden="true" size={15} /> : <Moon aria-hidden="true" size={15} />}</button>
           <button className="secondary-button" disabled={orbitQuery.isFetching} onClick={() => void orbitQuery.refetch()} type="button"><RefreshCw aria-hidden="true" className={orbitQuery.isFetching ? 'is-spinning' : ''} size={15} />Refresh</button>
         </div>
       </section>
@@ -794,16 +508,38 @@ export function OrbitMapView({
         <div className="orbit-context-actions"><button disabled={breadcrumb.length === 1} onClick={goBackLevel} type="button"><ArrowLeft aria-hidden="true" size={14} />Back</button><button onClick={resetOverview} type="button"><RotateCcw aria-hidden="true" size={14} />Reset overview</button><button disabled={!selectedNode} onClick={() => selectedNode && requestFocus(selectedNode.id)} type="button"><Crosshair aria-hidden="true" size={14} />Center selection</button>{!detailOpen && <button onClick={() => setDetailOpen(true)} type="button"><Eye aria-hidden="true" size={14} />Show details</button>}</div>
       </div>
 
-      <div className="orbit-active-filters" aria-label="Active map filters"><span>Mode: {mode}</span>{domain && <span>Domain: {DOMAIN_LABELS[domain]}</span>}{includeSensitive && <span>Sensitive content included</span>}{query && <span>Search: “{search.trim()}” · {matchingSearchResults.length} results</span>}{expandedGroups.size > 0 && <span>{expandedGroups.size} expanded group{expandedGroups.size === 1 ? '' : 's'}</span>}{mode === 'structure' && counts?.routines === 0 && <span role="status">Routines ring empty · no indexed routine</span>}{livePulse && <span className="orbit-live-activity" role="status">Observed event received</span>}</div>
+      <div className="orbit-active-filters" aria-label="Active map filters"><span>Mode: {mode}</span>{domain && <span>Domain: {DOMAIN_LABELS[domain]}</span>}{includeSensitive && <span>Sensitive content included</span>}{query && <span>Search: “{search.trim()}” · {matchingSearchResults.length} results</span>}{expandedGroups.size > 0 && <span>{expandedGroups.size} expanded group{expandedGroups.size === 1 ? '' : 's'}</span>}{mode === 'structure' && counts?.routines === 0 && <span role="status">Routines ring empty · no indexed routine</span>}</div>
       {orbitQuery.error && <div className="inline-error" role="alert">{errorMessage(orbitQuery.error)}</div>}
 
       <div className={`orbit-main ${detailOpen ? '' : 'is-detail-closed'}`}>
         <section className="surface orbit-stage-shell">
-          <div className="orbit-ring-legend" aria-label="Map rings">{RING_META.slice(1).map((ring, index) => { const Icon = ring.icon; const count = [counts?.skills ?? 0, counts?.memories ?? 0, counts?.routines ?? 0, counts?.applications ?? 0][index]; return <span key={ring.label}><Icon aria-hidden="true" size={12} style={{ color: ring.color }} />{ring.label}<strong>{formatCompactNumber(count)}</strong></span> })}<span className="orbit-size-note"><i aria-hidden="true" />Groups grow with count, within a readable cap</span></div>
+          <div className="orbit-ring-legend" aria-label="Brain categories">{RING_META.slice(1).map((ring, index) => { const Icon = ring.icon; const count = [counts?.skills ?? 0, counts?.memories ?? 0, counts?.routines ?? 0, counts?.applications ?? 0][index]; return <span key={ring.label}><Icon aria-hidden="true" size={12} style={{ color: ring.color }} />{ring.label}<strong>{formatCompactNumber(count)}</strong></span> })}<span className="orbit-size-note"><i aria-hidden="true" />Node size reflects group count</span></div>
+          <div className="orbit-scene-controls" aria-label="3D brain controls">
+            <button aria-pressed={replay.active} disabled={replay.active || visibleNodes.length === 0} onClick={playGrowth} type="button"><Play aria-hidden="true" size={14} />{replay.complete ? 'Replay growth' : 'Play growth'}</button>
+            <button aria-pressed={!motionEnabled} disabled={reducedMotion} onClick={() => setMotionEnabled((current) => !current)} type="button">{motionEnabled ? <Pause aria-hidden="true" size={14} /> : <Play aria-hidden="true" size={14} />}{reducedMotion ? 'Reduced motion' : motionEnabled ? 'Pause motion' : 'Resume motion'}</button>
+            <button aria-pressed={cinema} onClick={() => setCinema((current) => !current)} type="button">{cinema ? <Minimize2 aria-hidden="true" size={14} /> : <Maximize2 aria-hidden="true" size={14} />}{cinema ? 'Exit cinema' : 'Cinema'}</button>
+          </div>
           {mode === 'activity' && <div className="orbit-activity-dock" aria-label="Recorded task activity"><div><strong>Recorded tasks</strong><small>{activityWindow === 'today' ? 'Today' : 'Last 7 days'}</small></div><div className="orbit-activity-list">{orbitQuery.data?.activities.map((activity) => <button aria-pressed={selectedTaskId === activity.taskId} className={selectedTaskId === activity.taskId ? 'is-active' : ''} key={activity.taskId} onClick={() => selectTask(activity)} type="button"><span>{activity.title}<small>{DOMAIN_LABELS[activity.domain] ?? activity.domain} · {stateLabel(activity.status)}</small></span><strong>{activity.telemetryAvailable ? activity.eventCount : 'N/A'}</strong></button>)}{orbitQuery.data?.activities.length === 0 && <p>No recorded task activity in this interval.</p>}</div></div>}
-          <div aria-label="Interactive orbital graph" className="orbit-canvas" ref={canvasRef} />
+          <OrbitGlobe
+            edges={globeEdges}
+            highlightedIds={highlightedIds}
+            motionEnabled={motionEnabled}
+            nodes={visibleNodes}
+            onBackgroundClick={() => { setSelectedId(null); setSelectedTaskId(null); setSelectedEdgeId(null); setDetailOpen(false) }}
+            onEdgeClick={(id) => { setSelectedEdgeId(id); setDetailOpen(true) }}
+            onNodeClick={(id) => selectNode(id)}
+            onPerformance={recordGraphPerformance}
+            onReplayProgress={setReplay}
+            reducedMotion={reducedMotion}
+            ref={globeRef}
+            renderedEdgeIds={renderedEdgeIds}
+            replayNonce={replayNonce}
+            selectedEdgeId={selectedEdgeId}
+            selectedId={selectedId}
+          />
+          {(replay.active || replay.complete) && <div className="orbit-growth-caption" aria-live="polite"><span>The growth of Agentic OS</span><strong>{replay.active ? replay.progress < 0.05 ? 'It starts with one idea.' : replay.progress < 0.14 ? 'Then, a connection.' : replay.progress < 0.42 ? 'Ideas become branches.' : replay.progress < 0.76 ? 'Knowledge compounds.' : 'A second brain takes shape.' : 'Your entire brain. Connected.'}</strong><small>{replay.visible} of {replay.total} authorized nodes</small><i aria-label="Growth replay progress" aria-valuemax={100} aria-valuemin={0} aria-valuenow={Math.round(replay.progress * 100)} role="progressbar" style={{ '--orbit-growth': `${replay.progress * 100}%` } as React.CSSProperties} /></div>}
           {orbitQuery.isLoading && <div className="orbit-loading"><Network aria-hidden="true" size={34} /><p>Composing authorized local registries…</p></div>}
-          <div className="orbit-evidence-legend" aria-label="Relation evidence legend">{(Object.entries(EVIDENCE_META) as [OrbitEdge['evidence'], (typeof EVIDENCE_META)[OrbitEdge['evidence']]][]).map(([key, meta]) => <span key={key}><i className={`is-${key}`} style={{ borderColor: meta.color }} />{meta.label}<small>{meta.style}</small></span>)}<span className="orbit-distance-note">Position shows category only, never semantic similarity.</span></div>
+          <div className="orbit-evidence-legend" aria-label="Relation evidence legend">{(Object.entries(EVIDENCE_META) as [OrbitEdge['evidence'], (typeof EVIDENCE_META)[OrbitEdge['evidence']]][]).map(([key, meta]) => <span key={key}><i className={`is-${key}`} style={{ borderColor: meta.color }} />{meta.label}<small>{meta.style}</small></span>)}<span className="orbit-distance-note">Position shows category only, never semantic similarity. Drag to orbit · scroll to zoom.</span></div>
           <div className="orbit-relations-control"><button aria-expanded={showRelations} onClick={() => setShowRelations((current) => !current)} type="button">{showRelations ? <EyeOff aria-hidden="true" size={14} /> : <Eye aria-hidden="true" size={14} />}Show relations</button>{showRelations && <div className="orbit-relations-popover"><strong>Advanced relation rendering</strong><fieldset><legend>Evidence</legend>{(['declared', 'observed', 'inferred'] as const).map((evidence) => <label key={evidence}><input checked={evidenceTypes.has(evidence)} onChange={() => setEvidenceTypes((current) => { const next = new Set(current); if (next.has(evidence)) next.delete(evidence); else next.add(evidence); return next })} type="checkbox" />{EVIDENCE_META[evidence].label}</label>)}</fieldset><fieldset><legend>Types</legend>{allRelationTypes.map((relation) => <label key={relation}><input checked={relationTypes.has(relation)} onChange={() => setRelationTypes((current) => { const next = new Set(current); if (next.has(relation)) next.delete(relation); else next.add(relation); return next })} type="checkbox" />{relation}</label>)}</fieldset><label>Rendering limit<select onChange={(event) => setRelationLimit(Number(event.target.value))} value={relationLimit}><option value="60">60 edges</option><option value="120">120 edges</option><option value="240">240 edges</option></select></label><small>{renderedEdges.length} rendered of {allEdges.length} authorized relations.</small></div>}</div>
           <details className="orbit-accessible-list"><summary><ListTree aria-hidden="true" size={14} />Explore as an accessible list</summary><div>{nodes.filter((node) => node.groupId === null && node.kind !== 'core').map((group) => { const children = childrenByGroup.get(group.id) ?? []; const expanded = expandedGroups.has(group.id); const limit = groupLimits[group.id] ?? DEFAULT_CHILD_LIMIT; return <section key={group.id}><div><button onClick={() => selectNode(group.id)} type="button">{group.label} · {group.count}</button><button aria-expanded={expanded} onClick={() => toggleGroup(group.id)} type="button">{expanded ? 'Collapse' : 'Expand'}</button></div>{expanded && <ul>{children.slice(0, limit).map((child) => <li key={child.id}><button onClick={() => selectNode(child.id, true)} type="button">{child.label}<small>{kindLabel(child)}</small></button></li>)}</ul>}{expanded && children.length > limit && <button onClick={() => setGroupLimits((current) => ({ ...current, [group.id]: limit + DEFAULT_CHILD_LIMIT }))} type="button">Show {Math.min(DEFAULT_CHILD_LIMIT, children.length - limit)} more</button>}</section> })}</div></details>
         </section>
@@ -814,7 +550,7 @@ export function OrbitMapView({
             <div className="orbit-detail-heading"><Network aria-hidden="true" size={18} /><div><p className="eyebrow">Relation</p><h2>{selectedEdge.relation}</h2></div></div>
             <p className="orbit-preview">{nodeById.get(selectedEdge.source)?.label ?? selectedEdge.source} → {nodeById.get(selectedEdge.target)?.label ?? selectedEdge.target}</p>
             <div className="orbit-detail-badges"><StatusBadge label={EVIDENCE_META[selectedEdge.evidence].label} tone={selectedEdge.evidence === 'observed' ? 'success' : selectedEdge.evidence === 'inferred' ? 'warning' : 'neutral'} /><span>{EVIDENCE_META[selectedEdge.evidence].style}</span><span>{selectedEdge.weight} event{selectedEdge.weight === 1 ? '' : 's'}</span></div>
-            <div className="orbit-provenance"><h3>Verifiable evidence</h3>{selectedEdge.provenance.map((item, index) => { const action = evidenceAction(item.reference); return <div key={`${item.reference}-${index}`}><strong>{item.kind}</strong><span>{item.detail}</span>{item.ts && <time>{formatRelativeTime(Date.parse(item.ts))}</time>}{action ? <button onClick={action.run} type="button">{action.label} · {item.reference}</button> : <small>No execution trace or governed destination is associated with this evidence.</small>}</div> })}</div>
+            <div className="orbit-provenance"><h3>Verifiable evidence</h3>{selectedEdge.provenance.map((item, index) => { const action = evidenceAction(item.reference); return <div key={`${item.reference}-${index}`}><strong>{item.kind}</strong><span>{item.detail}</span>{item.ts && <time>{formatRelativeTime(Date.parse(item.ts))}</time>}{action ? <button onClick={action.run} type="button">{action.label} · {item.reference}</button> : <small>No governed destination is associated with this evidence.</small>}</div> })}</div>
             <div className="orbit-detail-actions"><button className="secondary-button" onClick={() => setSelectedEdgeId(null)} type="button"><ArrowLeft aria-hidden="true" size={14} />Back to item</button></div>
           </> : selectedNode ? <>
             <div className="orbit-detail-heading"><Layers3 aria-hidden="true" size={18} /><div><p className="eyebrow">{kindLabel(selectedNode)}</p><h2>{selectedNode.label}</h2></div></div>
@@ -832,10 +568,10 @@ export function OrbitMapView({
             <p className="orbit-preview">Observed events for this task. A memory “inserted into context” is not claimed to have determined the answer.</p>
             <div className="orbit-detail-badges"><StatusBadge label={stateLabel(selectedActivity.status)} tone={selectedActivity.status === 'completed' ? 'success' : selectedActivity.status === 'failed' ? 'danger' : 'neutral'} /><span>{DOMAIN_LABELS[selectedActivity.domain] ?? selectedActivity.domain}</span></div>
             <dl className="orbit-user-meta"><dt>Last recorded activity</dt><dd>{formatRelativeTime(Date.parse(selectedActivity.updatedAt))}</dd><dt>Telemetry</dt><dd>{selectedActivity.telemetryAvailable ? `${selectedActivity.eventCount} recorded events` : 'Data not available'}</dd></dl>
-            <div className="orbit-relations"><h3>Observed links <span>{selectedActivity.links.length}</span></h3>{selectedActivity.links.map((link, index) => <div className="orbit-activity-link" key={`${link.eventRef}-${link.nodeId}-${index}`}><button onClick={() => selectNode(link.nodeId, true)} type="button"><span><strong>{link.relation}</strong><small>{link.detail}</small><small><time dateTime={link.occurredAt}>{formatRelativeTime(Date.parse(link.occurredAt))}</time>{link.outcome ? ` · ${stateLabel(link.outcome)}` : ''}</small></span><span>{nodeById.get(link.nodeId)?.label ?? link.nodeId}</span><ChevronRight aria-hidden="true" size={14} /></button><button onClick={() => openTrace(link.eventRef)} type="button">Trace</button></div>)}{selectedActivity.telemetryAvailable && selectedActivity.links.length === 0 && <p className="row-subtle">No structured memory, skill, routine, or application reference is available for these events.</p>}{!selectedActivity.telemetryAvailable && <p className="orbit-data-unavailable">Data not available: this task has no trace events in the selected interval.</p>}</div>
+            <div className="orbit-relations"><h3>Observed links <span>{selectedActivity.links.length}</span></h3>{selectedActivity.links.map((link, index) => <div className="orbit-activity-link" key={`${link.eventRef}-${link.nodeId}-${index}`}><button onClick={() => selectNode(link.nodeId, true)} type="button"><span><strong>{link.relation}</strong><small>{link.detail}</small><small><time dateTime={link.occurredAt}>{formatRelativeTime(Date.parse(link.occurredAt))}</time>{link.outcome ? ` · ${stateLabel(link.outcome)}` : ''}</small></span><span>{nodeById.get(link.nodeId)?.label ?? link.nodeId}</span><ChevronRight aria-hidden="true" size={14} /></button></div>)}{selectedActivity.telemetryAvailable && selectedActivity.links.length === 0 && <p className="row-subtle">No structured memory, skill, routine, or application reference is available for these events.</p>}{!selectedActivity.telemetryAvailable && <p className="orbit-data-unavailable">Data not available: this task has no recorded events in the selected interval.</p>}</div>
             <details className="orbit-technical"><summary>Technical details</summary><dl><dt>Task ID</dt><dd><code>{selectedActivity.taskId}</code></dd><dt>Window</dt><dd>{activityWindow}</dd></dl></details>
           </> : <div className="orbit-overview-detail"><Layers3 aria-hidden="true" size={22} /><h2>System overview</h2><p>Select an item to inspect it. Expansion is a separate action, available in the detail panel and accessible list.</p><dl><dt>Skills</dt><dd>{formatCompactNumber(counts?.skills ?? 0)}</dd><dt>Memory</dt><dd>{formatCompactNumber(counts?.memories ?? 0)}</dd><dt>Routines</dt><dd>{formatCompactNumber(counts?.routines ?? 0)}</dd><dt>Applications</dt><dd>{formatCompactNumber(counts?.applications ?? 0)}</dd></dl></div>}
-          <details className="orbit-performance"><summary>Performance measurements</summary><dl><dt>Payload build</dt><dd>{orbitQuery.data?.metrics.composeMs.toFixed(1) ?? '—'} ms</dd><dt>First useful render</dt><dd>{uiMetrics.firstRenderMs.toFixed(1)} ms</dd><dt>Graph update + transition</dt><dd>{uiMetrics.graphBuildMs.toFixed(1)} ms</dd><dt>Search</dt><dd>{uiMetrics.searchMs.toFixed(2)} ms</dd><dt>Expansion response</dt><dd>{uiMetrics.expansionMs.toFixed(1)} ms</dd><dt>Selection response</dt><dd>{uiMetrics.selectionMs.toFixed(1)} ms</dd></dl><small>Measured locally with the authorized payload: {nodes.length} nodes, {allEdges.length} relations, {orbitQuery.data?.metrics.tracesScanned ?? 0} traces scanned.</small></details>
+          <details className="orbit-performance"><summary>Performance measurements</summary><dl><dt>Payload build</dt><dd>{orbitQuery.data?.metrics.composeMs.toFixed(1) ?? '—'} ms</dd><dt>First useful render</dt><dd>{uiMetrics.firstRenderMs.toFixed(1)} ms</dd><dt>Graph update + transition</dt><dd>{uiMetrics.graphBuildMs.toFixed(1)} ms</dd><dt>Search</dt><dd>{uiMetrics.searchMs.toFixed(2)} ms</dd><dt>Expansion response</dt><dd>{uiMetrics.expansionMs.toFixed(1)} ms</dd><dt>Selection response</dt><dd>{uiMetrics.selectionMs.toFixed(1)} ms</dd></dl><small>Measured locally with the authorized payload: {nodes.length} nodes, {allEdges.length} relations, {orbitQuery.data?.metrics.tracesScanned ?? 0} activity records scanned.</small></details>
         </aside>}
       </div>
     </div>

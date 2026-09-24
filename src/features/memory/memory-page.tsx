@@ -924,10 +924,10 @@ export function MemoryPage() {
   return (
     <section className="page-section memory-page">
       <div className="surface memory-view-header">
-        <div><p className="eyebrow">Second Brain</p><h2>{view === 'map' ? 'Operational map' : 'Governed memory'}</h2></div>
+        <div><p className="eyebrow">Second Brain</p><h2>{view === 'map' ? '3D Brain' : 'Governed memory'}</h2></div>
         <div className="memory-view-switch" aria-label="Memory view">
           <button className={view === 'library' ? 'is-active' : ''} onClick={() => setView('library')} type="button"><Brain aria-hidden="true" size={15} />Library</button>
-          <button className={view === 'map' ? 'is-active' : ''} onClick={() => setView('map')} type="button"><Network aria-hidden="true" size={15} />Map</button>
+          <button className={view === 'map' ? 'is-active' : ''} onClick={() => setView('map')} type="button"><Network aria-hidden="true" size={15} />3D Brain</button>
         </div>
       </div>
       {operationsNeedingAttention.length > 0 && <div className="inline-error" role="alert">{operationsNeedingAttention.length} interrupted memory operation{operationsNeedingAttention.length === 1 ? '' : 's'} need attention. The journal has preserved the exact stage and no conflicting state was guessed.</div>}

@@ -1,4 +1,6 @@
-# Third-party notices — Document Converter
+# Third-party notices
+
+## Document Converter
 
 Document Converter uses or downloads these principal components. The locked
 graphs in `tools/ocr-sidecar/requirements.lock` and `src-tauri/Cargo.lock` are
@@ -27,6 +29,16 @@ Source and license references:
 - PyInstaller: https://github.com/pyinstaller/pyinstaller
 - CPython: https://www.python.org/downloads/release/python-31019/
 - python-build-standalone: https://github.com/astral-sh/python-build-standalone
+
+## Second Brain 3D visualization
+
+The Second Brain globe adapts the local renderer, deterministic spherical
+layout, orbital scene, and connectivity replay from the AIS-OS `3d-brain`
+skill. The source is MIT licensed, copyright © 2026 Nate Herk:
+https://github.com/nateherkai/AIS-OS/tree/main/.agents/skills/3d-brain
+
+The runtime visualization uses `3d-force-graph` (MIT) and Three.js (MIT).
+Their exact versions are recorded in `pnpm-lock.yaml`.
 
 This inventory is an engineering notice, not legal advice. Before commercial
 release, generate a complete SBOM/notices bundle for all transitive Rust and

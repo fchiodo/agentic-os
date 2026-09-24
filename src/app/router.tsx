@@ -1,12 +1,8 @@
 import { createHashRouter, Navigate } from 'react-router-dom'
 import { AppShell } from '@/components/layout/app-shell'
-import { ApprovalsPage } from '@/features/approvals/approvals-page'
-import { AuditPage } from '@/features/audit/audit-page'
 import { CatalogPage } from '@/features/catalog/catalog-page'
 import { DocumentConverterPage } from '@/features/document-converter/document-converter-page'
 import { MemoryPage } from '@/features/memory/memory-page'
-import { RunnerPage } from '@/features/runner/runner-page'
-import { UsagePage } from '@/features/usage/usage-page'
 
 export const router = createHashRouter([
   {
@@ -22,14 +18,6 @@ export const router = createHashRouter([
         element: <CatalogPage />,
       },
       {
-        path: '/runner',
-        element: <RunnerPage />,
-      },
-      {
-        path: '/approvals',
-        element: <ApprovalsPage />,
-      },
-      {
         path: '/memory',
         element: <MemoryPage />,
       },
@@ -38,12 +26,8 @@ export const router = createHashRouter([
         element: <DocumentConverterPage />,
       },
       {
-        path: '/usage',
-        element: <UsagePage />,
-      },
-      {
-        path: '/audit',
-        element: <AuditPage />,
+        path: '*',
+        element: <Navigate replace to="/catalog" />,
       },
     ],
   },

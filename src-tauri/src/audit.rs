@@ -2,7 +2,6 @@ use rusqlite::params;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::control_models::{AuditChainStatus, TraceEntry};
 use crate::db::Db;
 use crate::error::AppResult;
 
@@ -77,7 +76,8 @@ pub fn append_row(
     })
 }
 
-pub fn verify_chain(db: &Db) -> AppResult<AuditChainStatus> {
+#[cfg(test)]
+pub fn verify_chain(db: &Db) -> AppResult<bool> {
     db.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT id, run_id, task_id, ts, kind, summary, detail, tokens, cost_usd, prev_hash, hash
@@ -100,20 +100,13 @@ pub fn verify_chain(db: &Db) -> AppResult<AuditChainStatus> {
         })?;
 
         let mut expected_prev = genesis_hash();
-        let mut checked = 0i64;
-
         for row in rows {
-            let (id, run_id, task_id, ts, kind, summary, detail_str, tokens, cost_usd, prev_hash, hash) =
+            let (_id, run_id, task_id, ts, kind, summary, detail_str, tokens, cost_usd, prev_hash, hash) =
                 row?;
-            checked += 1;
             let task_id_str = task_id.unwrap_or_default();
 
             if prev_hash != expected_prev {
-                return Ok(AuditChainStatus {
-                    ok: false,
-                    checked_rows: checked,
-                    broken_at: Some(id.to_string()),
-                });
+                return Ok(false);
             }
 
             let recomputed = compute_hash(
@@ -122,48 +115,13 @@ pub fn verify_chain(db: &Db) -> AppResult<AuditChainStatus> {
             );
 
             if recomputed != hash {
-                return Ok(AuditChainStatus {
-                    ok: false,
-                    checked_rows: checked,
-                    broken_at: Some(id.to_string()),
-                });
+                return Ok(false);
             }
 
             expected_prev = hash;
         }
 
-        Ok(AuditChainStatus {
-            ok: true,
-            checked_rows: checked,
-            broken_at: None,
-        })
-    })
-}
-
-pub fn read_trace(db: &Db, run_id: &str) -> AppResult<Vec<TraceEntry>> {
-    db.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, ts, kind, summary, detail, tokens, cost_usd FROM audit
-             WHERE run_id = ?1 ORDER BY id ASC",
-        )?;
-        let entries = stmt
-            .query_map(params![run_id], |row| {
-                let detail_str: String = row.get(4)?;
-                let detail: Value =
-                    serde_json::from_str(&detail_str).unwrap_or(Value::Null);
-                Ok(TraceEntry {
-                    run_id: run_id.to_string(),
-                    seq: row.get(0)?,
-                    ts: row.get(1)?,
-                    kind: row.get(2)?,
-                    summary: row.get(3)?,
-                    detail,
-                    tokens: row.get(5)?,
-                    cost_usd: row.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(entries)
+        Ok(true)
     })
 }
 

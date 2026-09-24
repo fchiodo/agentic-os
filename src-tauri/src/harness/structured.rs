@@ -162,7 +162,7 @@ pub async fn run_read_only_with_images(
         // this explicit drop it waits forever and never starts the turn
         // (observed live: "Synthesis process launched" then 900s+ of
         // silence). Stdin stays the transport, rather than argv like the
-        // Runner uses, so prompts never appear in `ps` output.
+        // The desktop process uses stdin so prompts never appear in `ps` output.
         drop(stdin);
 
         let stdout = child

@@ -233,9 +233,9 @@ function buildMockProposals(): MemoryWriteProposal[] {
       importId: null,
     },
     {
-      id: 'proposal-mock-approved-audit-window',
+      id: 'proposal-mock-approved-retention-window',
       taskId: null,
-      vaultPath: 'work/facts/audit-window.md',
+      vaultPath: 'work/facts/retention-window.md',
       domain: 'work',
       kind: 'memory',
       op: 'create',
@@ -243,17 +243,17 @@ function buildMockProposals(): MemoryWriteProposal[] {
       sensitivity: 'normal',
       unifiedDiff: [
         '--- /dev/null',
-        '+++ b/work/facts/audit-window.md',
+        '+++ b/work/facts/retention-window.md',
         '@@',
-        '+ retain 30 days of nominal audit events',
+        '+ retain 30 days of nominal activity records',
       ].join('\n'),
       newContent: [
         'id: mem-003',
-        'title: Audit retention window',
+        'title: Activity retention window',
         'domain: work',
         'memType: fact',
         '',
-        'Retain 30 days of nominal audit events.',
+        'Retain 30 days of nominal activity records.',
       ].join('\n'),
       provenance: '{"source":"manual","ts":"2026-07-20T15:20:00Z"}',
       gateReport: JSON.stringify({
@@ -717,31 +717,4 @@ export async function memoryOrbitMap(
     activityWindow,
   })
   return orbitMapSchema.parse(payload)
-}
-
-export async function skillsDistill(taskId: string): Promise<MemoryWriteProposal> {
-  if (!isTauriRuntime()) {
-    return {
-      id: `proposal-mock-skill-${Date.now()}`,
-      taskId,
-      vaultPath: 'mock-skill/SKILL.md',
-      domain: 'work',
-      kind: 'skill',
-      op: 'create',
-      supersedesId: null,
-      sensitivity: 'normal',
-      unifiedDiff: '+++ b/mock-skill/SKILL.md',
-      newContent: '# Mock skill',
-      provenance: `{"source":"distill:${taskId}"}`,
-      gateReport: '{"checks":[],"passed":true}',
-      requiresApproval: true,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-      decidedAt: null,
-      baseContentHash: null,
-      importId: null,
-    }
-  }
-  const payload = await invoke<MemoryWriteProposal>('skills_distill', { taskId })
-  return memoryWriteProposalSchema.parse(payload)
 }

@@ -1193,7 +1193,7 @@ fn enrich_operational_state(
             "running"
         } else if tasks
             .iter()
-            .any(|task| matches!(task.status.as_str(), "failed" | "waiting_for_approval"))
+            .any(|task| task.status == "failed")
         {
             "attention"
         } else {
@@ -1902,79 +1902,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_mcp_execution_flows_through_audit_to_an_observed_relation() {
-        let db_path = std::env::temp_dir().join(format!(
-            "agentic-os-orbit-observed-execution-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        let db = Db::open(&db_path).unwrap();
-        let application = application();
-        let occurred_at = "2026-09-23T10:00:00Z";
-        let detail = crate::harness::codex::enrich_structured_refs_with_catalog(
-            serde_json::json!({
-                "type": "item.completed",
-                "item": {
-                    "id": "mcp-call-1",
-                    "type": "mcp_tool_call",
-                    "server": "research-server",
-                    "tool": "search",
-                    "status": "completed"
-                }
-            }),
-            "tool_call",
-            std::slice::from_ref(&application),
-            occurred_at,
-        );
-        crate::audit::append_row(
-            &db,
-            "run-1",
-            "task-1",
-            "tool_call",
-            "MCP search completed",
-            &detail,
-            None,
-            None,
-        )
-        .unwrap();
-        let persisted = crate::audit::read_trace(&db, "run-1").unwrap();
-        assert_eq!(
-            persisted[0].detail["executionRefs"][0]["catalogId"],
-            "research-mcp"
-        );
-
-        let mut nodes = vec![core_node()];
-        let mut edges = Vec::new();
-        add_catalog_ring(
-            &mut nodes,
-            &mut edges,
-            std::slice::from_ref(&application),
-            4,
-            "application",
-        );
-        let traces = load_traces(&db).unwrap();
-        add_observed_relations(
-            &nodes,
-            &[],
-            &[],
-            std::slice::from_ref(&application),
-            &[],
-            &traces,
-            &mut edges,
-        )
-        .unwrap();
-        assert!(edges.iter().any(|edge| {
-            edge.source == "core:agentic-os"
-                && edge.target == "application:research-mcp"
-                && edge.relation == "used"
-                && edge.evidence == "observed"
-                && edge.provenance[0].ts.as_deref() == Some(occurred_at)
-        }));
-
-        drop(db);
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[test]
     fn text_path_match_remains_inferred() {
         let routine = routine();
         let trace_text = format!("executed {}", routine.path);
@@ -2178,10 +2105,8 @@ mod tests {
             for (id, domain) in [("task-work", "work"), ("task-finance", "finance")] {
                 conn.execute(
                     "INSERT INTO tasks (
-                        id, title, goal, domain, harness, status, origin_kind, sandbox_mode,
-                        cwd, risk_level, created_at, updated_at
-                     ) VALUES (?1, ?2, 'test', ?3, 'codex', 'completed', 'manual',
-                        'read-only', '/tmp', 'low', ?4, ?4)",
+                        id, title, goal, domain, status, origin_kind, created_at, updated_at
+                     ) VALUES (?1, ?2, 'test', ?3, 'completed', 'manual', ?4, ?4)",
                     params![id, format!("{domain} task"), domain, now],
                 )?;
             }

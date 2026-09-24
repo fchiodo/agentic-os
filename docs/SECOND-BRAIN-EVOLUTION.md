@@ -96,12 +96,9 @@ RFC 3339 execution event per connector, independent of audit query order.
 Historical success/failure updates health and last activity; only a currently
 active task changes the node's operational state to `in_use`.
 
-The client uses Graphology as the graph model and Sigma.js 3 as a WebGL
-renderer. Positions are deterministic radial coordinates; no force layout or
-continuous rotation runs. Groups expand on demand. Search can reveal a matching
-child without expanding every peer. Selecting a node highlights only its
-neighborhood and opens a provenance/detail panel. Memory nodes reuse the
-existing reader and confirmation commands.
+The original milestone used Graphology as the graph model and Sigma.js 3 as a
+2D WebGL renderer. It established the aggregate-first exploration, search,
+provenance panel, and governed Memory actions that the later 3D renderer keeps.
 
 Collapsed child relations are rolled up onto their visible groups, preserving
 relation type, evidence class, weight and up to eight provenance records. Real
@@ -110,17 +107,11 @@ no idle or decorative loop runs. Composition time and scanned task/trace counts
 are shown in the map legend. The renderer is code-split so it is not paid for
 by users who remain in the library view.
 
-Milestone 2 keeps a single Graphology graph and Sigma renderer alive across
-query refreshes. Camera state is restored after data synchronization, focus is
-animated over 260 ms, and newly expanded children move from their aggregate to
-their stable radial coordinate over 220 ms. Highlight reducers are recomputed
-from every new graph structure, so expansion, collapse and refresh preserve the
-selected node and use its current neighbors. With `prefers-reduced-motion`,
-layout and camera changes are applied immediately. Ring guides are graph
-geometry, so they pan and zoom with the nodes instead of being an unrelated CSS
-background. Focus reads normalized node display coordinates from Sigma and is
-requested only by a node selection; a data refresh therefore preserves manual
-pan and zoom. No continuous animation was added.
+Milestone 2 originally used a persistent Graphology graph and Sigma renderer.
+That 2D implementation was superseded in September 2026 by the in-app 3D Brain
+renderer described in `SECOND_BRAIN_ORBIT_VALIDATION.md`. The native payload,
+filtering, evidence model, bounded exploration, and navigation contracts remain
+unchanged; only the client visualization and its interaction controls changed.
 
 ## Promotion gates for retrieval experiments
 

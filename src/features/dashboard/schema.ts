@@ -49,53 +49,6 @@ export const catalogSectionSchema = z.object({
   totalItems: z.number(),
 })
 
-export const threadSummarySchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  cwd: z.string(),
-  updatedAt: z.number(),
-  tokensUsed: z.number(),
-  model: z.string().nullable(),
-  provider: z.string(),
-})
-
-export const jobSummarySchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  status: z.string(),
-  inputPath: z.string(),
-  outputPath: z.string(),
-  updatedAt: z.number(),
-  maxRuntimeSeconds: z.number().nullable(),
-})
-
-export const activitySectionSchema = z.object({
-  recentJobs: z.array(jobSummarySchema),
-  recentThreads: z.array(threadSummarySchema),
-})
-
-export const usagePointSchema = z.object({
-  day: z.string(),
-  tokenTotal: z.number(),
-})
-
-export const workspaceUsageSchema = z.object({
-  cwd: z.string(),
-  lastUpdatedAt: z.number(),
-  threadCount: z.number(),
-  tokenTotal: z.number(),
-})
-
-export const usageSectionSchema = z.object({
-  activeThreads: z.number(),
-  distinctWorkspaces: z.number(),
-  logEntries24h: z.number(),
-  totalTokens: z.number(),
-  trackedThreads: z.number(),
-  trend: z.array(usagePointSchema),
-  topWorkspaces: z.array(workspaceUsageSchema),
-})
-
 export const sourceDescriptorSchema = z.object({
   id: z.string(),
   label: z.string(),
@@ -112,8 +65,6 @@ export const runtimeInfoSchema = z.object({
 export const dashboardSnapshotSchema = z.object({
   generatedAt: z.number(),
   catalog: catalogSectionSchema,
-  activity: activitySectionSchema,
-  usage: usageSectionSchema,
   sources: z.array(sourceDescriptorSchema),
   runtime: runtimeInfoSchema,
 })
@@ -121,6 +72,3 @@ export const dashboardSnapshotSchema = z.object({
 export type CatalogItem = z.infer<typeof catalogItemSchema>
 export type CatalogKind = z.infer<typeof catalogKindSchema>
 export type DashboardSnapshot = z.infer<typeof dashboardSnapshotSchema>
-export type JobSummary = z.infer<typeof jobSummarySchema>
-export type ThreadSummary = z.infer<typeof threadSummarySchema>
-export type WorkspaceUsage = z.infer<typeof workspaceUsageSchema>

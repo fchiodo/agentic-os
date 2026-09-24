@@ -1,21 +1,16 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity,
   BrainCircuit,
-  Blocks,
   FolderOpen,
   FileScan,
-  History,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
   ServerCog,
-  ShieldCheck,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { MetricCard } from '@/components/ui/metric-card'
 import { NavBadge } from '@/components/ui/nav-badge'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { refreshDashboardSnapshot } from '@/features/dashboard/api'
@@ -34,25 +29,6 @@ const navigation = [
     to: '/catalog',
   },
   {
-    icon: Blocks,
-    label: 'Runner',
-    summary: 'Live tasks and history',
-    to: '/runner',
-  },
-  {
-    badgeKey: 'pendingApprovals' as const,
-    icon: ShieldCheck,
-    label: 'Approvals',
-    summary: 'Actions waiting on you',
-    to: '/approvals',
-  },
-  {
-    icon: Activity,
-    label: 'Usage',
-    summary: 'Tokens, workspaces, cost',
-    to: '/usage',
-  },
-  {
     badgeKey: 'pendingMemoryProposals' as const,
     icon: BrainCircuit,
     label: 'Memory',
@@ -64,12 +40,6 @@ const navigation = [
     label: 'Document Converter',
     summary: 'Local PDF and image OCR',
     to: '/document-converter',
-  },
-  {
-    icon: History,
-    label: 'Audit',
-    summary: 'Run traces and hash chain',
-    to: '/audit',
   },
 ] as const
 
@@ -179,40 +149,6 @@ export function AppShell() {
     }
   }
 
-  const metrics = data
-    ? [
-        {
-          hint:
-            'Total number of local artifacts discovered by the native scanner, including agents, skills, plugins, prompts, MCP servers, workflows, routines, and automations.',
-          label: 'Catalog items',
-          value: formatCompactNumber(data.catalog.totalItems),
-          tone: 'neutral' as const,
-        },
-        {
-          hint:
-            'Conversation threads found in the local state store and available for usage summaries.',
-          label: 'Tracked threads',
-          value: formatCompactNumber(data.usage.trackedThreads),
-          tone: 'accent' as const,
-        },
-        {
-          hint:
-            'Combined token usage aggregated across the tracked local threads in this workspace view.',
-          label: 'Total tokens',
-          value: formatCompactNumber(data.usage.totalTokens),
-          tone: 'success' as const,
-        },
-        {
-          hint:
-            'Activity or log entries recorded during the last 24 hours across the connected local sources.',
-          label: 'Logs / 24h',
-          tooltipAlign: 'end' as const,
-          value: formatCompactNumber(data.usage.logEntries24h),
-          tone: 'warning' as const,
-        },
-      ]
-    : []
-
   return (
     <div
       className="app-shell"
@@ -306,7 +242,7 @@ export function AppShell() {
             <h2>
               {isDocumentConverter
                 ? 'Private conversion, model management, and document history'
-                : 'Agents, skills, MCP, workflows, and telemetry in one place'}
+                : 'Agents, skills, MCP, workflows, and memory in one place'}
             </h2>
           </div>
 
@@ -352,21 +288,6 @@ export function AppShell() {
             )}
           </div>
         </header>
-
-        {!location.pathname.startsWith('/memory') && !isDocumentConverter && (
-          <section className="metric-strip" aria-label="Runtime metrics">
-            {metrics.map((metric) => (
-              <MetricCard
-                key={metric.label}
-                hint={metric.hint}
-                label={metric.label}
-                tone={metric.tone}
-                tooltipAlign={metric.tooltipAlign}
-                value={metric.value}
-              />
-            ))}
-          </section>
-        )}
 
         {error ? (
           <section className="alert-banner" role="alert">

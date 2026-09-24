@@ -1,5 +1,10 @@
 # Agentic OS — UI Specification v1.0 (developer handoff)
 
+> Current implementation note (2026-09-24): the Runner, Approvals, Usage, and
+> Audit product surfaces described in this original handoff have been retired.
+> The active navigation is Catalog, Memory, and Document Converter. Memory
+> write proposals keep their own review flow; their event ledger is internal.
+
 Companion to `docs/ARCHITECTURE.md` v1.1. Scope: everything the frontend needs to build Phases 1–3. Stack is unchanged: React 19 + TypeScript + Vite, TanStack Query, Zustand, react-router (hash router), Tauri 2 IPC. No new UI framework; extend the existing design vocabulary in `src/index.css`.
 
 ## 0. Design ground rules

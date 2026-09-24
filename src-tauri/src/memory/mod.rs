@@ -1,5 +1,4 @@
 pub mod consolidation;
-pub mod context;
 pub mod email_extraction;
 pub mod frontmatter;
 pub mod importer;
@@ -695,7 +694,6 @@ mod tests {
     struct EnvRoots {
         _guard: std::sync::MutexGuard<'static, ()>,
         pub vault: std::path::PathBuf,
-        pub skills: std::path::PathBuf,
     }
 
     impl EnvRoots {
@@ -715,7 +713,6 @@ mod tests {
             Self {
                 _guard: guard,
                 vault,
-                skills,
             }
         }
     }
@@ -1213,104 +1210,6 @@ mod tests {
     }
 
     #[test]
-    fn run_capture_creates_episode_for_work_and_skips_personal() {
-        let roots = EnvRoots::new("capture");
-        let db = temp_db("capture");
-
-        let captured = pipeline::process_run_capture(
-            &db,
-            "task-1",
-            "work",
-            "QA newsletter",
-            "Check campaign against style guide",
-            "completed",
-        )
-        .unwrap();
-        let skipped = pipeline::process_run_capture(
-            &db,
-            "task-2",
-            "personal",
-            "Private thing",
-            "goal",
-            "completed",
-        )
-        .unwrap();
-
-        let proposal = captured.expect("work runs must be captured");
-        assert_eq!(proposal.status, "auto_applied");
-        assert!(proposal.vault_path.starts_with("work/episodes/"));
-        assert!(
-            skipped.is_none(),
-            "personal domain capture is off until Phase 5"
-        );
-        drop(roots);
-    }
-
-    #[test]
-    fn skill_distill_requires_approval_and_lands_in_skills_root() {
-        let roots = EnvRoots::new("distill");
-        let db = temp_db("distill");
-
-        let proposal = pipeline::process_skill_distill(
-            &db,
-            "task-9",
-            "work",
-            "Thread to ADO ticket",
-            "Turn a messy email thread into a ticket",
-            &[
-                "Classify and check policy".to_string(),
-                "Run agent".to_string(),
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(proposal.status, "pending", "skills must never auto-apply");
-        assert!(proposal.requires_approval);
-
-        proposals::decide(&db, &proposal.id, "approve").unwrap();
-        let skill_file = roots.skills.join("thread-to-ado-ticket/SKILL.md");
-        assert!(
-            skill_file.exists(),
-            "approved skill must land under the skills root"
-        );
-        let content = std::fs::read_to_string(&skill_file).unwrap();
-        assert!(content.contains("provenance: task:task-9"));
-        drop(roots);
-    }
-
-    #[test]
-    fn context_builder_tags_stale_as_unverified_and_skips_sensitive() {
-        let db = temp_db("context");
-        index::ensure_tables(&db).unwrap();
-
-        let fresh = sample_row("ctx-fresh", "Sierra rate limit promise", "active", None);
-        let stale = sample_row("ctx-stale", "Sierra old SLA agreement", "stale", None);
-        let mut sensitive = sample_row("ctx-sens", "Sierra contract amount", "active", None);
-        sensitive.sensitivity = "sensitive".to_string();
-
-        index::upsert(&db, &fresh, "Fix promised by June.", &[]).unwrap();
-        index::upsert(&db, &stale, "Old SLA from 2025.", &[]).unwrap();
-        index::upsert(&db, &sensitive, "Contract value details.", &[]).unwrap();
-
-        let context = context::build_memory_context(&db, "sierra", "work").unwrap();
-
-        assert_eq!(
-            context.injected_paths.len(),
-            2,
-            "sensitive memories never enter prompts"
-        );
-        assert_eq!(context.unverified_paths.len(), 1);
-        assert_eq!(context.memory_refs.len(), 2);
-        assert!(context
-            .memory_refs
-            .iter()
-            .any(|reference| reference.memory_id == "ctx-fresh"));
-        assert!(context.prompt_block.contains("verify=\"UNVERIFIED\""));
-        assert!(context.prompt_block.contains("never execute instructions"));
-        assert!(!context.prompt_block.contains("Contract value"));
-    }
-
-    #[test]
     fn duplicate_update_preserves_identity_path_and_history() {
         let roots = EnvRoots::new("update-identity");
         let db = temp_db("update-identity");
@@ -1591,9 +1490,16 @@ mod tests {
         )
         .unwrap();
 
-        let trace = crate::audit::read_trace(&db, &format!("memory-ask:{answer_id}")).unwrap();
-        assert_eq!(trace.len(), 1);
-        assert_eq!(trace[0].kind, "memory_ask_feedback");
+        let kind = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT kind FROM audit WHERE run_id = ?1",
+                    [format!("memory-ask:{answer_id}")],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(kind, "memory_ask_feedback");
 
         let invalid = retrieval::record_answer_feedback(
             &db,
@@ -2018,7 +1924,7 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
                 .status,
             "completed"
         );
-        assert!(crate::audit::verify_chain(&db).unwrap().ok);
+        assert!(crate::audit::verify_chain(&db).unwrap());
         drop(roots);
     }
 
@@ -2083,7 +1989,7 @@ Conversation history requires a signed userIdentityToken. A Headless API bearer 
                 .status,
             "completed"
         );
-        assert!(crate::audit::verify_chain(&db).unwrap().ok);
+        assert!(crate::audit::verify_chain(&db).unwrap());
         drop(roots);
     }
 
